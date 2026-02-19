@@ -1,0 +1,13 @@
+{
+  "Stop": [
+    {
+      "hooks": [
+        {
+          "type": "prompt",
+          "prompt": "You are the Obsidian auto-save hook. A Claude Code session has just ended.\n\nRead the session config from: ${CLAUDE_PLUGIN_ROOT}/obsidian.local.md\n\nVault path: /mnt/z/Users/nhang/Documents/Obsidian\n\nAuto-save logic:\n1. Scan the conversation for significance: was code written? Were decisions made? Was debugging resolved? Were long explanations given? Were commands run?\n2. If the conversation was trivial (e.g. just a few messages, no meaningful output), skip saving.\n3. Check for #bookmark markers in the conversation — each becomes a separate note.\n4. Check for time gaps >30 min between messages — each segment becomes a separate note.\n5. For each segment/chapter to save:\n   a. Detect domain from keywords (see routing rules in config)\n   b. Generate title: YYYY-MM-DD-topic-slug\n   c. Format as structured markdown with frontmatter, summary, key findings, details\n   d. Write to correct vault folder using Write tool\n   e. Append a link to today's daily note: ## Session Links section\n6. Do NOT open notes in GUI (session is ending — user may have closed window).\n7. If nothing worth saving: skip silently.\n\nRouting rules:\n- claude/wsl/obsidian/plugin/terminal/bash/git/code/debugging → Projects/Development/Claude-WSL/\n- physics/pinn/gauge/decon/psychohistory → Projects/Physics-AI-ML/\n- nrx/norx/peptides/hiring/operations/business → Projects/NRX-Research/\n- ambiguous → Inbox/ with #needs-filing tag",
+          "timeout": 120
+        }
+      ]
+    }
+  ]
+}
