@@ -1,0 +1,19 @@
+{
+  "name": "nhangen",
+  "description": "nhangen's Claude Code plugins",
+  "owner": {
+    "name": "nhangen"
+  },
+  "plugins": [
+    {
+      "name": "obsidian",
+      "description": "Obsidian vault integration for Claude Code. Export conversations, create/retrieve notes, auto-organize content, and open notes in the Obsidian GUI.",
+      "version": "1.0.0",
+      "author": {
+        "name": "nhangen"
+      },
+      "source": ".",
+      "category": "productivity"
+    }
+  ]
+}
