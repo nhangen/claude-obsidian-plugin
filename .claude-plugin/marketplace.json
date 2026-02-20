@@ -1,4 +1,5 @@
 {
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
   "name": "nhangen",
   "description": "nhangen's Claude Code plugins",
   "owner": {
@@ -12,7 +13,7 @@
       "author": {
         "name": "nhangen"
       },
-      "source": ".",
+      "source": "./",
       "category": "productivity"
     }
   ]
