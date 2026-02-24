@@ -1,6 +1,6 @@
 {
   "name": "obsidian",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Obsidian vault integration for Claude Code. Export conversations, create/retrieve notes, auto-organize content, and open notes in the Obsidian GUI.",
   "author": {
     "name": "nhang"
