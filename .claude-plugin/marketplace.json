@@ -8,8 +8,8 @@
   "plugins": [
     {
       "name": "obsidian",
-      "description": "Obsidian vault integration for Claude Code. Export conversations, create/retrieve notes, auto-organize content, and open notes in the Obsidian GUI.",
-      "version": "1.0.1",
+      "description": "Obsidian vault integration for Claude Code. Auto-capture git commit context, query past work with /recall, export conversations, create/retrieve notes, and auto-organize content.",
+      "version": "1.1.0",
       "author": {
         "name": "nhangen"
       },
