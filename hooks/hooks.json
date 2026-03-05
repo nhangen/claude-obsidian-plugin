@@ -5,11 +5,33 @@
       "hooks": [
         {
           "type": "prompt",
-          "prompt": "You are the Obsidian auto-save hook. A Claude Code session has just ended.\n\nRead the session config from: ${CLAUDE_PLUGIN_ROOT}/obsidian.local.md\n\nVault path: /mnt/z/Users/nhang/Documents/Obsidian\n\nAuto-save logic:\n1. Scan the conversation for significance: was code written? Were decisions made? Was debugging resolved? Were long explanations given? Were commands run?\n2. If the conversation was trivial (e.g. just a few messages, no meaningful output), skip saving.\n3. Check for #bookmark markers in the conversation — each becomes a separate note.\n4. Check for time gaps >30 min between messages — each segment becomes a separate note.\n5. For each segment/chapter to save:\n   a. Detect domain from keywords (see routing rules in config)\n   b. Generate title: YYYY-MM-DD-topic-slug\n   c. Format as structured markdown with frontmatter, summary, key findings, details\n   d. Write to correct vault folder using Write tool\n   e. Append a link to today's daily note: ## Session Links section\n6. Do NOT open notes in GUI (session is ending — user may have closed window).\n7. If nothing worth saving: skip silently.\n\nRouting rules:\n- claude/wsl/obsidian/plugin/terminal/bash/git/code/debugging → Projects/Development/Claude-WSL/\n- physics/pinn/gauge/decon/psychohistory → Projects/Physics-AI-ML/\n- nrx/norx/peptides/hiring/operations/business → Projects/NRX-Research/\n- ambiguous → Inbox/ with #needs-filing tag",
+          "prompt": "You are the Obsidian auto-save hook. A Claude Code session has just ended.\n\nRead the session config from: ${CLAUDE_PLUGIN_ROOT}/obsidian.local.md\nUse the vault_path from that config file (do NOT hardcode a path).\n\nAuto-save logic:\n1. Scan the conversation for significance: was code written? Were decisions made? Was debugging resolved? Were long explanations given? Were commands run?\n2. If the conversation was trivial (e.g. just a few messages, no meaningful output), skip saving.\n3. Check for #bookmark markers in the conversation — each becomes a separate note.\n4. Check for time gaps >30 min between messages — each segment becomes a separate note.\n5. For each segment/chapter to save:\n   a. Detect domain from keywords (see routing rules in config)\n   b. Generate title: YYYY-MM-DD-topic-slug\n   c. Format as structured markdown with frontmatter, summary, key findings, details\n   d. Write to correct vault folder using Write tool\n   e. Append a link to today's daily note: ## Session Links section\n6. Do NOT open notes in GUI (session is ending — user may have closed window).\n7. If nothing worth saving: skip silently.\n\nRouting rules are defined in obsidian.local.md. Read them from there.",
           "timeout": 120
         }
       ]
     }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/scripts/commit-detect.sh\"",
+            "timeout": 10
+          }
+        ]
+      },
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "prompt",
+            "prompt": "Check if the file $TMPDIR/obsidian-commit-meta.json (or /tmp/obsidian-commit-meta.json) exists and was modified within the last 30 seconds. Use: stat or ls -la on the file.\n\nIf it does NOT exist or is stale, respond with just 'skip' and do nothing else.\n\nIf it DOES exist and is fresh, read it — it contains: hash, msg, branch, files, remote, org_repo, repo_name, ticket, date, time.\n\nThen follow the obsidian-commit-capture skill at ${CLAUDE_PLUGIN_ROOT}/skills/obsidian/commit-capture/SKILL.md.\n\nStart at step 2 (determine target path). Build the session context summary and append the commit section.\n\nAfter writing the note, delete the metadata file so it doesn't trigger again.\n\nRead vault config from: ${CLAUDE_PLUGIN_ROOT}/obsidian.local.md",
+            "timeout": 30
+          }
+        ]
+      }
     ]
   }
 }
