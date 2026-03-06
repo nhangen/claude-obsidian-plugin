@@ -26,8 +26,13 @@
         "matcher": "Bash",
         "hooks": [
           {
+            "type": "command",
+            "command": "TMPDIR=\"${TMPDIR:-/tmp}\"; META=\"$TMPDIR/obsidian-commit-meta.json\"; if [ ! -f \"$META\" ]; then exit 0; fi; AGE=$(( $(date +%s) - $(stat -f %m \"$META\" 2>/dev/null || stat -c %Y \"$META\" 2>/dev/null) )); if [ \"$AGE\" -gt 30 ]; then exit 0; fi; echo \"commit-capture-ready\"",
+            "timeout": 5
+          },
+          {
             "type": "prompt",
-            "prompt": "Check if the file $TMPDIR/obsidian-commit-meta.json (or /tmp/obsidian-commit-meta.json) exists and was modified within the last 30 seconds. Use: stat or ls -la on the file.\n\nIf it does NOT exist or is stale, respond with just 'skip' and do nothing else.\n\nIf it DOES exist and is fresh, read it — it contains: hash, msg, branch, files, remote, org_repo, repo_name, ticket, date, time.\n\nThen follow the obsidian-commit-capture skill at ${CLAUDE_PLUGIN_ROOT}/skills/obsidian/commit-capture/SKILL.md.\n\nStart at step 2 (determine target path). Build the session context summary and append the commit section.\n\nAfter writing the note, delete the metadata file so it doesn't trigger again.\n\nRead vault config from: ${CLAUDE_PLUGIN_ROOT}/obsidian.local.md",
+            "prompt": "A git commit was just detected. Read the metadata from $TMPDIR/obsidian-commit-meta.json (or /tmp/obsidian-commit-meta.json).\n\nIt contains: hash, msg, branch, files, remote, org_repo, repo_name, ticket, date, time.\n\nFollow the obsidian-commit-capture skill at ${CLAUDE_PLUGIN_ROOT}/skills/obsidian/commit-capture/SKILL.md.\n\nStart at step 2 (determine target path). Build the session context summary and append the commit section.\n\nAfter writing the note, delete the metadata file so it doesn't trigger again.\n\nRead vault config from: ${CLAUDE_PLUGIN_ROOT}/obsidian.local.md",
             "timeout": 30
           }
         ]
