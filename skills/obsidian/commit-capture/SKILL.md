@@ -10,7 +10,7 @@ The value here is not commit metadata — git already has that. The value is the
 
 ## Architecture
 
-Detection and metadata extraction are handled by `scripts/commit-detect.sh` (shell script, zero AI cost). This skill is only invoked after the script confirms a commit and writes metadata to `$TMPDIR/obsidian-commit-meta.json`.
+Detection and metadata extraction are handled by `scripts/commit-capture.sh` (shell script, zero AI cost). This skill is invoked when the hook outputs a line starting with `obsidian-commit-capture:` — all metadata is inline, no file read needed.
 
 ## Config
 
@@ -18,8 +18,9 @@ Read vault path from: `${CLAUDE_PLUGIN_ROOT}/obsidian.local.md`
 
 ## Steps
 
-1. **Read metadata** from `$TMPDIR/obsidian-commit-meta.json` (or `/tmp/obsidian-commit-meta.json`).
-   It contains: `hash`, `msg`, `branch`, `files`, `remote`, `org_repo`, `repo_name`, `ticket`, `date`, `time`.
+1. **Parse inline metadata** from the hook output line:
+   `obsidian-commit-capture: hash=<h> | msg=<m> | branch=<b> | files=<f> | org_repo=<o> | repo_name=<r> | ticket=<t> | date=<d> | time=<ti>`
+   Extract: `hash`, `msg`, `branch`, `files`, `org_repo`, `repo_name`, `ticket`, `date`, `time`.
 
 2. **Determine target path** (relative to vault_path from config):
    `Projects/Development/<org_repo>/<date>.md`
@@ -72,7 +73,7 @@ Read vault path from: `${CLAUDE_PLUGIN_ROOT}/obsidian.local.md`
 
 7. **Create parent directories** if needed (`mkdir -p` via Bash).
 
-8. **Delete the metadata file** after writing the note (`rm $TMPDIR/obsidian-commit-meta.json` or `/tmp/obsidian-commit-meta.json`).
+8. **No file cleanup needed** — metadata was passed inline, no temp file was written.
 
 9. **Confirm silently** — output only: `Captured <hash> → <org_repo>/<date>.md`
 
@@ -81,4 +82,4 @@ Read vault path from: `${CLAUDE_PLUGIN_ROOT}/obsidian.local.md`
 - Do NOT open the note in Obsidian GUI
 - Do NOT modify the daily note
 - The context section is the whole point — never skip it
-- If the metadata file is missing or unreadable, skip silently
+- If the hook output line is missing or malformed, skip silently

@@ -1,8 +1,7 @@
 #!/usr/bin/env bash
 # commit-capture.sh
 # PostToolUse command hook. Detects git commits from Bash tool output,
-# writes metadata, and outputs a prompt for Claude to capture the commit
-# in Obsidian. Non-commit Bash calls exit silently (no output).
+# extracts metadata, and outputs it inline. Non-commit Bash calls exit silently.
 
 set -uo pipefail
 
@@ -99,28 +98,7 @@ while [ -n "$REMAINING" ]; do
   esac
 done
 
-# --- Write metadata file ---
+# --- Output metadata inline for the obsidian-commit-capture skill ---
 
-TMPDIR="${TMPDIR:-/tmp}"
-METADATA_FILE="$TMPDIR/obsidian-commit-meta.json"
-
-escape_json() {
-  printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g; s/	/\\t/g' | tr '\n' ' '
-}
-
-cat > "$METADATA_FILE" << JSONEOF
-{
-  "hash": "$(escape_json "$HASH")",
-  "msg": "$(escape_json "$MSG")",
-  "branch": "$(escape_json "$BRANCH")",
-  "files": "$(escape_json "$FILES")",
-  "remote": "$(escape_json "$REMOTE")",
-  "org_repo": "$(escape_json "$ORG_REPO")",
-  "repo_name": "$(escape_json "$REPO_NAME")",
-  "ticket": "$(escape_json "$TICKET")",
-  "date": "$TODAY",
-  "time": "$NOW"
-}
-JSONEOF
-
-echo "commit-detected: ${ORG_REPO} ${HASH} on ${BRANCH} — ${MSG}"
+printf 'obsidian-commit-capture: hash=%s | msg=%s | branch=%s | files=%s | org_repo=%s | repo_name=%s | ticket=%s | date=%s | time=%s\n' \
+  "$HASH" "$MSG" "$BRANCH" "$FILES" "$ORG_REPO" "$REPO_NAME" "$TICKET" "$TODAY" "$NOW"
