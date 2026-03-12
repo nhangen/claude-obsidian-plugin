@@ -13,12 +13,7 @@ Only after a git commit succeeds (output contains `[branch hash]` pattern). Skip
 
 ## Steps
 
-1. Run the commit detection script to extract metadata:
-   ```bash
-   PLUGIN_DIR="$HOME/.claude/plugins/cache/nhangen/obsidian/1.0.0"
-   bash "$PLUGIN_DIR/scripts/commit-detect.sh" <<< "$(cat)"
-   ```
-   If `commit-detect.sh` is not available, extract manually:
+1. Extract metadata:
    ```bash
    HASH=$(git rev-parse --short HEAD)
    MSG=$(git log -1 --pretty=format:'%s')
@@ -32,7 +27,7 @@ Only after a git commit succeeds (output contains `[branch hash]` pattern). Skip
    - HTTPS `https://github.com/org/repo.git` → `org/repo`
    - No remote → `local/<dir-name>`
 
-3. Read vault path from `$PLUGIN_DIR/obsidian.local.md` (the `vault_path` frontmatter field).
+3. Find the vault config: check `~/.claude/plugins/marketplaces/nhangen/obsidian.local.md` first, then fall back to `~/Documents/Obsidian`. Read the `vault_path` frontmatter field.
 
 4. Target file: `<vault_path>/Projects/Development/<org_repo>/<YYYY-MM-DD>.md`
 

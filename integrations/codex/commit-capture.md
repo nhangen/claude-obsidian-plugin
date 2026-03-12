@@ -22,7 +22,7 @@ Only after a git commit succeeds. Do not trigger on failed commits, dry runs, or
    - HTTPS `https://github.com/org/repo.git` → `org/repo`
    - No remote → `local/<dir-name>`
 
-3. Read vault path from `~/.claude/plugins/cache/nhangen/obsidian/1.0.0/obsidian.local.md` (the `vault_path` frontmatter field). If that file doesn't exist, use `~/Documents/Obsidian` as fallback.
+3. Find the vault config: check `~/.claude/plugins/marketplaces/nhangen/obsidian.local.md` first, then fall back to `~/Documents/Obsidian` if not found. Read the `vault_path` frontmatter field.
 
 4. Target file: `<vault_path>/Projects/Development/<org_repo>/<YYYY-MM-DD>.md`
 
