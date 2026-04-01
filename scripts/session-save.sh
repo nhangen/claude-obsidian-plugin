@@ -18,8 +18,7 @@ if [ -z "$VAULT_PATH" ] || [ ! -d "$VAULT_PATH" ]; then
   exit 0
 fi
 
-TIMESTAMP=$(date '+%s')
-TMPFILE="${TMPDIR:-/tmp}/obsidian-session-${TIMESTAMP}-$$.json"
+TMPFILE="$(mktemp "${TMPDIR:-/tmp}/obsidian-session-XXXXXX.json")"
 
 cat > "$TMPFILE"
 

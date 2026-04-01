@@ -26,8 +26,8 @@ fi
 TODAY=$(date '+%Y-%m-%d')
 DAILY_NOTE="${VAULT_PATH}/Daily/${TODAY}.md"
 
-ROUTING_RULES=$(sed -n '/^## Routing Rules/,/^##/p' "$CONFIG_FILE" | head -20)
-TAXONOMY=$(sed -n '/^## Project Taxonomy/,/^##/p' "$CONFIG_FILE" | head -20)
+ROUTING_RULES=$(awk '/^## Routing Rules/ { in_section=1; next } /^## / && in_section { exit } in_section { print }' "$CONFIG_FILE" | head -20)
+TAXONOMY=$(awk '/^## Project Taxonomy/ { in_section=1; next } /^## / && in_section { exit } in_section { print }' "$CONFIG_FILE" | head -20)
 
 PROMPT=$(cat <<'PROMPT_EOF'
 You are a session-to-Obsidian note converter. You receive a Claude Code conversation transcript (JSON).
@@ -119,6 +119,8 @@ TITLE=$(printf '%s\n' "$RESULT" | grep '^# ' | head -1 | sed 's/^# //')
 : "${TITLE:=$SLUG}"
 
 LINK_LINE="- [[${RELATIVE_NOTE_PATH}|${TITLE}]]"
+
+mkdir -p "$(dirname "$DAILY_NOTE")"
 
 if [ ! -f "$DAILY_NOTE" ]; then
   cat > "$DAILY_NOTE" <<DAILY_EOF
