@@ -9,7 +9,7 @@ Obsidian vault integration for Claude Code. Export conversations, create and ret
 - **Create notes** — new notes or full project folder structures
 - **Daily note** — append to or read today's daily note
 - **Reorganize** — deep vault analysis with a dedicated subagent
-- **Session-end hook** — auto-saves significant sessions silently on close
+- **Session-end hook** — auto-saves significant sessions via background `claude --print` summarizer (no timeout limits)
 - **Obsidian URI integration** — opens notes directly in the GUI after writing
 
 ## Skills (natural language)

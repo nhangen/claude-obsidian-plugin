@@ -1,7 +1,7 @@
 {
   "name": "obsidian",
-  "version": "1.1.2",
-  "description": "Obsidian vault integration for Claude Code. Auto-capture git commit context, query past work with /recall, export conversations, create/retrieve notes, and auto-organize content.",
+  "version": "1.2.0",
+  "description": "Obsidian vault integration for Claude Code. Auto-capture git commit context, auto-save sessions via background claude CLI summarizer, export conversations, create/retrieve notes, and auto-organize content.",
   "author": {
     "name": "nhangen"
   },
