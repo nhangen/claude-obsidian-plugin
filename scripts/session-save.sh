@@ -19,7 +19,7 @@ if [ -z "$VAULT_PATH" ] || [ ! -d "$VAULT_PATH" ]; then
 fi
 
 TIMESTAMP=$(date '+%s')
-TMPFILE="${TMPDIR:-/tmp}/obsidian-session-${TIMESTAMP}.json"
+TMPFILE="${TMPDIR:-/tmp}/obsidian-session-${TIMESTAMP}-$$.json"
 
 cat > "$TMPFILE"
 

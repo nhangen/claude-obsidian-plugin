@@ -75,28 +75,47 @@ PROMPT="${PROMPT/TAXONOMY_PLACEHOLDER/$TAXONOMY}"
 
 RESULT=$(claude --print --bare --system-prompt "$PROMPT" --max-budget-usd 0.10 < "$TMPFILE" 2>/dev/null) || exit 1
 
-if [ -z "$RESULT" ] || [ "$RESULT" = "SKIP" ]; then
+TRIMMED=$(printf '%s' "$RESULT" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+if [ -z "$TRIMMED" ] || [ "$TRIMMED" = "SKIP" ]; then
   exit 0
 fi
 
-VAULT_FOLDER=$(echo "$RESULT" | grep '^vault_folder:' | head -1 | sed 's/^vault_folder:[[:space:]]*//')
-SLUG=$(echo "$RESULT" | grep '^slug:' | head -1 | sed 's/^slug:[[:space:]]*//')
+VAULT_FOLDER=$(printf '%s\n' "$RESULT" | grep '^vault_folder:' | head -1 | sed 's/^vault_folder:[[:space:]]*//')
+SLUG=$(printf '%s\n' "$RESULT" | grep '^slug:' | head -1 | sed 's/^slug:[[:space:]]*//')
 
 : "${VAULT_FOLDER:=Inbox/}"
 : "${SLUG:=session-note}"
 
+# Sanitize: strip path traversal, restrict slug to safe characters
+VAULT_FOLDER=$(printf '%s' "$VAULT_FOLDER" | sed 's|\.\./||g; s|^\./||; s|^/||')
+SLUG=$(printf '%s' "$SLUG" | sed 's/[^a-z0-9-]//g')
+: "${SLUG:=session-note}"
+
+# Ensure trailing slash on vault_folder
+case "$VAULT_FOLDER" in
+  */) ;;
+  *)  VAULT_FOLDER="${VAULT_FOLDER}/" ;;
+esac
+
 NOTE_DIR="${VAULT_PATH}/${VAULT_FOLDER}"
+
+# Resolve and verify the target stays inside the vault
+RESOLVED_VAULT=$(cd "$VAULT_PATH" && pwd -P)
 mkdir -p "$NOTE_DIR"
+RESOLVED_DIR=$(cd "$NOTE_DIR" && pwd -P)
+case "$RESOLVED_DIR" in
+  "${RESOLVED_VAULT}"*) ;;
+  *) exit 1 ;;
+esac
 
 NOTE_FILENAME="${TODAY}-${SLUG}.md"
 NOTE_PATH="${NOTE_DIR}/${NOTE_FILENAME}"
 
-# Strip the frontmatter vault_folder and slug lines (internal-only metadata)
-CLEAN_RESULT=$(echo "$RESULT" | sed '/^vault_folder:/d; /^slug:/d')
+CLEAN_RESULT=$(printf '%s\n' "$RESULT" | sed '/^vault_folder:/d; /^slug:/d')
 printf '%s\n' "$CLEAN_RESULT" > "$NOTE_PATH"
 
 RELATIVE_NOTE_PATH="${VAULT_FOLDER}${NOTE_FILENAME%.md}"
-TITLE=$(echo "$RESULT" | grep '^# ' | head -1 | sed 's/^# //')
+TITLE=$(printf '%s\n' "$RESULT" | grep '^# ' | head -1 | sed 's/^# //')
 : "${TITLE:=$SLUG}"
 
 LINK_LINE="- [[${RELATIVE_NOTE_PATH}|${TITLE}]]"
