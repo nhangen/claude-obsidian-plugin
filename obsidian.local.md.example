@@ -1,41 +1,37 @@
 ---
-vault_path: /mnt/z/Users/nhang/Documents/Obsidian
+vault_path: /Users/yourname/Documents/Obsidian
 vault_name: Obsidian
-vault_windows_path: Z:\Users\nhang\Documents\Obsidian
-wsl_symlink: ~/obsidian
 auto_save: true
 auto_open: true
 time_gap_minutes: 30
 smart_detect: true
 domains:
   - Development
-  - Physics-AI-ML
-  - NRX-Research
+  - Work
   - Personal
-  - VR-and-E
-  - TARS
+  - Learning
 ---
 
 # Obsidian Plugin Config
 
-Vault is at `/mnt/z/Users/nhang/Documents/Obsidian` on the WSL side.
-Symlinked at `~/obsidian` for convenience.
+Vault is at `/Users/yourname/Documents/Obsidian`.
+
+Run `/obsidian:setup` to generate this file interactively, or copy and edit manually.
 
 ## Project Taxonomy
 
 | Domain | Vault path | Notes |
 |--------|-----------|-------|
-| Development | Projects/Development/ | Claude sessions, tooling, WSL, Obsidian plugin |
-| Physics/AI/ML | Projects/Physics-AI-ML/ | DeCoN, Memory-Dynamics, Psychohistory-ECI |
-| NRX Research | Projects/NRX-Research/ | Operations, Hiring, Meetings |
-| Personal | Projects/Personal/ | Personal notes |
-| VR&E | Projects/VR-and-E/ | |
-| TARS | TARS/ | AI agent configs and patches |
+| Development | Projects/Development/ | Code, tools, debugging |
+| Work | Projects/Work/ | Client/employer work, meetings |
+| Personal | Projects/Personal/ | Personal notes, goals |
+| Learning | Projects/Learning/ | Books, courses, research |
 
 ## Routing Rules
 
-- Keywords "claude", "wsl", "obsidian", "plugin", "terminal" → Projects/Development/
-- Keywords "physics", "pinn", "gauge", "decon", "psychohistory", "memory dynamics" → Projects/Physics-AI-ML/
-- Keywords "nrx", "norx", "peptides", "hiring", "operations", "business" → Projects/NRX-Research/
-- Keywords "daily", "journal", "today" → Daily/
+- Keywords "code, git, bug, deploy, api, plugin, terminal, claude" → Projects/Development/
+- Keywords "client, meeting, standup, sprint, project, jira, ticket" → Projects/Work/
+- Keywords "personal, journal, health, goals, finance" → Projects/Personal/
+- Keywords "book, course, paper, research, study, learn" → Projects/Learning/
+- Keywords "daily, journal, today" → Daily/
 - Ambiguous → Inbox/ (with #needs-filing tag)
