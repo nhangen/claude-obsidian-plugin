@@ -1,7 +1,7 @@
 ---
 vault_path: /Users/yourname/Documents/Obsidian
 vault_name: Obsidian
-daily_path: Daily
+daily_path: Daily/
 auto_save: true
 auto_open: true
 time_gap_minutes: 30

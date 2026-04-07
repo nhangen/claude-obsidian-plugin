@@ -65,7 +65,7 @@ source: claude-code
 2. **Generate title** — create descriptive kebab-case title from topic, e.g. `2026-02-19-obsidian-vault-consolidation`
 3. **Build content** — format conversation as structured markdown per template above
 4. **Determine full path** — `<vault_path>/<target-folder>/<YYYY-MM-DD-title>.md`
-5. **Create parent dirs if needed** — `mkdir -p <target-folder>`
+5. **Create parent dirs if needed** — `mkdir -p <vault_path>/<target-folder>`
 6. **Write file** — use Write tool to save
 7. **Confirm** — tell user where the file was saved
 8. **Open in GUI** — call `bash ${CLAUDE_PLUGIN_ROOT}/scripts/open-in-obsidian.sh <relative-path>`
