@@ -46,7 +46,7 @@ if [ "$FILE_SIZE" -lt 200 ]; then
 fi
 
 # Copy transcript to a temp file so session-summarize.sh can own and delete it
-TMPFILE="$(mktemp "${TMPDIR:-/tmp}/obsidian-session-XXXXXX.jsonl")"
+TMPFILE="$(mktemp "${TMPDIR:-/tmp}/obsidian-session-XXXXXX")"
 cp "$TRANSCRIPT_PATH" "$TMPFILE"
 
 nohup bash "${SCRIPT_DIR}/session-summarize.sh" "$TMPFILE" "$CONFIG_FILE" "$VAULT_PATH" &>/dev/null &
