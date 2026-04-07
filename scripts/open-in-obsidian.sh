@@ -22,10 +22,11 @@ if [ -f "$CONFIG_FILE" ]; then
   [ -n "$PARSED" ] && VAULT_NAME="$PARSED"
 fi
 
-# URL-encode the file path (spaces → %20, etc.)
-ENCODED=$(python3 -c "import urllib.parse, sys; print(urllib.parse.quote(sys.argv[1]))" "$FILE_PATH")
+# URL-encode both vault name and file path (spaces → %20, etc.)
+ENCODED_VAULT=$(python3 -c "import urllib.parse, sys; print(urllib.parse.quote(sys.argv[1]))" "$VAULT_NAME")
+ENCODED_FILE=$(python3 -c "import urllib.parse, sys; print(urllib.parse.quote(sys.argv[1]))" "$FILE_PATH")
 
-URI="obsidian://open?vault=${VAULT_NAME}&file=${ENCODED}"
+URI="obsidian://open?vault=${ENCODED_VAULT}&file=${ENCODED_FILE}"
 
 case "$(uname -s)" in
   Darwin)
