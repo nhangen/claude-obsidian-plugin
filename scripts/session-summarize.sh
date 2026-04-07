@@ -24,7 +24,9 @@ if ! command -v claude &>/dev/null; then
 fi
 
 TODAY=$(date '+%Y-%m-%d')
-DAILY_NOTE="${VAULT_PATH}/Daily/${TODAY}.md"
+DAILY_SUBPATH=$(grep '^daily_path:' "$CONFIG_FILE" | head -1 | sed 's/^daily_path:[[:space:]]*//' | sed 's|/$||')
+: "${DAILY_SUBPATH:=Daily}"
+DAILY_NOTE="${VAULT_PATH}/${DAILY_SUBPATH}/${TODAY}.md"
 
 ROUTING_RULES=$(awk '/^## Routing Rules/ { in_section=1; next } /^## / && in_section { exit } in_section { print }' "$CONFIG_FILE" | head -20)
 TAXONOMY=$(awk '/^## Project Taxonomy/ { in_section=1; next } /^## / && in_section { exit } in_section { print }' "$CONFIG_FILE" | head -20)
