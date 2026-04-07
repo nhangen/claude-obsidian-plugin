@@ -14,6 +14,11 @@ if [ ! -f "$CONFIG_FILE" ]; then
   exit 0
 fi
 
+AUTO_SAVE=$(grep '^auto_save:' "$CONFIG_FILE" | head -1 | sed 's/^auto_save:[[:space:]]*//')
+if [ "$AUTO_SAVE" = "false" ]; then
+  exit 0
+fi
+
 VAULT_PATH=$(grep '^vault_path:' "$CONFIG_FILE" | head -1 | sed 's/^vault_path:[[:space:]]*//')
 if [ -z "$VAULT_PATH" ] || [ ! -d "$VAULT_PATH" ]; then
   exit 0
