@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # session-save.sh
-# Stop command hook. Saves the conversation transcript to a temp file
-# and spawns session-summarize.sh in the background. Exits immediately.
+# Stop command hook. Reads transcript_path from the hook event JSON on stdin,
+# copies the transcript, and spawns session-summarize.sh in the background.
+# Exits immediately.
 
 set -uo pipefail
 
@@ -18,15 +19,30 @@ if [ -z "$VAULT_PATH" ] || [ ! -d "$VAULT_PATH" ]; then
   exit 0
 fi
 
-TMPFILE="$(mktemp "${TMPDIR:-/tmp}/obsidian-session-XXXXXX.json")"
+# Command hooks receive a JSON payload on stdin, not the transcript itself.
+# Extract transcript_path from the payload.
+HOOK_JSON=$(cat)
+TRANSCRIPT_PATH=$(printf '%s' "$HOOK_JSON" | python3 -c "
+import json, sys
+try:
+    d = json.load(sys.stdin)
+    print(d.get('transcript_path', ''))
+except Exception:
+    pass
+" 2>/dev/null || true)
 
-cat > "$TMPFILE"
-
-FILE_SIZE=$(wc -c < "$TMPFILE" | tr -d ' ')
-if [ "$FILE_SIZE" -lt 200 ]; then
-  rm -f "$TMPFILE"
+if [ -z "$TRANSCRIPT_PATH" ] || [ ! -f "$TRANSCRIPT_PATH" ]; then
   exit 0
 fi
+
+FILE_SIZE=$(wc -c < "$TRANSCRIPT_PATH" | tr -d ' ')
+if [ "$FILE_SIZE" -lt 200 ]; then
+  exit 0
+fi
+
+# Copy transcript to a temp file so session-summarize.sh can own and delete it
+TMPFILE="$(mktemp "${TMPDIR:-/tmp}/obsidian-session-XXXXXX.jsonl")"
+cp "$TRANSCRIPT_PATH" "$TMPFILE"
 
 nohup bash "${SCRIPT_DIR}/session-summarize.sh" "$TMPFILE" "$CONFIG_FILE" "$VAULT_PATH" &>/dev/null &
 
