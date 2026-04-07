@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # session-save.sh
-# Stop command hook. Saves the conversation transcript to a temp file
-# and spawns session-summarize.sh in the background. Exits immediately.
+# Stop command hook. Reads transcript_path from the hook event JSON on stdin,
+# copies the transcript, and spawns session-summarize.sh in the background.
+# Exits immediately.
 
 set -uo pipefail
 
@@ -13,17 +14,45 @@ if [ ! -f "$CONFIG_FILE" ]; then
   exit 0
 fi
 
+AUTO_SAVE=$(grep '^auto_save:' "$CONFIG_FILE" | head -1 | sed 's/^auto_save:[[:space:]]*//')
+if [ "$AUTO_SAVE" = "false" ]; then
+  exit 0
+fi
+
 VAULT_PATH=$(grep '^vault_path:' "$CONFIG_FILE" | head -1 | sed 's/^vault_path:[[:space:]]*//')
 if [ -z "$VAULT_PATH" ] || [ ! -d "$VAULT_PATH" ]; then
   exit 0
 fi
 
-TMPFILE="$(mktemp "${TMPDIR:-/tmp}/obsidian-session-XXXXXX.json")"
+if ! command -v python3 >/dev/null 2>&1; then
+  echo "session-save.sh: python3 not found; autosave requires python3 to parse hook JSON" >&2
+  exit 0
+fi
 
-cat > "$TMPFILE"
+# Command hooks receive a JSON payload on stdin, not the transcript itself.
+# Extract transcript_path from the payload.
+HOOK_JSON=$(cat)
+TRANSCRIPT_PATH=$(printf '%s' "$HOOK_JSON" | python3 -c "
+import json, sys
+try:
+    d = json.load(sys.stdin)
+    print(d.get('transcript_path', ''))
+except Exception as e:
+    print(f'session-save.sh: failed to parse hook JSON: {e}', file=sys.stderr)
+" 2>/dev/null || true)
 
-FILE_SIZE=$(wc -c < "$TMPFILE" | tr -d ' ')
-if [ "$FILE_SIZE" -lt 200 ]; then
+if [ -z "$TRANSCRIPT_PATH" ] || [ ! -f "$TRANSCRIPT_PATH" ]; then
+  exit 0
+fi
+
+FILE_SIZE=$(wc -c < "$TRANSCRIPT_PATH" 2>/dev/null | tr -d ' ')
+if [ -z "$FILE_SIZE" ] || [ "$FILE_SIZE" -lt 200 ]; then
+  exit 0
+fi
+
+# Copy transcript to a temp file so session-summarize.sh can own and delete it
+TMPFILE="$(mktemp "${TMPDIR:-/tmp}/obsidian-session-XXXXXX")" || exit 0
+if ! cp "$TRANSCRIPT_PATH" "$TMPFILE"; then
   rm -f "$TMPFILE"
   exit 0
 fi
