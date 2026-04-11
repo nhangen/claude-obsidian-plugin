@@ -61,14 +61,15 @@ source: claude-code
 
 ## Steps
 
-1. **Detect topic and routing** — scan conversation context for domain keywords, determine target folder
-2. **Generate title** — create descriptive kebab-case title from topic, e.g. `2026-02-19-obsidian-vault-consolidation`
-3. **Build content** — format conversation as structured markdown per template above
-4. **Determine full path** — `<vault_path>/<target-folder>/<YYYY-MM-DD-title>.md`
-5. **Create parent dirs if needed** — `mkdir -p <vault_path>/<target-folder>`
-6. **Write file** — use Write tool to save
-7. **Confirm** — tell user where the file was saved
-8. **Open in GUI** — call `bash ${CLAUDE_PLUGIN_ROOT}/scripts/open-in-obsidian.sh <relative-path>`
+1. **Check vault conventions** — if `VAULT.md` exists at the vault root, read it for vault-specific conventions (e.g., session template, domain folders, linking rules)
+2. **Detect topic and routing** — scan conversation context for domain keywords, determine target folder
+3. **Generate title** — create descriptive kebab-case title from topic, e.g. `2026-02-19-obsidian-vault-consolidation`
+4. **Build content** — format conversation as structured markdown per template above (or use `Templates/session.md` from vault if it exists)
+5. **Determine full path** — `<vault_path>/<target-folder>/<YYYY-MM-DD-title>.md`
+6. **Create parent dirs if needed** — `mkdir -p <vault_path>/<target-folder>`
+7. **Write file** — use Write tool to save
+8. **Confirm** — tell user where the file was saved
+9. **Open in GUI** — call `bash ${CLAUDE_PLUGIN_ROOT}/scripts/open-in-obsidian.sh <relative-path>`
 
 ## Chapter Segmentation
 

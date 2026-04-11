@@ -10,19 +10,25 @@ Creates new notes or project structures in the vault.
 
 ## Vault Path
 
-`/mnt/z/Users/nhang/Documents/Obsidian`
+Read `vault_path` from `${CLAUDE_PLUGIN_ROOT}/obsidian.local.md`. Example:
+```bash
+VAULT_PATH=$(grep '^vault_path:' "${CLAUDE_PLUGIN_ROOT}/obsidian.local.md" | sed 's/vault_path: //')
+```
+
+If `obsidian.local.md` does not exist, tell the user to run `/obsidian:setup` first and stop.
 
 ## Steps
 
-1. **Determine type** — single note, project folder (with README + subfolders), or page in existing project
-2. **Route to correct domain** — use routing logic from `obsidian-save-conversation` skill
-3. **Generate content** — create appropriate starter template:
+1. **Check for vault conventions** — if `VAULT.md` exists at the vault root, read it. Follow any structure conventions it defines (e.g., custom note types, templates folder, naming conventions). If no `VAULT.md` exists, use the defaults below.
+2. **Determine type** — single note, project folder (with README + subfolders), or page in existing project
+3. **Route to correct domain** — use routing logic from `obsidian-save-conversation` skill
+4. **Generate content** — create appropriate starter template:
    - Single note: title + frontmatter + H1 + empty sections
    - Project: `README.md` + subfolders (Plans, Notes, Meetings as appropriate)
-4. **Create dirs if needed** — `mkdir -p <path>`
-5. **Write file(s)** — use Write tool
-6. **Confirm path** — tell user exactly where it was created
-7. **Open in GUI** — `bash ${CLAUDE_PLUGIN_ROOT}/scripts/open-in-obsidian.sh <path>`
+5. **Create dirs if needed** — `mkdir -p <path>`
+6. **Write file(s)** — use Write tool
+7. **Confirm path** — tell user exactly where it was created
+8. **Open in GUI** — `bash ${CLAUDE_PLUGIN_ROOT}/scripts/open-in-obsidian.sh <path>`
 
 ## Note Template
 

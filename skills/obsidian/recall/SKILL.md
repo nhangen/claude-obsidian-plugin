@@ -21,6 +21,7 @@ Extract from the natural language query:
   - Default: last 14 days if no time range specified
 - **Keywords**: everything remaining after extracting tickets and time ranges
 - **Repo hint**: if query mentions a specific project name, use it to filter git/GitHub results
+- **Vault conventions**: If `VAULT.md` exists at the vault root, read it for vault-specific structure and conventions. Follow any instructions it contains for search scoping, domain awareness, and pending questions.
 
 ## Step 2: Search All Sources
 
