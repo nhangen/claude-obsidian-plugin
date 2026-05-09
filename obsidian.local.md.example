@@ -7,6 +7,7 @@ auto_open: true
 time_gap_minutes: 30
 smart_detect: true
 strict_domains: true
+dedup_jaccard_threshold: 0.4
 domains:
   - Development
   - Work
