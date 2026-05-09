@@ -158,7 +158,7 @@ After a successful new-file write, check whether the parent folder has grown a c
    - The parent folder is already inside a per-idea subfolder (e.g. `Projects/Physics-AI-ML/DeCoN/notes/`) — promotion only fires at the *parent of loose notes*, not nested.
    - `moc_promotion: false` is set in `obsidian.local.md` frontmatter.
 
-2. **Cluster detection** — In the parent folder (non-recursive), find all `.md` files whose slug shares ≥ 2 tokens after applying the same token filter from "Same-Day Dedup Check" (drop purely-numeric and single-character tokens). Use the longest shared token-prefix as the candidate **topic stem**.
+2. **Cluster detection** — In the parent folder (non-recursive), find all `.md` files whose slug shares ≥ 2 tokens after applying the same token filter from "Same-Day Dedup Check" (drop purely-numeric and single-character tokens). Identify the candidate **topic stem** using the precise rule in the "Tokenization for stem detection" section below — do not pick stem by length alone here.
    - Minimum cluster size: 3 (configurable via `moc_promotion_threshold` in config; default 3).
    - The new file just written counts toward the cluster.
 
