@@ -6,6 +6,7 @@ auto_save: true
 auto_open: true
 time_gap_minutes: 30
 smart_detect: true
+strict_domains: true
 domains:
   - Development
   - Work
@@ -27,6 +28,10 @@ Run `/obsidian:setup` to generate this file interactively, or copy and edit manu
 | Work | Projects/Work/ | Client/employer work, meetings |
 | Personal | Projects/Personal/ | Personal notes, goals |
 | Learning | Projects/Learning/ | Books, courses, research |
+| Daily | Daily/ | Date-stamped daily notes |
+| Inbox | Inbox/ | Fallback for ambiguous notes |
+
+The `Vault path` column above is the **canonical allow-list**. Skills validate every save target against this list and refuse to create folders outside it. To add a new top-level folder, add a row here (or rerun `/obsidian:setup`) — never let routine saves create new top-level folders.
 
 ## Routing Rules
 
@@ -36,3 +41,15 @@ Run `/obsidian:setup` to generate this file interactively, or copy and edit manu
 - Keywords "book, course, paper, research, study, learn" → Projects/Learning/
 - Keywords "daily, journal, today" → Daily/
 - Ambiguous → Inbox/ (with #needs-filing tag)
+
+## Strict Domain Validation
+
+When `strict_domains: true` (default), the save/create skills:
+
+1. Parse the `## Project Taxonomy` table and treat the `Vault path` column as the canonical allow-list of top-level folders.
+2. Before writing, verify the resolved target's top-level folder is in the allow-list. Dated subfolders and per-repo namespacing *under* an allow-listed root are fine.
+3. On miss: refuse to write, surface the closest matching allow-listed folder, and tell the user to either correct the topic hint or add the folder to `## Project Taxonomy` via `/obsidian:setup`.
+
+This prevents silent alias folders (`AM/` alongside `Awesome Motive/`, `Obsidian Daily/` alongside `Daily/`). Failure-mode reference: the `enum-config-typo-fallback` pattern — string fields selecting a code path must reject unknown values, not coerce to a default.
+
+To opt out (not recommended), set `strict_domains: false`.

@@ -105,6 +105,7 @@ auto_save: true
 auto_open: true
 time_gap_minutes: 30
 smart_detect: true
+strict_domains: true
 domains:
 DOMAIN_LIST
 ---
@@ -119,6 +120,9 @@ Vault is at `VAULT_ABSOLUTE_PATH`.
 |--------|-----------|-------|
 TAXONOMY_ROWS
 | Daily | DAILY_PATH | |
+| Inbox | INBOX_PATH | Fallback for ambiguous notes |
+
+The `Vault path` column above is the canonical allow-list of top-level folders. Skills refuse to write outside this list while `strict_domains: true`.
 
 ## Routing Rules
 
@@ -149,3 +153,4 @@ Tell the user:
 - `vault_name` is read by `open-in-obsidian.sh` to construct the Obsidian URI — it must match the vault name shown in the Obsidian app's vault switcher
 - Routing Rules section is read verbatim by `session-summarize.sh` and passed to Claude — plain English descriptions work best
 - The `domains` YAML list is metadata only; routing is driven by the `## Routing Rules` section
+- `strict_domains: true` (default) makes `## Project Taxonomy`'s `Vault path` column the canonical allow-list. Skills refuse to write to top-level folders that are not on the list, preventing silent alias folders. To add a new top-level folder, add a Project Taxonomy row (or rerun `/obsidian:setup`) — never let routine saves create new folders.
