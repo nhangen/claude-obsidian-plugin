@@ -19,13 +19,36 @@ Vault path: read `vault_path` field from `${CLAUDE_PLUGIN_ROOT}/obsidian.local.m
 Read routing rules from `${CLAUDE_PLUGIN_ROOT}/obsidian.local.md`:
 
 1. Extract the `## Routing Rules` section from the config file
-2. Extract the `## Project Taxonomy` section for folder paths
+2. Extract the `## Project Taxonomy` section for folder paths — the `Vault path` column is the **canonical allow-list** of top-level folders
 3. Match the conversation's dominant topics against the keywords in those sections
 4. Use the matching target folder from the taxonomy
 
 If `obsidian.local.md` does not exist, tell the user to run `/obsidian:setup` first and stop.
 
-If the user provides a topic hint (e.g. "/obsidian:save WSL setup"), use it to override the keyword-based routing — look for the closest matching domain in the taxonomy.
+If the user provides a topic hint (e.g. "/obsidian:save WSL setup"), use it to override the keyword-based routing — look for the closest matching domain **that exists in the taxonomy**. The hint must resolve to a row already in `## Project Taxonomy`. If it does not, stop and tell the user:
+
+> Topic hint `<hint>` did not match any allow-listed domain. Allow-listed domains: `<list>`. Either correct the hint or add a row to `## Project Taxonomy` via `/obsidian:setup`.
+
+Never let a fuzzy hint create a new top-level folder.
+
+## Allow-list Validation (strict_domains)
+
+`strict_domains` defaults to **`true`** when the field is absent from the config frontmatter. Treat the field as opt-out, not opt-in. Only `strict_domains: false` (explicit) skips validation.
+
+When strict mode is on, validate the resolved target before any write:
+
+1. Parse the `## Project Taxonomy` table; collect every value in the `Vault path` column as the canonical allow-list (e.g. `Projects/Development/`, `Daily/`, `Inbox/`).
+2. Normalize both the allow-list entries and the resolved target before comparison: strip any trailing `/`, and lowercase both sides. The on-disk filesystem is often case-insensitive (macOS HFS+, default APFS); the prompt comparison must match.
+3. Compute the resolved target's **top-level prefix** — i.e. the path up to and including the first allow-listed root match. Dated subfolders and per-repo namespacing *under* an allow-listed root are valid (e.g. `Projects/Development/nhangen/foo/2026-05-09.md` is fine because `Projects/Development/` is allow-listed).
+4. If no normalized allow-list entry is a prefix of the normalized target, **refuse to write**. Surface the closest match (Levenshtein on the top-level component, in the original casing from the taxonomy) and tell the user:
+
+   > Refusing to write to `<target>` — top-level folder is not in the allow-list. Closest match: `<closest>`. Either correct the topic hint, or add `<target-toplevel>` to `## Project Taxonomy` in `obsidian.local.md` (or rerun `/obsidian:setup`).
+
+5. Do **not** create the unrecognized folder. The taxonomy is the only place new top-level folders get added.
+
+If `strict_domains: false`, skip this validation.
+
+Why this matters: without strict validation, a typo'd hint silently creates an alias folder (e.g. `AM/` alongside `Awesome Motive/`) that fragments the vault over time. Failure-mode reference: `enum-config-typo-fallback`.
 
 ## Output Format
 
@@ -66,10 +89,11 @@ source: claude-code
 3. **Generate title** — create descriptive kebab-case title from topic, e.g. `2026-02-19-obsidian-vault-consolidation`
 4. **Build content** — format conversation as structured markdown per template above (or use `Templates/session.md` from vault if it exists)
 5. **Determine full path** — `<vault_path>/<target-folder>/<YYYY-MM-DD-title>.md`
-6. **Create parent dirs if needed** — `mkdir -p <vault_path>/<target-folder>`
-7. **Write file** — use Write tool to save
-8. **Confirm** — tell user where the file was saved
-9. **Open in GUI** — call `bash ${CLAUDE_PLUGIN_ROOT}/scripts/open-in-obsidian.sh <relative-path>`
+6. **Validate allow-list** — `strict_domains` defaults to `true` when absent; only an explicit `false` skips validation. See "Allow-list Validation (strict_domains)" above. If the top-level folder is not allow-listed, refuse and surface the closest match. Do not create the folder. If routing landed in `Inbox/` because no clear domain matched, prompt for confirmation ("No clear domain match — routing to `Inbox/`. Confirm or supply a topic hint") rather than writing silently.
+7. **Create parent dirs if needed** — `mkdir -p <vault_path>/<target-folder>` (only after validation passes)
+8. **Write file** — use Write tool to save
+9. **Confirm** — tell user where the file was saved
+10. **Open in GUI** — call `bash ${CLAUDE_PLUGIN_ROOT}/scripts/open-in-obsidian.sh <relative-path>`
 
 ## Chapter Segmentation
 
