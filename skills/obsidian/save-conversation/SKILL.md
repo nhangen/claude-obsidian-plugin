@@ -38,12 +38,13 @@ Never let a fuzzy hint create a new top-level folder.
 When strict mode is on, validate the resolved target before any write:
 
 1. Parse the `## Project Taxonomy` table; collect every value in the `Vault path` column as the canonical allow-list (e.g. `Projects/Development/`, `Daily/`, `Inbox/`).
-2. Compute the resolved target's **top-level prefix** — i.e. the path up to and including the first allow-listed root match. Dated subfolders and per-repo namespacing *under* an allow-listed root are valid (e.g. `Projects/Development/nhangen/foo/2026-05-09.md` is fine because `Projects/Development/` is allow-listed).
-3. If no allow-list entry is a prefix of the resolved target, **refuse to write**. Surface the closest match (Levenshtein on the top-level component) and tell the user:
+2. Normalize both the allow-list entries and the resolved target before comparison: strip any trailing `/`, and lowercase both sides. The on-disk filesystem is often case-insensitive (macOS HFS+, default APFS); the prompt comparison must match.
+3. Compute the resolved target's **top-level prefix** — i.e. the path up to and including the first allow-listed root match. Dated subfolders and per-repo namespacing *under* an allow-listed root are valid (e.g. `Projects/Development/nhangen/foo/2026-05-09.md` is fine because `Projects/Development/` is allow-listed).
+4. If no normalized allow-list entry is a prefix of the normalized target, **refuse to write**. Surface the closest match (Levenshtein on the top-level component, in the original casing from the taxonomy) and tell the user:
 
    > Refusing to write to `<target>` — top-level folder is not in the allow-list. Closest match: `<closest>`. Either correct the topic hint, or add `<target-toplevel>` to `## Project Taxonomy` in `obsidian.local.md` (or rerun `/obsidian:setup`).
 
-4. Do **not** create the unrecognized folder. The taxonomy is the only place new top-level folders get added.
+5. Do **not** create the unrecognized folder. The taxonomy is the only place new top-level folders get added.
 
 If `strict_domains: false`, skip this validation.
 

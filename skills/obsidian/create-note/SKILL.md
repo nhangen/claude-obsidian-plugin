@@ -27,8 +27,9 @@ If `obsidian.local.md` does not exist, tell the user to run `/obsidian:setup` fi
    - Project: `README.md` + subfolders (Plans, Notes, Meetings as appropriate)
 5. **Validate allow-list** — `strict_domains` defaults to `true` when absent from the config frontmatter; only an explicit `false` skips validation. When on:
    - Parse the `## Project Taxonomy` table from `${CLAUDE_PLUGIN_ROOT}/obsidian.local.md`; the `Vault path` column is the canonical allow-list of top-level folders.
+   - Normalize both the allow-list entries and the resolved target before comparison: strip any trailing `/`, and lowercase both sides (macOS HFS+/default APFS is case-insensitive).
    - Compute the resolved target's top-level prefix (path up to and including the first allow-listed root match). Dated subfolders and per-repo namespacing *under* an allow-listed root are valid.
-   - If no allow-list entry is a prefix of the target, **refuse to write**. Surface the closest match (Levenshtein on the top-level component) and tell the user:
+   - If no normalized allow-list entry is a prefix of the normalized target, **refuse to write**. Surface the closest match (Levenshtein on the top-level component, original casing from the taxonomy) and tell the user:
      > Refusing to write to `<target>` — top-level folder is not in the allow-list. Closest match: `<closest>`. Either correct the topic hint, or add `<target-toplevel>` to `## Project Taxonomy` in `obsidian.local.md` (or rerun `/obsidian:setup`).
    - Do not create unrecognized top-level folders. Topic hints that fuzzy-match must themselves resolve to an existing taxonomy row.
 6. **Create dirs if needed** — `mkdir -p <path>` (only after validation passes)
