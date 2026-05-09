@@ -112,6 +112,7 @@ source: claude-code
 10. **Write or append** — use Write tool for new files; use Edit tool to append a timestamped section when the user chose append mode in step 8.
 11. **Confirm** — tell user where the file was saved (and whether it was a new file or an append)
 12. **Open in GUI** — call `bash ${CLAUDE_PLUGIN_ROOT}/scripts/open-in-obsidian.sh <relative-path>`
+13. **MOC-promotion prompt (post-save, soft)** — see "MOC-Promotion Prompt" below. After a successful new-file write, check whether the parent folder has accumulated 3+ notes sharing a topic stem. If so, prompt once to promote into a dedicated subfolder with a `README.md` index. Skip on append. Skip if the user previously declined promotion for this stem.
 
 ## Same-Day Dedup Check
 
@@ -144,6 +145,81 @@ Before writing a new note in the resolved target folder, check whether a same-da
 ### Why
 
 Recent vault reorg surfaced same-day twin notes that had to be manually merged. The skill writes a new file even when an existing same-day note covers the same ground because it never checks before writing. Globbing the target folder costs ~1 ms; the merge cost (manual or via the vault-organizer agent) is much higher.
+
+## MOC-Promotion Prompt
+
+After a successful new-file write, check whether the parent folder has grown a coherent cluster that deserves its own subfolder + index. **Soft prompt only — never auto-create.**
+
+### Steps
+
+1. **Skip conditions** — Skip immediately if any of:
+   - The save was an append (not a new file).
+   - The user has previously declined promotion for this topic-stem in the current session (track in the same in-memory cache as the Cross-Domain Tiebreaker, with a separate key prefix like `moc-declined:<stem>`).
+   - The parent folder is already inside a per-idea subfolder (e.g. `Projects/Physics-AI-ML/DeCoN/notes/`) — promotion only fires at the *parent of loose notes*, not nested.
+   - `moc_promotion: false` is set in `obsidian.local.md` frontmatter.
+
+2. **Cluster detection** — In the parent folder (non-recursive), find all `.md` files whose slug shares ≥ 2 tokens after applying the same token filter from "Same-Day Dedup Check" (drop purely-numeric and single-character tokens). Use the longest shared token-prefix as the candidate **topic stem**.
+   - Minimum cluster size: 3 (configurable via `moc_promotion_threshold` in config; default 3).
+   - The new file just written counts toward the cluster.
+
+3. **Prompt once** — if a cluster ≥ 3 is found, surface:
+   > Folder `<parent>/` has accumulated 3+ notes sharing the topic stem `<stem>`:
+   > - `<file-1>`
+   > - `<file-2>`
+   > - `<file-3>` (just written)
+   >
+   > Promote `<stem>` to its own subfolder with a `README.md` index?
+   > - **yes** → move matching files into `<parent>/<Stem>/notes/` and create `<parent>/<Stem>/README.md` with a stub MOC linking each note
+   > - **no** → leave files where they are, remember the decline so we don't ask again this session
+
+4. **On accept**:
+   - **Pre-move wikilink scan** — before any `mv`, grep the vault for each candidate file's wikilink form: `grep -rl "\[\[<filename-without-ext>\]\]" "<vault_path>" --include="*.md"` per file. If any references exist, surface them:
+     > Promoting will break the following wikilinks (Obsidian will not auto-update them via shell `mv`):
+     > - `<note-with-link>` → `[[<broken-target>]]`
+     >
+     > Continue anyway? (yes/no — recommend running Obsidian's "Update links on rename" manually after if you proceed)
+
+     If the user declines on the link-warning prompt, treat as an MOC decline (cache it) and stop.
+   - `mkdir -p "<parent>/<Stem>/notes"` — these writes operate under the already-validated parent folder and bypass the Step 7 allow-list check by design.
+   - Move matching files: `mv "<parent>/<file-N>" "<parent>/<Stem>/notes/"` (preserves frontmatter — no content edits).
+   - Write a stub `<parent>/<Stem>/README.md`:
+     ```markdown
+     ---
+     date: <YYYY-MM-DD>
+     type: moc
+     tags: [moc, <stem>]
+     ---
+
+     # <Stem-title-cased>
+
+     ## Notes
+
+     - [[notes/<file-1>]]
+     - [[notes/<file-2>]]
+     - [[notes/<file-3>]]
+
+     ## Related
+
+     -
+     ```
+   - Confirm to user with the new paths.
+
+5. **On decline**: write `moc-declined:<stem>` to the session cache and move on. Do not ask again this session.
+
+### Tokenization for stem detection
+
+Same filter as dedup: split slug on `-`, lowercase, drop tokens that are purely numeric (`2026`, `04`) or exactly one character (`a`, `v`, `x`). Keep 2-char tokens (`pr`, `om`, `wp`, `ai`).
+
+**Stem selection (precise rule):**
+1. For each filtered token, count the **number of distinct file-slugs in the candidate cluster that contain it** (not total occurrences across all files).
+2. Pick the token with the highest distinct-file count. That token must appear in **every** file in the candidate cluster — otherwise the cluster isn't coherent enough to promote, abort the prompt.
+3. **Tie-break:** if multiple tokens are tied on distinct-file count, pick the longest token (by character count). If still tied, pick alphabetically first. Always pick a single token, never a contiguous sequence — false-positive risk on overlapping tokens that happen to appear in different slug positions.
+
+### Why
+
+Idea folders accumulate loose notes without an index. By the time the user notices, the cluster is hard to navigate and links are missing — the 2026-05-09 vault reorg found 9 loose notes at `Projects/Physics-AI-ML/` that had grown around 3-4 latent ideas. A soft prompt at the right moment promotes the cluster before drift sets in.
+
+This is **strictly opt-in per cluster**. Never move files without explicit confirmation. Never re-prompt for the same stem in the same session.
 
 ## Chapter Segmentation
 

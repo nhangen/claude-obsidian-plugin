@@ -8,6 +8,8 @@ time_gap_minutes: 30
 smart_detect: true
 strict_domains: true
 dedup_jaccard_threshold: 0.4
+moc_promotion: true
+moc_promotion_threshold: 3
 domains:
   - Development
   - Work
