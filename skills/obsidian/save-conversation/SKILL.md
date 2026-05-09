@@ -106,7 +106,7 @@ Before writing a new note in the resolved target folder, check whether a same-da
    ```bash
    find "<vault_path>/<target-folder>" -maxdepth 1 -type f -name "$(date +%Y-%m-%d)-*.md" 2>/dev/null
    ```
-2. **Score topic similarity** between the proposed kebab-case slug (the part after the date prefix in the new filename) and each existing same-day file's slug. Use **token Jaccard similarity**: split each slug on `-`, lowercase, **drop tokens that are purely numeric (e.g. `2026`, `04`) or a single character**. Keep 2-char tokens like `pr`, `om`, `wp`, `ai` — these carry signal in dev/work slugs. Then compute `|A ∩ B| / |A ∪ B|`.
+2. **Score topic similarity** between the proposed kebab-case slug (the part after the date prefix in the new filename) and each existing same-day file's slug. Use **token Jaccard similarity**: split each slug on `-`, lowercase, **drop tokens that are purely numeric (e.g. `2026`, `04`, `1234`) or exactly one character (e.g. `a`, `v`, `x`)**. Keep 2-char tokens like `pr`, `om`, `wp`, `ai` — these carry signal in dev/work slugs. Then compute `|A ∩ B| / |A ∪ B|`.
 3. **If the highest score is ≥ 0.4**, treat as a likely match and prompt the user:
    > Same-day note already exists: `<existing-path>` (similarity: `<score>`).
    > - **append** → add `## HH:MM — <new-topic>` section to the existing file
