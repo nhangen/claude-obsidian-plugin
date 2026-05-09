@@ -19,9 +19,9 @@ Vault path: read `vault_path` field from `${CLAUDE_PLUGIN_ROOT}/obsidian.local.m
 Read routing rules from `${CLAUDE_PLUGIN_ROOT}/obsidian.local.md`:
 
 1. Extract the `## Routing Rules` section from the config file
-2. Extract the `## Project Taxonomy` section for folder paths — the `Vault path` column is the **canonical allow-list** of top-level folders
-3. Match the conversation's dominant topics against the keywords in those sections
-4. Use the matching target folder from the taxonomy
+2. Extract the `## Project Taxonomy` section for folder paths — the `Vault path` column is the **canonical allow-list** of top-level folders. The optional `precedence` column ranks routes when more than one matches (lower number wins; absent → 100).
+3. Match the conversation's dominant topics against the keywords in those sections — collect **every** matching candidate, not just the first.
+4. If exactly one candidate matches above threshold, use it. If two or more match, run the **Cross-Domain Tiebreaker** below.
 
 If `obsidian.local.md` does not exist, tell the user to run `/obsidian:setup` first and stop.
 
@@ -30,6 +30,22 @@ If the user provides a topic hint (e.g. "/obsidian:save WSL setup"), use it to o
 > Topic hint `<hint>` did not match any allow-listed domain. Allow-listed domains: `<list>`. Either correct the hint or add a row to `## Project Taxonomy` via `/obsidian:setup`.
 
 Never let a fuzzy hint create a new top-level folder.
+
+## Cross-Domain Tiebreaker
+
+When the keyword scan in step 2 produces **2+ candidate domains** (common for cross-cutting topics: career notes that touch a specific employer; finance notes that touch personal goals; dev notes that touch a specific repo), apply this tiebreaker before writing:
+
+0. **Check the session cache first.** Maintain a mental map of `<topic-stem> → <chosen-domain>` for the current Claude Code session (use a code block in working memory or a dedicated section of your scratchpad). If the current note's topic-stem already appears in the cache, use the cached domain and skip steps 1–5. The cache is in-memory only; it resets between sessions.
+1. **Sort candidates by `precedence`** (the optional column in `## Project Taxonomy`). Lower number wins; absent treated as 100.
+2. **Pick the highest-precedence candidate** as the proposed target.
+3. **Scan sibling candidates** for existing notes with overlapping slugs (use the same token Jaccard from "Same-Day Dedup Check" but across the whole sibling folder, not just same-day). If any sibling has matches scoring ≥ `dedup_jaccard_threshold`, surface them:
+   > Topic also matched `<sibling-domain>` (precedence `<n>`); existing notes there: `<list>`. Routing to `<chosen>` (precedence `<m>`). Override?
+4. **Remember the choice for the session** — once the user confirms or overrides, write `<topic-stem> → <chosen-domain>` into the in-memory cache from step 0. Do not re-prompt for the same topic-stem this session.
+5. **No precedence column at all** in the taxonomy → fall back to: warn the user about the multi-match, list candidates, and ask once. Their reply seeds the in-memory cache (step 4).
+
+This prevents the parallel-tree problem (e.g. `Career/`, `Awesome Motive/career/`, `Personal/Job Search/` all accumulating notes about the same job-search thread because each save resolved to a different route).
+
+Mirror the precedence column in the example file's `## Project Taxonomy`. The setup wizard offers an optional precedence prompt — see `obsidian-setup`.
 
 ## Allow-list Validation (strict_domains)
 
@@ -85,16 +101,17 @@ source: claude-code
 ## Steps
 
 1. **Check vault conventions** — if `VAULT.md` exists at the vault root, read it for vault-specific conventions (e.g., session template, domain folders, linking rules)
-2. **Detect topic and routing** — scan conversation context for domain keywords, determine target folder
-3. **Generate title** — create descriptive kebab-case title from topic, e.g. `2026-02-19-obsidian-vault-consolidation`
-4. **Build content** — format conversation as structured markdown per template above (or use `Templates/session.md` from vault if it exists)
-5. **Determine full path** — `<vault_path>/<target-folder>/<YYYY-MM-DD-title>.md`
-6. **Validate allow-list** — `strict_domains` defaults to `true` when absent; only an explicit `false` skips validation. See "Allow-list Validation (strict_domains)" above. If the top-level folder is not allow-listed, refuse and surface the closest match. Do not create the folder. If routing landed in `Inbox/` because no clear domain matched, prompt for confirmation ("No clear domain match — routing to `Inbox/`. Confirm or supply a topic hint") rather than writing silently.
-7. **Same-day dedup check** — see "Same-Day Dedup Check" below. Before writing, scan the **confirmed** target folder (after any Inbox redirect or topic-hint correction from step 6) for same-day notes and offer append vs new-file when an existing match scores above the threshold.
-8. **Create parent dirs if needed** — `mkdir -p <vault_path>/<target-folder>` (only after validation passes)
-9. **Write or append** — use Write tool for new files; use Edit tool to append a timestamped section when the user chose append mode in step 7.
-10. **Confirm** — tell user where the file was saved (and whether it was a new file or an append)
-11. **Open in GUI** — call `bash ${CLAUDE_PLUGIN_ROOT}/scripts/open-in-obsidian.sh <relative-path>`
+2. **Detect topic and collect candidates** — scan conversation context for domain keywords; collect **every** matching candidate, not just the first
+3. **Resolve target folder** — if exactly one candidate matched, use it. If two or more matched, run the **Cross-Domain Tiebreaker** below to pick one. The result is the resolved target folder.
+4. **Generate title** — create descriptive kebab-case title from topic, e.g. `2026-02-19-obsidian-vault-consolidation`
+5. **Build content** — format conversation as structured markdown per template above (or use `Templates/session.md` from vault if it exists)
+6. **Determine full path** — `<vault_path>/<target-folder>/<YYYY-MM-DD-title>.md`
+7. **Validate allow-list** — `strict_domains` defaults to `true` when absent; only an explicit `false` skips validation. See "Allow-list Validation (strict_domains)" above. If the top-level folder is not allow-listed, refuse and surface the closest match. Do not create the folder. If routing landed in `Inbox/` because no clear domain matched, prompt for confirmation ("No clear domain match — routing to `Inbox/`. Confirm or supply a topic hint") rather than writing silently.
+8. **Same-day dedup check** — see "Same-Day Dedup Check" below. Before writing, scan the **confirmed** target folder (after any Inbox redirect or topic-hint correction from step 7) for same-day notes and offer append vs new-file when an existing match scores above the threshold.
+9. **Create parent dirs if needed** — `mkdir -p <vault_path>/<target-folder>` (only after validation passes)
+10. **Write or append** — use Write tool for new files; use Edit tool to append a timestamped section when the user chose append mode in step 8.
+11. **Confirm** — tell user where the file was saved (and whether it was a new file or an append)
+12. **Open in GUI** — call `bash ${CLAUDE_PLUGIN_ROOT}/scripts/open-in-obsidian.sh <relative-path>`
 
 ## Same-Day Dedup Check
 
