@@ -102,7 +102,7 @@ source: claude-code
 
 1. **Check vault conventions** — if `VAULT.md` exists at the vault root, read it for vault-specific conventions (e.g., session template, domain folders, linking rules)
 2. **Detect topic and collect candidates** — scan conversation context for domain keywords; collect **every** matching candidate, not just the first
-3. **Resolve target folder** — if exactly one candidate matched, use it. If two or more matched, run the **Cross-Domain Tiebreaker** below to pick one. The result is the resolved target folder.
+3. **Resolve target folder** — if exactly one candidate matched, use it. If two or more matched, run the **Cross-Domain Tiebreaker** (see section above) to pick one. The result is the resolved target folder.
 4. **Generate title** — create descriptive kebab-case title from topic, e.g. `2026-02-19-obsidian-vault-consolidation`
 5. **Build content** — format conversation as structured markdown per template above (or use `Templates/session.md` from vault if it exists)
 6. **Determine full path** — `<vault_path>/<target-folder>/<YYYY-MM-DD-title>.md`
