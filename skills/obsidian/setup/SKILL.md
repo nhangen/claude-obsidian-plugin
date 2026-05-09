@@ -65,6 +65,20 @@ For each domain, ask in a single message listing all domains at once:
 
 Collect the keyword list for each domain from the user's reply.
 
+### 4b. Ask for Precedence (optional)
+
+Ask:
+
+> If multiple domains' keywords could match the same note, which wins?
+> Provide a precedence integer per domain (lower number wins). Skip with Enter to leave precedence blank — the plugin will prompt at save-time on multi-matches.
+>
+> **Domain1:** (number, e.g. 10)
+> **Domain2:** (number, e.g. 20)
+>
+> Example: Development=10, Work=20, Personal=30 means a note matching both Development and Work routes to Development.
+
+Collect optional precedence per domain. If the user skips all, omit the `Precedence` column from the generated taxonomy table.
+
 ### 5. Ask for Daily Notes Path
 
 Ask:
@@ -91,7 +105,10 @@ Replace:
 - `VAULT_ABSOLUTE_PATH` → expanded absolute path from Step 2
 - `VAULT_FOLDER_NAME` → last path component of the vault path (e.g. `Obsidian`)
 - `DOMAIN_LIST` → one `  - DomainName` line per domain
-- `TAXONOMY_ROWS` → one table row per domain: `| DomainName | Projects/DomainName/ | |`
+- `TAXONOMY_HEADER` → `| Domain | Vault path | Precedence | Notes |` if any precedence values were provided in Step 4b; otherwise `| Domain | Vault path | Notes |`.
+- `TAXONOMY_SEPARATOR` → matching separator row: `|--------|-----------|------------|-------|` (4-col) or `|--------|-----------|-------|` (3-col).
+- `TAXONOMY_ROWS` → one row per domain in the same shape as the header. **Substitute the actual domain name in both columns.** With precedence: `| <DomainName> | Projects/<DomainName>/ | <prec-or-blank> | |`. Without: `| <DomainName> | Projects/<DomainName>/ | |`. Replace each `<DomainName>` with the user's domain (e.g. `Development`, producing `| Development | Projects/Development/ | 10 | |`). Pick one shape for the whole table — do not mix.
+- `DAILY_AND_INBOX_ROWS` → emit `| Daily | DAILY_PATH | 50 | |` and `| Inbox | INBOX_PATH | 99 | Fallback for ambiguous notes |` if precedence column is included; otherwise `| Daily | DAILY_PATH | |` and `| Inbox | INBOX_PATH | Fallback for ambiguous notes |`. Substitute `DAILY_PATH` and `INBOX_PATH` with the values collected in Steps 5 and 6.
 - `ROUTING_RULE_LINES` → one routing line per domain: `- Keywords "kw1, kw2" → Projects/DomainName/`
 - `DAILY_PATH` → value from Step 5
 - `INBOX_PATH` → value from Step 6
@@ -117,13 +134,14 @@ Vault is at `VAULT_ABSOLUTE_PATH`.
 
 ## Project Taxonomy
 
-| Domain | Vault path | Notes |
-|--------|-----------|-------|
+TAXONOMY_HEADER
+TAXONOMY_SEPARATOR
 TAXONOMY_ROWS
-| Daily | DAILY_PATH | |
-| Inbox | INBOX_PATH | Fallback for ambiguous notes |
+DAILY_AND_INBOX_ROWS
 
 The `Vault path` column above is the canonical allow-list of top-level folders. Skills refuse to write outside this list while `strict_domains: true`.
+
+If a `Precedence` column is present, lower number wins when keywords from multiple domains match the same note. If it is absent, the skill prompts the user to pick on multi-match.
 
 ## Routing Rules
 

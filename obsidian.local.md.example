@@ -23,16 +23,18 @@ Run `/obsidian:setup` to generate this file interactively, or copy and edit manu
 
 ## Project Taxonomy
 
-| Domain | Vault path | Notes |
-|--------|-----------|-------|
-| Development | Projects/Development/ | Code, tools, debugging |
-| Work | Projects/Work/ | Client/employer work, meetings |
-| Personal | Projects/Personal/ | Personal notes, goals |
-| Learning | Projects/Learning/ | Books, courses, research |
-| Daily | Daily/ | Date-stamped daily notes |
-| Inbox | Inbox/ | Fallback for ambiguous notes |
+| Domain | Vault path | Precedence | Notes |
+|--------|-----------|------------|-------|
+| Development | Projects/Development/ | 10 | Code, tools, debugging |
+| Work | Projects/Work/ | 20 | Client/employer work, meetings |
+| Personal | Projects/Personal/ | 30 | Personal notes, goals |
+| Learning | Projects/Learning/ | 40 | Books, courses, research |
+| Daily | Daily/ | 50 | Date-stamped daily notes |
+| Inbox | Inbox/ | 99 | Fallback for ambiguous notes |
 
 The `Vault path` column above is the **canonical allow-list**. Skills validate every save target against this list and refuse to create folders outside it. To add a new top-level folder, add a row here (or rerun `/obsidian:setup`) — never let routine saves create new top-level folders.
+
+The `Precedence` column ranks routes when more than one keyword matches (lower wins; absent → 100). Optional — leave blank to fall back to a "matched multiple — pick one" prompt.
 
 ## Routing Rules
 
