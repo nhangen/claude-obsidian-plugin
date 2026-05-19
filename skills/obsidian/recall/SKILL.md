@@ -74,34 +74,44 @@ If claude-mem is unavailable or returns errors, note "claude-mem: unavailable" a
 
 ### Source E: claude-mem-graph MCP (causal tracing)
 
-Two entry paths — run whichever applies. If neither produces useful neighbors, note "graph: no signal" and continue.
+Three entry paths with concrete triggers. Each is independent — fire any that apply.
 
 **Path E1: trace from the top flat-search hit.**
 
-After Source D returns its top observation ID, call `mcp__plugin_claude-mem-graph_claude-mem-graph__graph_neighbors`:
+Trigger: Source D returned at least one observation.
+
 ```
 graph_neighbors({ observation_id: <top hit id>, max_results: 30 })
 ```
-Surface neighbors of these edge types only: `produced_by` (same-session siblings), `depends_on` (causal upstream), `informed_by` (narrative-extracted causal), `continues` (cross-session arc). **Discard `relates_to`** — generic-concept noise. Both upstream (graph_neighbors as of 2026-05-18) and this client should drop it; do not depend on either alone.
 
-**Path E2: file-based seeding.** Independent entry point that does NOT depend on flat search finding the right node. Trigger if the query contains any of:
+Surface only these edge types: `produced_by` (same-session siblings), `depends_on` (causal upstream), `informed_by` (narrative-extracted causal), `continues` (cross-session arc). Do not show `relates_to` — upstream `graph_neighbors` (claude-mem-graph ≥ v0.2.3) filters it at the source; this client does not double-filter. If you see a `relates_to` row in output, the installed graph is older than v0.2.3 — silently discard and add a one-line note to the report so the user knows to upgrade.
 
-- a path-like token: contains `/`, or ends in `.md` / `.ts` / `.py` / `.php` / `.sh` / `.tsx` / `.jsx` / `.go` / `.rs`
-- a kebab-case or snake_case token of 2+ separators: `branch-worktree-cleanup`, `discover-repos`, `pr-review-panel`, `optin-monster-app`, `mtf_builder_pipeline` — these are usually repo, skill, or script identifiers
-- a multi-word phrase that maps to a known directory name in this vault or repo (e.g. "branch worktree cleanup" → `branch-worktree-cleanup`). When you see 3+ short lowercase words consecutively, try joining with `-` and check if a file or directory exists by that name.
+**Path E2: file path lookup (exact match only).**
 
-For each candidate, call `graph_file_history`:
+Trigger: the query contains a **literal file path** — a token with a `/` separator OR a filename ending in `.md` / `.ts` / `.tsx` / `.jsx` / `.py` / `.php` / `.sh` / `.go` / `.rs`.
+
 ```
-graph_file_history({ file_path: "<extracted token or resolved path>" })
+graph_file_history({ file_path: "<the literal token from the query>" })
 ```
 
-If both paths return empty, claude-mem-graph adds nothing for this query — proceed without it.
+`graph_file_history` does **exact-match lookup** against the graph's `file:<path>` nodes — no substring, no basename, no glob. Only literal paths from the query work here. **Do NOT pass kebab-case skill names, repo slugs, or guessed directory names — they will silently return empty.**
 
-**Path E3 (fallback): cross-project search.** If Source D returns 0 useful hits (all results irrelevant or empty), call `graph_search` once with the original keywords:
+**Path E3: cross-project graph search.**
+
+Trigger when EITHER:
+- (a) Source D returned 0 rows, OR
+- (b) Source D's top hit's title (lowercased) shares no token of length ≥ 4 with the query keywords (lowercased, stopwords removed), OR
+- (c) the query contains a kebab/snake_case identifier with 1+ separators (e.g. `pr-czar`, `branch-worktree-cleanup`, `mem_search`) that did NOT trigger Path E2.
+
 ```
-graph_search({ task_description: <keywords>, max_sessions: 30, since_days: 365 })
+graph_search({ task_description: "<original keywords>", max_sessions: 30, since_days: 365 })
 ```
-This is the "graph can find what flat search missed" last-resort path. Not for general use — it's weaker than flat search for most queries. Only invoke when Source D is empty.
+
+Path E3 searches title, subtitle, narrative, text, facts, and concepts — different indexing from Source D's FTS, so it can surface observations Source D missed (e.g. when a skill/script name appears in a narrative but not a title). It's weaker than flat search for general keyword queries — that's why the trigger is conditional, not always-on.
+
+If E2 returned exact file-history results, you can skip E3's (c) branch — you've already located the entry via file path.
+
+If all three paths return empty, claude-mem-graph adds nothing for this query — proceed without it.
 
 ## Step 3: Synthesize Report
 
