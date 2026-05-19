@@ -66,13 +66,46 @@ gh pr list --state all --search="<ticket or keywords>" --limit 20
 ### Source D: claude-mem MCP
 
 Use the 3-layer workflow:
-1. `mcp__plugin_claude-mem_mcp-search__search` with query = ticket number + keywords, limit 10
+1. `mcp__plugin_claude-mem_mcp-search__search` with query = ticket number + keywords, limit 10. **Pass `orderBy: "relevance"` explicitly** — the mem-search tool's default is `date_desc`, which hides older observations behind recent noise. Verified against claude-mem source: only the literal string `"relevance"` switches to FTS score; omitting the param falls through to date ordering.
 2. `mcp__plugin_claude-mem_mcp-search__timeline` on the most relevant result
 3. `mcp__plugin_claude-mem_mcp-search__get_observations` for full details on filtered IDs
 
 If claude-mem is unavailable or returns errors, note "claude-mem: unavailable" and continue with other sources.
 
+### Source E: claude-mem-graph MCP (causal tracing)
+
+Two entry paths — run whichever applies. If neither produces useful neighbors, note "graph: no signal" and continue.
+
+**Path E1: trace from the top flat-search hit.**
+
+After Source D returns its top observation ID, call `mcp__plugin_claude-mem-graph_claude-mem-graph__graph_neighbors`:
+```
+graph_neighbors({ observation_id: <top hit id>, max_results: 30 })
+```
+Surface neighbors of these edge types only: `produced_by` (same-session siblings), `depends_on` (causal upstream), `informed_by` (narrative-extracted causal), `continues` (cross-session arc). **Discard `relates_to`** — generic-concept noise. Both upstream (graph_neighbors as of 2026-05-18) and this client should drop it; do not depend on either alone.
+
+**Path E2: file-based seeding.** Independent entry point that does NOT depend on flat search finding the right node. Trigger if the query contains any of:
+
+- a path-like token: contains `/`, or ends in `.md` / `.ts` / `.py` / `.php` / `.sh` / `.tsx` / `.jsx` / `.go` / `.rs`
+- a kebab-case or snake_case token of 2+ separators: `branch-worktree-cleanup`, `discover-repos`, `pr-review-panel`, `optin-monster-app`, `mtf_builder_pipeline` — these are usually repo, skill, or script identifiers
+- a multi-word phrase that maps to a known directory name in this vault or repo (e.g. "branch worktree cleanup" → `branch-worktree-cleanup`). When you see 3+ short lowercase words consecutively, try joining with `-` and check if a file or directory exists by that name.
+
+For each candidate, call `graph_file_history`:
+```
+graph_file_history({ file_path: "<extracted token or resolved path>" })
+```
+
+If both paths return empty, claude-mem-graph adds nothing for this query — proceed without it.
+
+**Path E3 (fallback): cross-project search.** If Source D returns 0 useful hits (all results irrelevant or empty), call `graph_search` once with the original keywords:
+```
+graph_search({ task_description: <keywords>, max_sessions: 30, since_days: 365 })
+```
+This is the "graph can find what flat search missed" last-resort path. Not for general use — it's weaker than flat search for most queries. Only invoke when Source D is empty.
+
 ## Step 3: Synthesize Report
+
+When merging Source D (flat claude-mem) with Source E (graph), use flat hits to anchor the report and graph neighbors to expand the story arc. A `produced_by` sibling chain typically becomes a "Session Context" subsection; `depends_on` and `informed_by` chains become entries in "Timeline" or "Key Decisions"; `continues` edges become "Related Sessions".
 
 Combine all results into this format:
 
