@@ -31,6 +31,71 @@ If the user provides a topic hint (e.g. "/obsidian:save WSL setup"), use it to o
 
 Never let a fuzzy hint create a new top-level folder.
 
+## Session Intent and Capture Action Inference
+
+Before folder routing, infer two separate concepts from concrete transcript signals:
+
+```yaml
+session_intent:
+  value: execution | research | planning | reflection | operations | scratch
+  confidence: high | medium | low
+  score: 0.0-1.0
+  evidence:
+    - concrete signal from transcript
+
+capture_action:
+  value: none | daily_only | project_note | substrate_update | decision_record
+  confidence: high | medium | low
+  score: 0.0-1.0
+  evidence:
+    - concrete signal from transcript
+```
+
+Intent describes what happened; capture action describes what durable update is warranted. Keep them separate because an `execution` session can still produce `substrate_update` evidence when it tests an active research claim.
+
+### Intent Values
+
+- `execution` — code/work/task session; produced or changed artifacts.
+- `research` — papers, synthesis, claims, experiments, literature, source-backed comparisons.
+- `planning` — roadmap, spec, decision analysis, implementation plan, project sequencing.
+- `reflection` — trajectory, positioning, identity, personal synthesis.
+- `operations` — customer/admin/business/accounting/course logistics.
+- `scratch` — casual/trivial/non-durable conversation.
+
+### Capture Action Values
+
+- `none` — no durable capture.
+- `daily_only` — daily-scoped note or lightweight daily mention only.
+- `project_note` — normal project/session note.
+- `substrate_update` — research-substrate claim/evidence/literature/experiment update is warranted.
+- `decision_record` — durable decision or plan record is warranted.
+
+### Scoring and Confirmation
+
+Use concrete signals, not vibe: user verbs, referenced artifacts, outputs produced, explicit destination hints, and domain terms. Explicit user instructions win.
+
+Default thresholds:
+
+- High confidence: top score >= `0.70` and margin over next plausible option >= `0.15`.
+- Medium confidence: score >= `0.45` but close margin or mixed evidence.
+- Low confidence: below `0.45`.
+
+Ask only when ambiguity changes the durable action. Do not ask for routine high-confidence routing.
+
+Examples:
+
+- User asks to read papers and compare to current work → `research + substrate_update`.
+- User asks to fix a PR → `execution + project_note`; add substrate evidence only when an active claim is directly affected.
+- User asks for roadmap/spec → `planning + project_note` or `decision_record` when an actual decision is made.
+- User asks to leave an NRX/customer/admin note → `operations + project_note`.
+- Casual chat with no durable outcome → `scratch + none`.
+
+If top intent/action are close and the durable result differs, ask:
+
+> I infer this as `<intent> + <action>` because `<evidence>`. The other plausible capture is `<alternate>`. Should this be `<option A>` or `<option B>`?
+
+For non-interactive autosave paths where asking is impossible, write the safer note and set `capture_needs_confirmation: true` in frontmatter.
+
 ## Cross-Domain Tiebreaker
 
 When the keyword scan in step 2 produces **2+ candidate domains** (common for cross-cutting topics: career notes that touch a specific employer; finance notes that touch personal goals; dev notes that touch a specific repo), apply this tiebreaker before writing:
@@ -75,6 +140,13 @@ Generate a markdown file with this structure:
 date: YYYY-MM-DD
 time: HH:MM
 session_type: [debugging|walkthrough|research|setup|conversation]
+session_intent: [execution|research|planning|reflection|operations|scratch]
+session_intent_score: 0.0-1.0
+session_intent_confidence: [high|medium|low]
+capture_action: [none|daily_only|project_note|substrate_update|decision_record]
+capture_action_score: 0.0-1.0
+capture_action_confidence: [high|medium|low]
+capture_needs_confirmation: false
 tags: [auto-detected tags]
 source: claude-code
 ---
@@ -84,6 +156,14 @@ source: claude-code
 ## Summary
 
 [2-4 sentence summary of what was accomplished/discussed]
+
+## Capture Inference
+
+- **Session intent:** `<value>` (`<confidence>`, `<score>`)
+- **Capture action:** `<value>` (`<confidence>`, `<score>`)
+- **Evidence:**
+  - [Concrete signal]
+  - [Concrete signal]
 
 ## Key Findings / Decisions
 
@@ -101,18 +181,19 @@ source: claude-code
 ## Steps
 
 1. **Check vault conventions** — if `VAULT.md` exists at the vault root, read it for vault-specific conventions (e.g., session template, domain folders, linking rules)
-2. **Detect topic and collect candidates** — scan conversation context for domain keywords; collect **every** matching candidate, not just the first
-3. **Resolve target folder** — if exactly one candidate matched, use it. If two or more matched, run the **Cross-Domain Tiebreaker** (see section above) to pick one. The result is the resolved target folder.
-4. **Generate title** — create descriptive kebab-case title from topic, e.g. `2026-02-19-obsidian-vault-consolidation`
-5. **Build content** — format conversation as structured markdown per template above (or use `Templates/session.md` from vault if it exists)
-6. **Determine full path** — `<vault_path>/<target-folder>/<YYYY-MM-DD-title>.md`
-7. **Validate allow-list** — `strict_domains` defaults to `true` when absent; only an explicit `false` skips validation. See "Allow-list Validation (strict_domains)" above. If the top-level folder is not allow-listed, refuse and surface the closest match. Do not create the folder. If routing landed in `Inbox/` because no clear domain matched, prompt for confirmation ("No clear domain match — routing to `Inbox/`. Confirm or supply a topic hint") rather than writing silently.
-8. **Same-day dedup check** — see "Same-Day Dedup Check" below. Before writing, scan the **confirmed** target folder (after any Inbox redirect or topic-hint correction from step 7) for same-day notes and offer append vs new-file when an existing match scores above the threshold.
-9. **Create parent dirs if needed** — `mkdir -p <vault_path>/<target-folder>` (only after validation passes)
-10. **Write or append** — use Write tool for new files; use Edit tool to append a timestamped section when the user chose append mode in step 8.
-11. **Confirm** — tell user where the file was saved (and whether it was a new file or an append)
-12. **Open in GUI** — call `bash ${CLAUDE_PLUGIN_ROOT}/scripts/open-in-obsidian.sh <relative-path>`
-13. **MOC-promotion prompt (post-save, soft)** — see "MOC-Promotion Prompt" below. After a successful new-file write, check whether the parent folder has accumulated 3+ notes sharing a topic stem. If so, prompt once to promote into a dedicated subfolder with a `README.md` index. Skip on append. Skip if the user previously declined promotion for this stem.
+2. **Infer intent and capture action** — assign `session_intent`, `capture_action`, confidence, scores, and evidence bullets. Ask only when ambiguity changes the durable action.
+3. **Detect topic and collect candidates** — scan conversation context for domain keywords; collect **every** matching candidate, not just the first
+4. **Resolve target folder** — if exactly one candidate matched, use it. If two or more matched, run the **Cross-Domain Tiebreaker** (see section above) to pick one. The result is the resolved target folder.
+5. **Generate title** — create descriptive kebab-case title from topic, e.g. `2026-02-19-obsidian-vault-consolidation`
+6. **Build content** — format conversation as structured markdown per template above (or use `Templates/session.md` from vault if it exists)
+7. **Determine full path** — `<vault_path>/<target-folder>/<YYYY-MM-DD-title>.md`
+8. **Validate allow-list** — `strict_domains` defaults to `true` when absent; only an explicit `false` skips validation. See "Allow-list Validation (strict_domains)" above. If the top-level folder is not allow-listed, refuse and surface the closest match. Do not create the folder. If routing landed in `Inbox/` because no clear domain matched, prompt for confirmation ("No clear domain match — routing to `Inbox/`. Confirm or supply a topic hint") rather than writing silently.
+9. **Same-day dedup check** — see "Same-Day Dedup Check" below. Before writing, scan the **confirmed** target folder (after any Inbox redirect or topic-hint correction from step 7) for same-day notes and offer append vs new-file when an existing match scores above the threshold.
+10. **Create parent dirs if needed** — `mkdir -p <vault_path>/<target-folder>` (only after validation passes)
+11. **Write or append** — use Write tool for new files; use Edit tool to append a timestamped section when the user chose append mode in step 9.
+12. **Confirm** — tell user where the file was saved (and whether it was a new file or an append)
+13. **Open in GUI** — call `bash ${CLAUDE_PLUGIN_ROOT}/scripts/open-in-obsidian.sh <relative-path>`
+14. **MOC-promotion prompt (post-save, soft)** — see "MOC-Promotion Prompt" below. After a successful new-file write, check whether the parent folder has accumulated 3+ notes sharing a topic stem. If so, prompt once to promote into a dedicated subfolder with a `README.md` index. Skip on append. Skip if the user previously declined promotion for this stem.
 
 ## Same-Day Dedup Check
 

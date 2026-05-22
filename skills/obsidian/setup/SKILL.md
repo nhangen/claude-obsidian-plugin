@@ -126,6 +126,9 @@ strict_domains: true
 dedup_jaccard_threshold: 0.4
 moc_promotion: true
 moc_promotion_threshold: 3
+intent_high_score: 0.70
+intent_margin: 0.15
+capture_high_score: 0.70
 domains:
 DOMAIN_LIST
 ---
@@ -144,6 +147,10 @@ DAILY_AND_INBOX_ROWS
 The `Vault path` column above is the canonical allow-list of top-level folders. Skills refuse to write outside this list while `strict_domains: true`.
 
 If a `Precedence` column is present, lower number wins when keywords from multiple domains match the same note. If it is absent, the skill prompts the user to pick on multi-match.
+
+## Session Intent Inference
+
+Session capture infers `session_intent` (`execution`, `research`, `planning`, `reflection`, `operations`, `scratch`) separately from `capture_action` (`none`, `daily_only`, `project_note`, `substrate_update`, `decision_record`). The confidence thresholds in frontmatter control when the inference is treated as high confidence.
 
 ## Routing Rules
 
@@ -175,3 +182,4 @@ Tell the user:
 - Routing Rules section is read verbatim by `session-summarize.sh` and passed to Claude — plain English descriptions work best
 - The `domains` YAML list is metadata only; routing is driven by the `## Routing Rules` section
 - `strict_domains: true` (default) makes `## Project Taxonomy`'s `Vault path` column the canonical allow-list. Skills refuse to write to top-level folders that are not on the list, preventing silent alias folders. To add a new top-level folder, add a Project Taxonomy row (or rerun `/obsidian:setup`) — never let routine saves create new folders.
+- `intent_high_score: 0.70`, `intent_margin: 0.15`, and `capture_high_score: 0.70` tune session-intent and capture-action confidence scoring.

@@ -10,6 +10,9 @@ strict_domains: true
 dedup_jaccard_threshold: 0.4
 moc_promotion: true
 moc_promotion_threshold: 3
+intent_high_score: 0.70
+intent_margin: 0.15
+capture_high_score: 0.70
 domains:
   - Development
   - Work
@@ -58,3 +61,12 @@ When `strict_domains: true` (default), the save/create skills:
 This prevents silent alias folders (`AM/` alongside `Awesome Motive/`, `Obsidian Daily/` alongside `Daily/`). Failure-mode reference: the `enum-config-typo-fallback` pattern — string fields selecting a code path must reject unknown values, not coerce to a default.
 
 To opt out (not recommended), set `strict_domains: false`.
+
+## Session Intent Inference
+
+Session capture infers both what happened and what durable action is warranted:
+
+- `session_intent`: `execution`, `research`, `planning`, `reflection`, `operations`, or `scratch`
+- `capture_action`: `none`, `daily_only`, `project_note`, `substrate_update`, or `decision_record`
+
+The confidence thresholds above tune when the inference is treated as high confidence. Manual save paths should ask only when ambiguity changes the durable action. Non-interactive autosave records `capture_needs_confirmation: true` when a safer fallback was chosen.

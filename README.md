@@ -9,6 +9,7 @@ Long Claude sessions and the commits they produce hold context that's gone the m
 ## How it works
 
 - A **Stop hook** runs at session end; if the session is significant, a background `claude --print` summarizer writes a structured note to your vault.
+- Session capture infers both `session_intent` and `capture_action` with confidence scores and evidence bullets, so routing can distinguish execution, research, planning, operations, reflection, and scratch work.
 - A **PostToolUse hook** on `Bash` detects successful `git commit` calls and appends goal / investigation / decision / loose-ends bullets to a per-repo daily file.
 - **Slash commands** (skills) cover the manual paths: save, find, recall, daily, new, bookmark, setup.
 - **Routing** is driven by `obsidian.local.md` — a vault path and a keyword-based domain taxonomy you edit directly.
@@ -77,12 +78,16 @@ auto_save: true               # disable session autosave
 auto_open: true               # open note in GUI after writing
 strict_domains: true          # refuse to create folders outside the taxonomy
 moc_promotion: true           # promote recurring topics to Maps of Content
+intent_high_score: 0.70       # high-confidence intent/action threshold
+intent_margin: 0.15           # required margin over the next plausible intent/action
+capture_high_score: 0.70      # high-confidence durable-capture threshold
 ```
 
 The body of `obsidian.local.md` defines two things the skills read directly:
 
 - **`## Project Taxonomy`** — table mapping each domain to a vault path. This is the canonical allow-list; with `strict_domains: true`, saves to any other top-level folder are refused.
 - **`## Routing Rules`** — plain-English keyword lists that decide which domain a session or note belongs to. Ambiguous content falls back to `Inbox/` with a `#needs-filing` tag.
+- **Session intent inference** — capture now records `session_intent`, `capture_action`, confidence scores, and evidence bullets. Folder routing still uses the taxonomy; intent decides whether the session is execution, research, planning, reflection, operations, or scratch, and whether it warrants no capture, daily-only capture, a project note, a research-substrate update, or a decision record.
 
 Per-repo commit-capture overrides go in the same file under a `## Commit Capture Overrides` section.
 
@@ -105,7 +110,7 @@ The plugin root is resolved by Claude Code via `${CLAUDE_PLUGIN_ROOT}` — scrip
 
 - The Stop hook requires `claude` on `PATH` for background summarization. If absent, the session save no-ops with a logged warning.
 - Commit capture relies on parsing `git` output; very large commits are truncated to keep the note readable.
-- Routing is keyword-based, not semantic. Ambiguous sessions land in `Inbox/`.
+- Routing is keyword-based, not semantic. Intent inference records confidence and evidence, but folder placement still depends on taxonomy/routing rules; ambiguous sessions can still land in `Inbox/`.
 
 ## License
 
