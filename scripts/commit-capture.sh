@@ -110,7 +110,17 @@ if [ -n "${CLAUDE_PLUGIN_ROOT:-}" ] && [ -f "$CONFIG_FILE" ]; then
     case "$line" in
       vault_path:*)
         VAULT_PATH="${line#vault_path:}"
+        # Strip trailing CR from CRLF-edited configs before any other parsing.
+        VAULT_PATH="${VAULT_PATH%$'\r'}"
+        # Strip an inline "# comment" tail before quote/whitespace handling.
+        case "$VAULT_PATH" in
+          *' #'*) VAULT_PATH="${VAULT_PATH%% #*}" ;;
+          *$'\t#'*) VAULT_PATH="${VAULT_PATH%%	#*}" ;;
+        esac
         VAULT_PATH="${VAULT_PATH# }"
+        VAULT_PATH="${VAULT_PATH#	}"
+        VAULT_PATH="${VAULT_PATH% }"
+        VAULT_PATH="${VAULT_PATH%	}"
         VAULT_PATH="${VAULT_PATH#\"}"
         VAULT_PATH="${VAULT_PATH%\"}"
         VAULT_PATH="${VAULT_PATH#\'}"
