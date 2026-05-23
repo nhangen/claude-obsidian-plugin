@@ -14,15 +14,15 @@ Detection and metadata extraction are handled by `scripts/commit-capture.sh` (sh
 
 ## Config
 
-Read vault path from: `${CLAUDE_PLUGIN_ROOT}/obsidian.local.md`
+Vault path is passed inline by the hook (parsed once from `${CLAUDE_PLUGIN_ROOT}/obsidian.local.md`). Do **not** Read the config file from this skill — every read costs ~1-2K tokens per commit. If `vault_path` is empty in the hook output, skip silently (the config is missing or malformed).
 
 ## Steps
 
 1. **Parse inline metadata** from the hook output line:
-   `obsidian-commit-capture: hash=<h> | msg=<m> | branch=<b> | files=<f> | org_repo=<o> | repo_name=<r> | ticket=<t> | date=<d> | time=<ti>`
-   Extract: `hash`, `msg`, `branch`, `files`, `org_repo`, `repo_name`, `ticket`, `date`, `time`.
+   `obsidian-commit-capture: hash=<h> | msg=<m> | branch=<b> | files=<f> | org_repo=<o> | repo_name=<r> | ticket=<t> | date=<d> | time=<ti> | vault_path=<v>`
+   Extract: `hash`, `msg`, `branch`, `files`, `org_repo`, `repo_name`, `ticket`, `date`, `time`, `vault_path`.
 
-2. **Determine target path** (relative to vault_path from config):
+2. **Determine target path** (relative to `vault_path` from the hook output):
    `Projects/Development/<org_repo>/<date>.md`
 
 3. **Read existing file** at the target path. If it doesn't exist, create it.

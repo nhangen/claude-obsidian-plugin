@@ -98,7 +98,44 @@ while [ -n "$REMAINING" ]; do
   esac
 done
 
+# --- Resolve vault_path from obsidian.local.md ---
+# Inline this in the hook output so the skill doesn't have to Read the config
+# file on every commit. The config rarely changes; if it does, the next commit
+# picks up the new value.
+
+VAULT_PATH=""
+CONFIG_FILE="${CLAUDE_PLUGIN_ROOT:-}/obsidian.local.md"
+if [ -n "${CLAUDE_PLUGIN_ROOT:-}" ] && [ -f "$CONFIG_FILE" ]; then
+  while IFS= read -r line; do
+    case "$line" in
+      vault_path:*)
+        VAULT_PATH="${line#vault_path:}"
+        # Strip trailing CR from CRLF-edited configs before any other parsing.
+        VAULT_PATH="${VAULT_PATH%$'\r'}"
+        # Strip an inline "# comment" tail before quote/whitespace handling.
+        case "$VAULT_PATH" in
+          *' #'*) VAULT_PATH="${VAULT_PATH%% #*}" ;;
+          *$'\t#'*) VAULT_PATH="${VAULT_PATH%%	#*}" ;;
+        esac
+        VAULT_PATH="${VAULT_PATH# }"
+        VAULT_PATH="${VAULT_PATH#	}"
+        VAULT_PATH="${VAULT_PATH% }"
+        VAULT_PATH="${VAULT_PATH%	}"
+        VAULT_PATH="${VAULT_PATH#\"}"
+        VAULT_PATH="${VAULT_PATH%\"}"
+        VAULT_PATH="${VAULT_PATH#\'}"
+        VAULT_PATH="${VAULT_PATH%\'}"
+        case "$VAULT_PATH" in
+          '~/'*) VAULT_PATH="${HOME}/${VAULT_PATH#\~/}" ;;
+          '~') VAULT_PATH="${HOME}" ;;
+        esac
+        break
+        ;;
+    esac
+  done < "$CONFIG_FILE"
+fi
+
 # --- Output metadata inline for the obsidian-commit-capture skill ---
 
-printf 'obsidian-commit-capture: hash=%s | msg=%s | branch=%s | files=%s | org_repo=%s | repo_name=%s | ticket=%s | date=%s | time=%s\n' \
-  "$HASH" "$MSG" "$BRANCH" "$FILES" "$ORG_REPO" "$REPO_NAME" "$TICKET" "$TODAY" "$NOW"
+printf 'obsidian-commit-capture: hash=%s | msg=%s | branch=%s | files=%s | org_repo=%s | repo_name=%s | ticket=%s | date=%s | time=%s | vault_path=%s\n' \
+  "$HASH" "$MSG" "$BRANCH" "$FILES" "$ORG_REPO" "$REPO_NAME" "$TICKET" "$TODAY" "$NOW" "$VAULT_PATH"
