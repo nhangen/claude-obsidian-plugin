@@ -58,14 +58,21 @@ claude plugin install nhangen/obsidian
 /obsidian:setup
 ```
 
-The setup wizard prompts for vault path, domain names, keywords per domain, and daily/inbox paths, then writes `obsidian.local.md` to the plugin root.
+The setup wizard prompts for vault path, domain names, keywords per domain, and daily/inbox paths, then writes `obsidian.local.md` to the stable config location (see below).
 
 ## Configuration
 
-`obsidian.local.md` is machine-specific and gitignored. Generate it with `/obsidian:setup`, or copy the example:
+`obsidian.local.md` is machine-specific and gitignored. It is resolved in a **version-independent** way so plugin updates never strand it — readers check, in order:
+
+1. `$OBSIDIAN_LOCAL_MD` (explicit override)
+2. `${XDG_CONFIG_HOME:-$HOME/.config}/claude-obsidian/obsidian.local.md` — **the canonical home; setup writes here**
+3. `${CLAUDE_PLUGIN_ROOT}/obsidian.local.md` (legacy fallback for older installs)
+
+`scripts/lib/resolve-config.sh` implements this; run it directly to print the resolved path (`--stable` prints the canonical location). Generate the config with `/obsidian:setup`, or copy the example to the stable path:
 
 ```bash
-cp obsidian.local.md.example obsidian.local.md
+mkdir -p "${XDG_CONFIG_HOME:-$HOME/.config}/claude-obsidian"
+cp obsidian.local.md.example "${XDG_CONFIG_HOME:-$HOME/.config}/claude-obsidian/obsidian.local.md"
 ```
 
 Key frontmatter fields:
@@ -99,12 +106,13 @@ commands/*.md                 Slash command entry points
 skills/obsidian/*/SKILL.md    Skill logic (save, find, recall, setup, …)
 hooks/hooks.json              Stop + PostToolUse hook registration
 scripts/                      Hook executables (commit-capture, session-save, …)
+scripts/lib/resolve-config.sh Version-independent config-path resolver
 agents/                       Subagents (vault-organizer for /obsidian reorganize paths)
 integrations/                 External tool integrations
-obsidian.local.md             User config (gitignored)
+obsidian.local.md.example     Config template (real config lives at the stable path, gitignored)
 ```
 
-The plugin root is resolved by Claude Code via `${CLAUDE_PLUGIN_ROOT}` — scripts never hardcode a version path.
+The plugin root is resolved by Claude Code via `${CLAUDE_PLUGIN_ROOT}` — scripts never hardcode a version path. User config is resolved separately by `scripts/lib/resolve-config.sh` (stable path first, plugin root as legacy fallback), so updating the plugin never strands the config.
 
 ## Known Limitations
 

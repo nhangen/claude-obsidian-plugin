@@ -10,7 +10,11 @@ Synthesizes a report about past work from multiple data sources.
 
 ## Config
 
-Read vault path and routing config from: `${CLAUDE_PLUGIN_ROOT}/obsidian.local.md`
+Resolve the config path dynamically (stable, version-independent), then read vault path and routing config from it:
+```bash
+CONFIG="$(bash "${CLAUDE_PLUGIN_ROOT}/scripts/lib/resolve-config.sh")"
+```
+The resolver checks `$OBSIDIAN_LOCAL_MD`, then `${XDG_CONFIG_HOME:-$HOME/.config}/claude-obsidian/obsidian.local.md`, then `${CLAUDE_PLUGIN_ROOT}/obsidian.local.md`. If it prints nothing, tell the user to run `/obsidian:setup` first and stop.
 
 ## Step 1: Parse Query
 

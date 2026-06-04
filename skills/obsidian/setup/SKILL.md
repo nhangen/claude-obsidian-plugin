@@ -18,9 +18,15 @@ Interactive first-run wizard. Writes `obsidian.local.md` from user answers so ro
 
 ### 1. Check for Existing Config
 
-Read `${CLAUDE_PLUGIN_ROOT}/obsidian.local.md` if it exists. If found, tell the user:
+Resolve any existing config (checks the stable path and legacy locations):
 
-> `obsidian.local.md` already exists. Running setup will overwrite it. Continue? (yes/no)
+```bash
+EXISTING="$(bash "${CLAUDE_PLUGIN_ROOT}/scripts/lib/resolve-config.sh")"
+```
+
+If `$EXISTING` is non-empty, tell the user (show the resolved path):
+
+> Config already exists at `$EXISTING`. Running setup will overwrite it. Continue? (yes/no)
 
 If they say no, stop.
 
@@ -99,7 +105,15 @@ Store this as INBOX_PATH (default `Inbox/`).
 
 ### 7. Write obsidian.local.md
 
-Build the config file by replacing each ALL_CAPS placeholder below with the user's actual values, then write it to `${CLAUDE_PLUGIN_ROOT}/obsidian.local.md`.
+Build the config file by replacing each ALL_CAPS placeholder below with the user's actual values, then write it to the **stable, version-independent** location so plugin updates never strand it:
+
+```bash
+DEST="$(bash "${CLAUDE_PLUGIN_ROOT}/scripts/lib/resolve-config.sh" --stable)"
+mkdir -p "$(dirname "$DEST")"
+# write the rendered config to "$DEST"
+```
+
+`$DEST` resolves to `${XDG_CONFIG_HOME:-$HOME/.config}/claude-obsidian/obsidian.local.md`. Do not write into the plugin cache dir — that copy disappears on every update.
 
 Replace:
 - `VAULT_ABSOLUTE_PATH` → expanded absolute path from Step 2

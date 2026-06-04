@@ -104,8 +104,10 @@ done
 # picks up the new value.
 
 VAULT_PATH=""
-CONFIG_FILE="${CLAUDE_PLUGIN_ROOT:-}/obsidian.local.md"
-if [ -n "${CLAUDE_PLUGIN_ROOT:-}" ] && [ -f "$CONFIG_FILE" ]; then
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+. "${SCRIPT_DIR}/lib/resolve-config.sh"
+CONFIG_FILE="$(resolve_obsidian_config "${CLAUDE_PLUGIN_ROOT:-$(dirname "$SCRIPT_DIR")}")" || CONFIG_FILE=""
+if [ -n "$CONFIG_FILE" ] && [ -f "$CONFIG_FILE" ]; then
   while IFS= read -r line; do
     case "$line" in
       vault_path:*)

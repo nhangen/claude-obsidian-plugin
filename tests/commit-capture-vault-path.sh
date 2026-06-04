@@ -68,8 +68,16 @@ run_case_raw() {
   fi
 }
 
+# Isolate config resolution: the resolver prefers $OBSIDIAN_LOCAL_MD and the
+# stable XDG path over CLAUDE_PLUGIN_ROOT. Point XDG_CONFIG_HOME at an empty dir
+# and clear the override so these cases deterministically exercise the
+# plugin-root config the test controls, regardless of the host's real config.
+ISOLATED_XDG="$(mktemp -d "${TMPDIR:-/tmp}/cc-vp-xdg-XXXXXX")"
+export XDG_CONFIG_HOME="$ISOLATED_XDG"
+unset OBSIDIAN_LOCAL_MD
+
 make_git_stub
-trap cleanup_git_stub EXIT
+trap 'cleanup_git_stub; rm -rf "$ISOLATED_XDG"' EXIT
 
 PASS_COUNT=0
 

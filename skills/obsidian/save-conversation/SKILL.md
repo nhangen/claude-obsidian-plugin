@@ -10,20 +10,28 @@ Exports the current Claude Code session to the Obsidian vault as a structured ma
 
 ## Config
 
-Read vault config from: `${CLAUDE_PLUGIN_ROOT}/obsidian.local.md`
+Resolve the config path dynamically — it lives at a stable, version-independent
+location so plugin updates never strand it:
 
-Vault path: read `vault_path` field from `${CLAUDE_PLUGIN_ROOT}/obsidian.local.md`
+```bash
+CONFIG="$(bash "${CLAUDE_PLUGIN_ROOT}/scripts/lib/resolve-config.sh")"
+```
+
+This returns the first config that exists among `$OBSIDIAN_LOCAL_MD`,
+`${XDG_CONFIG_HOME:-$HOME/.config}/claude-obsidian/obsidian.local.md`, and
+`${CLAUDE_PLUGIN_ROOT}/obsidian.local.md`. Read `vault_path` and all routing
+config from `$CONFIG`.
 
 ## Routing Logic
 
-Read routing rules from `${CLAUDE_PLUGIN_ROOT}/obsidian.local.md`:
+Read routing rules from `$CONFIG` (resolved above):
 
 1. Extract the `## Routing Rules` section from the config file
 2. Extract the `## Project Taxonomy` section for folder paths — the `Vault path` column is the **canonical allow-list** of top-level folders. The optional `precedence` column ranks routes when more than one matches (lower number wins; absent → 100).
 3. Match the conversation's dominant topics against the keywords in those sections — collect **every** matching candidate, not just the first.
 4. If exactly one candidate matches above threshold, use it. If two or more match, run the **Cross-Domain Tiebreaker** below.
 
-If `obsidian.local.md` does not exist, tell the user to run `/obsidian:setup` first and stop.
+If the resolver prints nothing (no config exists at any location), tell the user to run `/obsidian:setup` first and stop.
 
 If the user provides a topic hint (e.g. "/obsidian:save WSL setup"), use it to override the keyword-based routing — look for the closest matching domain **that exists in the taxonomy**. The hint must resolve to a row already in `## Project Taxonomy`. If it does not, stop and tell the user:
 

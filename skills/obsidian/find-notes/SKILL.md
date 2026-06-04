@@ -10,9 +10,13 @@ Searches the vault for notes matching a query.
 
 ## Vault Path
 
-Read `vault_path` from `${CLAUDE_PLUGIN_ROOT}/obsidian.local.md`.
+Resolve the config path dynamically, then read `vault_path`:
+```bash
+CONFIG="$(bash "${CLAUDE_PLUGIN_ROOT}/scripts/lib/resolve-config.sh")"
+VAULT_PATH=$(grep '^vault_path:' "$CONFIG" | sed 's/vault_path: //')
+```
 
-If `obsidian.local.md` does not exist, tell the user to run `/obsidian:setup` first and stop.
+If the resolver prints nothing (no config at `$OBSIDIAN_LOCAL_MD`, `${XDG_CONFIG_HOME:-$HOME/.config}/claude-obsidian/obsidian.local.md`, or `${CLAUDE_PLUGIN_ROOT}/obsidian.local.md`), tell the user to run `/obsidian:setup` first and stop.
 
 ## Search Strategy
 

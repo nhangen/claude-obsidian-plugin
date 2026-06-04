@@ -6,7 +6,8 @@
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PLUGIN_ROOT="$(dirname "$SCRIPT_DIR")"
-CONFIG_FILE="${PLUGIN_ROOT}/obsidian.local.md"
+. "${SCRIPT_DIR}/lib/resolve-config.sh"
+CONFIG_FILE="$(resolve_obsidian_config "$PLUGIN_ROOT")" || CONFIG_FILE=""
 
 FILE_PATH="${1}"
 

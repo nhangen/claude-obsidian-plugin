@@ -14,7 +14,7 @@ Detection and metadata extraction are handled by `scripts/commit-capture.sh` (sh
 
 ## Config
 
-Vault path is passed inline by the hook (parsed once from `${CLAUDE_PLUGIN_ROOT}/obsidian.local.md`). Do **not** Read the config file from this skill — every read costs ~1-2K tokens per commit. If `vault_path` is empty in the hook output, skip silently (the config is missing or malformed).
+Vault path is passed inline by the hook (parsed once from the resolved config — `$OBSIDIAN_LOCAL_MD`, else `${XDG_CONFIG_HOME:-$HOME/.config}/claude-obsidian/obsidian.local.md`, else the plugin dir). Do **not** Read the config file from this skill — every read costs ~1-2K tokens per commit. If `vault_path` is empty in the hook output, skip silently (the config is missing or malformed).
 
 ## Steps
 

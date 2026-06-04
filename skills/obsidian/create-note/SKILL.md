@@ -10,12 +10,13 @@ Creates new notes or project structures in the vault.
 
 ## Vault Path
 
-Read `vault_path` from `${CLAUDE_PLUGIN_ROOT}/obsidian.local.md`. Example:
+Resolve the config path dynamically (stable, version-independent), then read `vault_path`:
 ```bash
-VAULT_PATH=$(grep '^vault_path:' "${CLAUDE_PLUGIN_ROOT}/obsidian.local.md" | sed 's/vault_path: //')
+CONFIG="$(bash "${CLAUDE_PLUGIN_ROOT}/scripts/lib/resolve-config.sh")"
+VAULT_PATH=$(grep '^vault_path:' "$CONFIG" | sed 's/vault_path: //')
 ```
 
-If `obsidian.local.md` does not exist, tell the user to run `/obsidian:setup` first and stop.
+If the resolver prints nothing (no config at `$OBSIDIAN_LOCAL_MD`, `${XDG_CONFIG_HOME:-$HOME/.config}/claude-obsidian/obsidian.local.md`, or `${CLAUDE_PLUGIN_ROOT}/obsidian.local.md`), tell the user to run `/obsidian:setup` first and stop.
 
 ## Steps
 
@@ -26,7 +27,7 @@ If `obsidian.local.md` does not exist, tell the user to run `/obsidian:setup` fi
    - Single note: title + frontmatter + H1 + empty sections
    - Project: `README.md` + subfolders (Plans, Notes, Meetings as appropriate)
 5. **Validate allow-list** — `strict_domains` defaults to `true` when absent from the config frontmatter; only an explicit `false` skips validation. When on:
-   - Parse the `## Project Taxonomy` table from `${CLAUDE_PLUGIN_ROOT}/obsidian.local.md`; the `Vault path` column is the canonical allow-list of top-level folders.
+   - Parse the `## Project Taxonomy` table from `$CONFIG` (resolved above); the `Vault path` column is the canonical allow-list of top-level folders.
    - Normalize both the allow-list entries and the resolved target before comparison: strip any trailing `/`, and lowercase both sides (macOS HFS+/default APFS is case-insensitive).
    - Compute the resolved target's top-level prefix (path up to and including the first allow-listed root match). Dated subfolders and per-repo namespacing *under* an allow-listed root are valid.
    - If no normalized allow-list entry is a prefix of the normalized target, **refuse to write**. Surface the closest match (Levenshtein on the top-level component, original casing from the taxonomy) and tell the user:

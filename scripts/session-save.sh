@@ -8,9 +8,10 @@ set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PLUGIN_ROOT="$(dirname "$SCRIPT_DIR")"
-CONFIG_FILE="${PLUGIN_ROOT}/obsidian.local.md"
+. "${SCRIPT_DIR}/lib/resolve-config.sh"
 
-if [ ! -f "$CONFIG_FILE" ]; then
+CONFIG_FILE="$(resolve_obsidian_config "$PLUGIN_ROOT")" || CONFIG_FILE=""
+if [ -z "$CONFIG_FILE" ] || [ ! -f "$CONFIG_FILE" ]; then
   exit 0
 fi
 
