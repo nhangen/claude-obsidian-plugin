@@ -103,7 +103,7 @@ Per-repo commit-capture overrides go in the same file under a `## Commit Capture
 ```
 .claude-plugin/plugin.json    Plugin manifest
 commands/*.md                 Slash command entry points
-skills/obsidian/*/SKILL.md    Skill logic (save, find, recall, setup, …)
+skills/*/SKILL.md             Skill logic (save, find, recall, setup, …)
 hooks/hooks.json              Stop + PostToolUse hook registration
 scripts/                      Hook executables (commit-capture, session-save, …)
 scripts/lib/resolve-config.sh Version-independent config-path resolver

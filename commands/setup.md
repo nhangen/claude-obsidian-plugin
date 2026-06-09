@@ -5,4 +5,4 @@ description: First-time setup wizard for the Obsidian plugin. Configures vault p
 
 Run the first-time setup wizard for the Obsidian plugin.
 
-Invoke the obsidian-setup skill to execute.
+Invoke the obsidian:setup skill to execute.

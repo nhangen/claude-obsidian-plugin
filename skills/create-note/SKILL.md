@@ -1,5 +1,5 @@
 ---
-name: obsidian-create-note
+name: create-note
 description: Creates a new note, project folder, or page in the Obsidian vault. Triggers on phrases like "create a note about X", "start a new project for Y", "add a page for Z", "new obsidian note", "create project folder", "set up a new project in obsidian".
 version: 1.0.0
 ---
@@ -22,7 +22,7 @@ If the resolver prints nothing (no config at `$OBSIDIAN_LOCAL_MD`, `${XDG_CONFIG
 
 1. **Check for vault conventions** — if `VAULT.md` exists at the vault root, read it. Follow any structure conventions it defines (e.g., custom note types, templates folder, naming conventions). If no `VAULT.md` exists, use the defaults below.
 2. **Determine type** — single note, project folder (with README + subfolders), or page in existing project
-3. **Route to correct domain** — use routing logic from `obsidian-save-conversation` skill
+3. **Route to correct domain** — use routing logic from `obsidian:save-conversation` skill
 4. **Generate content** — create appropriate starter template:
    - Single note: title + frontmatter + H1 + empty sections
    - Project: `README.md` + subfolders (Plans, Notes, Meetings as appropriate)

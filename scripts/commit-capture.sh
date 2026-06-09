@@ -137,7 +137,7 @@ if [ -n "$CONFIG_FILE" ] && [ -f "$CONFIG_FILE" ]; then
   done < "$CONFIG_FILE"
 fi
 
-# --- Output metadata inline for the obsidian-commit-capture skill ---
+# --- Output metadata inline for the obsidian:commit-capture skill ---
 
 printf 'obsidian-commit-capture: hash=%s | msg=%s | branch=%s | files=%s | org_repo=%s | repo_name=%s | ticket=%s | date=%s | time=%s | vault_path=%s\n' \
   "$HASH" "$MSG" "$BRANCH" "$FILES" "$ORG_REPO" "$REPO_NAME" "$TICKET" "$TODAY" "$NOW" "$VAULT_PATH"

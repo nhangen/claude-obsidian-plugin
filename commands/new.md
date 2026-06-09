@@ -5,4 +5,4 @@ description: Create a new note or project in Obsidian. Usage: /obsidian:new <tit
 
 Create a new note or project in the Obsidian vault with the given title.
 
-Invoke the obsidian-create-note skill to execute.
+Invoke the obsidian:create-note skill to execute.

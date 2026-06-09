@@ -8,4 +8,4 @@ Save the current conversation to the Obsidian vault.
 If a topic argument was provided, use it as a routing/title hint.
 Otherwise, auto-detect the domain from conversation context.
 
-Invoke the obsidian-save-conversation skill to execute.
+Invoke the obsidian:save-conversation skill to execute.
