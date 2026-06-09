@@ -1,5 +1,5 @@
 ---
-name: obsidian-setup
+name: setup
 description: First-time setup wizard for the Obsidian plugin. Guides the user through configuring vault path, domain taxonomy, and routing rules, then writes obsidian.local.md. Triggers on "/obsidian:setup", "set up obsidian", "configure obsidian plugin", "obsidian first run".
 version: 1.0.0
 ---

@@ -1,5 +1,5 @@
 ---
-name: obsidian-reorganize
+name: reorganize
 description: Reorganizes the Obsidian vault or a specific project. Triggers on phrases like "reorganize my vault", "clean up obsidian", "move X to Y in obsidian", "reorganize my notes", "restructure my projects", "organize the vault". Launches the vault-organizer subagent for deep analysis and execution.
 version: 1.0.0
 ---

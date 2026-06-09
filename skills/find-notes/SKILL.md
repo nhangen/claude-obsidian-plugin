@@ -1,5 +1,5 @@
 ---
-name: obsidian-find-notes
+name: find-notes
 description: Searches the Obsidian vault and returns matching notes. Triggers on phrases like "find my notes on X", "what did I write about Y", "search obsidian for Z", "do I have any notes about", "find in vault", "look up in obsidian".
 version: 1.0.0
 ---

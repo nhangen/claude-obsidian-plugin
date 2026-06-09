@@ -1,5 +1,5 @@
 ---
-name: obsidian-save-conversation
+name: save-conversation
 description: Exports the current Claude conversation to the Obsidian vault. Triggers on phrases like "save this to Obsidian", "export to obsidian", "document this session", "save our conversation", "write this up", "put this in obsidian". Formats the conversation as structured markdown, determines the correct project folder from context, and saves with a timestamped filename. Optionally opens the note in the Obsidian GUI.
 version: 1.0.0
 ---
@@ -118,7 +118,7 @@ When the keyword scan in step 2 produces **2+ candidate domains** (common for cr
 
 This prevents the parallel-tree problem (e.g. `Career/`, `Awesome Motive/career/`, `Personal/Job Search/` all accumulating notes about the same job-search thread because each save resolved to a different route).
 
-Mirror the precedence column in the example file's `## Project Taxonomy`. The setup wizard offers an optional precedence prompt — see `obsidian-setup`.
+Mirror the precedence column in the example file's `## Project Taxonomy`. The setup wizard offers an optional precedence prompt — see `obsidian:setup`.
 
 ## Allow-list Validation (strict_domains)
 

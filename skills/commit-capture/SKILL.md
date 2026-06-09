@@ -1,5 +1,5 @@
 ---
-name: obsidian-commit-capture
+name: commit-capture
 description: Captures conversation context around git commits to Obsidian vault. Fires automatically via PostToolUse hook.
 version: 2.1.0
 ---

@@ -1,5 +1,5 @@
 ---
-name: obsidian-recall
+name: recall
 description: Multi-source context recall. Searches Obsidian vault, git history, GitHub PRs, and claude-mem, then synthesizes a timeline report.
 version: 1.1.0
 ---
