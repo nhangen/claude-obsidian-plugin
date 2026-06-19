@@ -1,4 +1,5 @@
 ---
+name: obsidian:ask
 description: Ask the Obsidian vault librarian (query or file info). Usage: /obsidian:ask <question or note>
 ---
 
