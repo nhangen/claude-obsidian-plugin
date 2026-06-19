@@ -58,16 +58,20 @@ vault_index_plan() {
 
 vault_index_apply() {
   local folder="$1" idx="$2"
-  local state plan action fn tmp added=()
+  local state plan action fn touched tmp tmp2 added=()
   state="$(index_state_file "$idx")"
   plan="$(vault_index_plan "$folder" "$idx")"
 
+  # Extract exact filenames touched by the plan (2nd tab-field of each plan line).
+  touched="$(printf '%s\n' "$plan" | cut -f2)"
+
   tmp="$(mktemp "${TMPDIR:-/tmp}/idxstate-XXXXXX")"
+  tmp2="$(mktemp "${TMPDIR:-/tmp}/idxstate-XXXXXX")"
   # Carry forward existing entries except those touched by the plan.
   if [ -f "$state" ]; then
     while IFS=$'\t' read -r fn h; do
       case "$fn" in ''|\#*) continue ;; esac
-      if ! grep -qF -- "	$fn" <<<"$plan"; then
+      if [ -z "$touched" ] || ! grep -qxF -- "$fn" <<<"$touched"; then
         printf '%s\t%s\n' "$fn" "$h" >> "$tmp"
       fi
     done < "$state"
@@ -82,7 +86,8 @@ vault_index_apply() {
     esac
   done <<<"$plan"
 
-  { printf '# last_reconciled:%s\n' "$(now_epoch)"; sort "$tmp"; } > "$state"
+  { printf '# last_reconciled:%s\n' "$(now_epoch)"; sort "$tmp"; } > "$tmp2"
+  mv "$tmp2" "$state"
   rm -f "$tmp"
-  printf '%s\n' "${added[@]:-}" | sed '/^$/d'
+  (( ${#added[@]} )) && printf '%s\n' "${added[@]}" || true
 }

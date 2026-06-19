@@ -36,4 +36,33 @@ rm "$F/b.md"
 vault_index_apply "$F" "$IDX" >/dev/null
 [ -z "$(state_hash_for "$STATE" "b.md")" ] || fail "b.md should be dropped from state"
 
+# Substring collision regression: b.md must survive when only b.md.md changes.
+# Old grep -qF searched for tab+b.md in the plan; "CHANGED\tb.md.md" contains
+# the substring TAB+b+.+m+d at position 7, so b.md was wrongly excluded from
+# carry-forward even though it was not the plan entry being touched.
+TMP2="$(mktemp -d "${TMPDIR:-/tmp}/vault-apply-substr-XXXXXX")"; trap 'rm -rf "$TMP2"' EXIT
+F2="$TMP2/Decisions"; mkdir -p "$F2"
+IDX2="$F2/INDEX.md"; printf '# Decisions Index\n' > "$IDX2"
+printf 'content-b\n'      > "$F2/b.md"
+printf 'content-bdouble\n' > "$F2/b.md.md"
+STATE2="$(index_state_file "$IDX2")"
+
+# First apply: seeds both entries.
+vault_index_apply "$F2" "$IDX2" >/dev/null
+note_hash_valid "$(state_hash_for "$STATE2" "b.md")"    || fail "setup: b.md hash missing"
+note_hash_valid "$(state_hash_for "$STATE2" "b.md.md")" || fail "setup: b.md.md hash missing"
+
+# Change only b.md.md, leave b.md untouched.
+sleep 1
+printf 'content-bdouble-changed\n' > "$F2/b.md.md"
+
+# Apply again: plan touches b.md.md (CHANGED), not b.md.
+vault_index_apply "$F2" "$IDX2" >/dev/null
+
+# b.md's state entry must still exist.
+# Old code: grep -qF "\tb.md" <<<"CHANGED\tb.md.md" → matched (false positive).
+# New code: grep -qxF "b.md" <<<"b.md.md" → no match (correct).
+note_hash_valid "$(state_hash_for "$STATE2" "b.md")" \
+  || fail "substring regression: b.md state entry was wrongly dropped when b.md.md changed"
+
 echo "PASS: vault-index-apply"
