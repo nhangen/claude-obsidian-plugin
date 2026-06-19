@@ -9,6 +9,10 @@ sha256_of() {
   if [ -z "${out:-}" ] && command -v sha256sum >/dev/null 2>&1; then
     out="$(sha256sum "$1" 2>/dev/null | awk '{print $1}')"
   fi
+  if [ -z "${out:-}" ]; then
+    printf 'sha256_of: no sha256 tool (shasum/sha256sum) available\n' >&2
+    return 1
+  fi
   printf '%s' "$out"
 }
 
@@ -24,7 +28,16 @@ note_hash_valid() {
 }
 
 file_mtime() {
-  stat -f %m "$1" 2>/dev/null || stat -c %Y "$1"
+  local mt
+  mt="$(stat -f %m "$1" 2>/dev/null)"
+  if [ -z "$mt" ]; then
+    mt="$(stat -c %Y "$1" 2>/dev/null)"
+  fi
+  if [ -z "$mt" ]; then
+    printf 'file_mtime: cannot stat %s\n' "$1" >&2
+    return 1
+  fi
+  printf '%s\n' "$mt"
 }
 
 now_epoch() {
