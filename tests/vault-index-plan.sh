@@ -57,21 +57,26 @@ touch -t 197001010000 "$F/a.md"            # old mtime; malformed hash must stil
 PLAN="$(vault_index_plan "$F" "$IDX")"
 plan_has "CHANGED"$'\t'"a.md" "$PLAN"
 
-# Cold-start: last_reconciled is empty — must hash-check regardless of old mtime.
-# Seed a fresh folder with one note whose hash is stored but content has changed.
+# Cold-start mutation-sensitivity test:
+# last_reconciled is empty — plan must hash-check regardless of old mtime.
+#
+# Mutation-check contract: removing the [ -z "$last" ] branch from vault_index_plan
+# causes [ "$mt" -gt "" ] to throw (integer expression expected on macOS/Linux) and
+# the file is silently skipped → CHANGED is NOT reported → this assertion fails.
+# Verified: mutant (branch removed) exits non-zero with "FAIL: expected plan line: CHANGED".
 COLD="$TMP/Cold"; mkdir -p "$COLD"
 CIDX="$COLD/INDEX.md"; printf -- '- [[x]]\n' > "$CIDX"
 printf 'original body\n' > "$COLD/x.md"
 CSTATE="$(index_state_file "$CIDX")"
 
-# Store a valid hash for x.md (the OLD content hash).
+# Store the OLD content hash (before the content change below).
 OLD_HASH="$(note_hash "$COLD/x.md")"
 {
   printf '# last_reconciled:\n'          # header present but value is empty
   printf 'x.md\t%s\n' "$OLD_HASH"
 } > "$CSTATE"
 
-# Now change x.md content but set mtime to ancient — mtime alone would not trigger.
+# Change x.md content but set mtime to ancient — mtime branch alone would not trigger.
 printf 'changed body\n' > "$COLD/x.md"
 touch -t 197001010000 "$COLD/x.md"
 
