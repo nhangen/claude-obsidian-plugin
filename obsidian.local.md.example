@@ -26,6 +26,11 @@ Vault is at `/Users/yourname/Documents/Obsidian`.
 
 Run `/obsidian:setup` to generate this file interactively, or copy and edit manually.
 
+# The vault-librarian subagent (/obsidian:ask) maintains an INDEX.md per indexed
+# domain folder plus a hidden .<index>.state sidecar (content hashes +
+# last_reconciled). No additional config keys are required — it reuses the
+# Project Taxonomy and Routing Rules above.
+
 ## Project Taxonomy
 
 | Domain | Vault path | Precedence | Notes |

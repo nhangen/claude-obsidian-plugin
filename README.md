@@ -25,6 +25,27 @@ Long Claude sessions and the commits they produce hold context that's gone the m
 | `/obsidian:daily [content]` | Open or append to today's daily note. |
 | `/obsidian:bookmark [label]` | Mark a chapter boundary; saved as a separate note at session end. |
 | `/obsidian:recall <query>` | Cross-search vault, git history, GitHub PRs, and claude-mem. |
+| `/obsidian:ask` | Ask the vault librarian — index-grounded answers with citations, or file new info without back-and-forth. |
+
+### Vault Librarian
+
+`/obsidian:ask` dispatches the `vault-librarian` subagent. It answers queries by
+routing to the relevant domain folder, refreshing that slice's `INDEX.md`
+on-demand (two-stage: file mtime narrows candidates, a stored `size:sha256`
+content hash confirms real changes — so a Syncthing mtime-bump doesn't trigger
+re-indexing), then reading only the indexed notes and citing them with a
+confidence level. It reports indexing gaps rather than answering from a partial
+slice, and falls back to the `find` skill for raw-text search when the index
+misses.
+
+For inserts it routes new notes through the taxonomy, dedups against existing
+notes, writes via the matching `Templates/` file, and appends a link to the
+right INDEX — deferring genuine unknowns to `[ask]` markers in `Pending.md`
+instead of interrupting you.
+
+Per-INDEX machine state (content hashes + last-reconciled timestamp) lives in a
+hidden `.<index>.state` sidecar file beside each `INDEX.md`, so the human-
+readable index is only ever appended to, never rewritten.
 
 ## Hooks
 
