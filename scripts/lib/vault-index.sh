@@ -55,3 +55,34 @@ vault_index_plan() {
     fi
   done
 }
+
+vault_index_apply() {
+  local folder="$1" idx="$2"
+  local state plan action fn tmp added=()
+  state="$(index_state_file "$idx")"
+  plan="$(vault_index_plan "$folder" "$idx")"
+
+  tmp="$(mktemp "${TMPDIR:-/tmp}/idxstate-XXXXXX")"
+  # Carry forward existing entries except those touched by the plan.
+  if [ -f "$state" ]; then
+    while IFS=$'\t' read -r fn h; do
+      case "$fn" in ''|\#*) continue ;; esac
+      if ! grep -qF -- "	$fn" <<<"$plan"; then
+        printf '%s\t%s\n' "$fn" "$h" >> "$tmp"
+      fi
+    done < "$state"
+  fi
+  # Apply plan: ADD/CHANGED -> (re)write current hash; DROP -> omit.
+  while IFS=$'\t' read -r action fn; do
+    [ -z "$action" ] && continue
+    case "$action" in
+      ADD|CHANGED) printf '%s\t%s\n' "$fn" "$(note_hash "$folder/$fn")" >> "$tmp"
+                   [ "$action" = "ADD" ] && added+=("$fn") ;;
+      DROP) : ;;  # already excluded above
+    esac
+  done <<<"$plan"
+
+  { printf '# last_reconciled:%s\n' "$(now_epoch)"; sort "$tmp"; } > "$state"
+  rm -f "$tmp"
+  printf '%s\n' "${added[@]:-}" | sed '/^$/d'
+}
