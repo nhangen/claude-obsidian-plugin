@@ -42,7 +42,7 @@ slice is one or two domain folders, never the whole vault.
    summarize, or the INDEX is otherwise known-incomplete, say so and lower your
    stated confidence. Never give a confident answer from a partial slice.
 5. **Raw-text fallback:** if the INDEX slice yields zero candidate notes OR your
-   confidence is below "medium", call the existing **find skill** for a raw-text
+   confidence is below "medium", call the **find-notes skill** for a raw-text
    sweep before answering. Do not reimplement search.
 6. Return: the answer, `[[note]]` citations, a confidence word
    (high/medium/low), and any relevant `[ask]` items found in the slice.
@@ -53,7 +53,7 @@ slice is one or two domain folders, never the whole vault.
    routing confidence is low, do **not** commit silently — append an
    `[ask:where should this go?]` entry to `$VAULT_PATH/Pending.md` and ask the
    user once.
-2. **Dedup:** run the find skill / scan the target INDEX for near-duplicates
+2. **Dedup:** run the find-notes skill / scan the target INDEX for near-duplicates
    (Jaccard ~0.4). If a likely duplicate exists, **surface it and ask** whether
    to append to the existing note — never silently merge.
 3. Write the note using the matching template in `$VAULT_PATH/Templates/`.

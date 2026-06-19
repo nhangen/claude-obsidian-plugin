@@ -57,4 +57,25 @@ touch -t 197001010000 "$F/a.md"            # old mtime; malformed hash must stil
 PLAN="$(vault_index_plan "$F" "$IDX")"
 plan_has "CHANGED"$'\t'"a.md" "$PLAN"
 
+# Cold-start: last_reconciled is empty — must hash-check regardless of old mtime.
+# Seed a fresh folder with one note whose hash is stored but content has changed.
+COLD="$TMP/Cold"; mkdir -p "$COLD"
+CIDX="$COLD/INDEX.md"; printf -- '- [[x]]\n' > "$CIDX"
+printf 'original body\n' > "$COLD/x.md"
+CSTATE="$(index_state_file "$CIDX")"
+
+# Store a valid hash for x.md (the OLD content hash).
+OLD_HASH="$(note_hash "$COLD/x.md")"
+{
+  printf '# last_reconciled:\n'          # header present but value is empty
+  printf 'x.md\t%s\n' "$OLD_HASH"
+} > "$CSTATE"
+
+# Now change x.md content but set mtime to ancient — mtime alone would not trigger.
+printf 'changed body\n' > "$COLD/x.md"
+touch -t 197001010000 "$COLD/x.md"
+
+CPLAN="$(vault_index_plan "$COLD" "$CIDX")"
+plan_has "CHANGED"$'\t'"x.md" "$CPLAN"   # cold-start: hash-checked despite old mtime
+
 echo "PASS: vault-index-plan"

@@ -10,7 +10,7 @@ grep -q '^description:' "$A" || fail "missing frontmatter description"
 need "resolve-config.sh"          # resolves vault dynamically
 need "vault_index_apply"          # refreshes slice before answering
 need "coverage"                   # coverage invariant present
-need "find skill"                 # raw-text fallback to existing find
+need "find-notes"                 # raw-text fallback to find-notes skill
 need "Pending.md"                 # low-confidence routing -> [ask]
 need "dry-run"                    # destructive ops gated
 need "strict_domains"             # respects allow-list
