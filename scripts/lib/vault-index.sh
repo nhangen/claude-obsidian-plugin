@@ -38,6 +38,12 @@ vault_index_plan() {
   for f in "$folder"/*.md; do
     [ -e "$f" ] || continue
     base="$(basename "$f")"
+    # Skip filenames containing tabs or newlines — they corrupt TSV state.
+    case "$base" in
+      *$'\t'*|*$'\n'*)
+        printf 'vault_index_plan: skipping TSV-incompatible filename: %s\n' "$base" >&2
+        continue ;;
+    esac
     [ "$base" = "$idxbase" ] && continue
     stored="$(state_hash_for "$state" "$base")"
     if [ -z "$stored" ]; then
@@ -49,7 +55,7 @@ vault_index_plan() {
       continue
     fi
     mt="$(file_mtime "$f")"
-    if [ -z "$last" ] || [ "$mt" -gt "$last" ]; then   # candidate by mtime / cold start
+    if [ -z "$last" ] || [ -z "$mt" ] || [ "$mt" -gt "$last" ]; then   # cold start / mtime candidate / unreadable->hash path
       cur="$(note_hash "$f")"
       [ "$cur" != "$stored" ] && printf 'CHANGED\t%s\n' "$base"   # confirmed by hash
     fi
@@ -65,8 +71,10 @@ vault_index_apply() {
   # Extract exact filenames touched by the plan (2nd tab-field of each plan line).
   touched="$(printf '%s\n' "$plan" | cut -f2)"
 
-  tmp="$(mktemp "${TMPDIR:-/tmp}/idxstate-XXXXXX")"
-  tmp2="$(mktemp "${TMPDIR:-/tmp}/idxstate-XXXXXX")"
+  tmp="$(mktemp "${TMPDIR:-/tmp}/idxstate-XXXXXX")" || return 1
+  tmp2="$(mktemp "${TMPDIR:-/tmp}/idxstate-XXXXXX")" || { rm -f "$tmp"; return 1; }
+  trap 'rm -f "$tmp" "$tmp2"' RETURN
+
   # Carry forward existing entries except those touched by the plan.
   if [ -f "$state" ]; then
     while IFS=$'\t' read -r fn h; do
@@ -80,14 +88,20 @@ vault_index_apply() {
   while IFS=$'\t' read -r action fn; do
     [ -z "$action" ] && continue
     case "$action" in
-      ADD|CHANGED) printf '%s\t%s\n' "$fn" "$(note_hash "$folder/$fn")" >> "$tmp"
-                   [ "$action" = "ADD" ] && added+=("$fn") ;;
+      ADD|CHANGED)
+        local h
+        h="$(note_hash "$folder/$fn")"
+        if ! note_hash_valid "$h"; then
+          printf 'vault_index_apply: skipping %s — invalid hash\n' "$fn" >&2
+          continue
+        fi
+        printf '%s\t%s\n' "$fn" "$h" >> "$tmp"
+        [ "$action" = "ADD" ] && added+=("$fn") ;;
       DROP) : ;;  # already excluded above
     esac
   done <<<"$plan"
 
   { printf '# last_reconciled:%s\n' "$(now_epoch)"; sort "$tmp"; } > "$tmp2"
   mv "$tmp2" "$state"
-  rm -f "$tmp"
   (( ${#added[@]} )) && printf '%s\n' "${added[@]}" || true
 }
