@@ -22,8 +22,12 @@ keeper_scheduler_installed() {
   local os="${KEEPER_OS:-$(uname -s)}" label
   label="$(keeper_label)"
   [ -n "$label" ] || return 1
+  # Check LIVE state, not an on-disk artifact: install-watcher writes the plist
+  # before `launchctl load`, so a failed load can leave a plist that was never
+  # loaded. Reading `launchctl list` (mirroring the Linux `crontab -l` branch)
+  # means a not-running agent is correctly seen as absent and retried.
   case "$os" in
-    Darwin) [ -f "$HOME/Library/LaunchAgents/${label}.plist" ] ;;
+    Darwin) launchctl list 2>/dev/null | grep -qF "$label" ;;
     *)      crontab -l 2>/dev/null | grep -qF "# ${label}" ;;
   esac
 }
@@ -40,29 +44,43 @@ _kb_cfg_ensure() {
   ' "$cfg" > "$tmp" && mv "$tmp" "$cfg"
 }
 
-# keeper_ensure_active <plugin_root> <config_file> <vault_path> [interval_secs]
+# keeper_ensure_active <config_file> <vault_path> [interval_secs]
 keeper_ensure_active() {
-  local plugin_root="$1" cfg="$2" vault="$3" interval="${4:-900}"
+  local cfg="$1" vault="$2" interval="${3:-900}"
   [ -f "$cfg" ] && [ -d "$vault" ] || return 0
 
   local autostart
   autostart="$(grep '^keeper_autostart:' "$cfg" | head -1 | sed 's/^keeper_autostart:[[:space:]]*//')"
   [ "$autostart" = "false" ] && return 0
 
+  # A missing/empty label means the installer is broken — that's an error to
+  # report, not a "not installed" signal to barrel past into a doomed install.
+  local label; label="$(keeper_label)"
+  if [ -z "$label" ]; then
+    printf 'vaultkeeper: cannot resolve scheduler label (install-watcher.sh broken?); skipping activation\n' >&2
+    return 0
+  fi
+
   keeper_scheduler_installed && return 0
 
   local scripts; scripts="$(_kb_scripts)"
   local tick="$scripts/vaultkeeper-tick.sh"
-  bash "$scripts/seed-frontmatter-schema.sh" "$vault" "$cfg" >/dev/null 2>&1 || true
+  if ! bash "$scripts/seed-frontmatter-schema.sh" "$vault" "$cfg" >/dev/null 2>&1; then
+    printf 'vaultkeeper: frontmatter-schema seed failed; using default (tags type)\n' >&2
+  fi
   _kb_cfg_ensure keeper_autostart true "$cfg" || true
   _kb_cfg_ensure keeper_interval_secs "$interval" "$cfg" || true
 
+  local ok=""
   if [ -n "${VAULTKEEPER_INSTALL:-}" ]; then
-    "$VAULTKEEPER_INSTALL" "$tick" "$interval" \
-      && printf 'vaultkeeper: activated watcher on this host (interval %ss)\n' "$interval" >&2
+    "$VAULTKEEPER_INSTALL" "$tick" "$interval" && ok=1
   else
-    bash "$scripts/install-watcher.sh" install "$tick" "$interval" \
-      && printf 'vaultkeeper: activated watcher on this host (interval %ss)\n' "$interval" >&2
+    bash "$scripts/install-watcher.sh" install "$tick" "$interval" && ok=1
+  fi
+  if [ -n "$ok" ]; then
+    printf 'vaultkeeper: activated watcher on this host (interval %ss)\n' "$interval" >&2
+  else
+    printf 'vaultkeeper: watcher install FAILED on this host (will retry next session); run manually: bash %s/install-watcher.sh install %s %s\n' "$scripts" "$tick" "$interval" >&2
   fi
   return 0
 }

@@ -40,7 +40,11 @@ install_watcher() {
       local plist="$HOME/Library/LaunchAgents/${LABEL}.plist"
       render_launchd "$tick" "$interval" > "$plist"
       launchctl unload "$plist" 2>/dev/null || true
-      launchctl load "$plist"
+      if ! launchctl load "$plist"; then
+        rm -f "$plist"
+        echo "install-watcher: launchctl load failed; removed $plist (no unloaded artifact left behind)" >&2
+        exit 1
+      fi
       echo "installed launchd agent: $plist" ;;
     *)
       local line; line="$(render_cron "$tick" "$interval")"
