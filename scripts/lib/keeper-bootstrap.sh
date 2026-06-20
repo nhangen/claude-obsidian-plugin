@@ -26,9 +26,12 @@ keeper_scheduler_installed() {
   # before `launchctl load`, so a failed load can leave a plist that was never
   # loaded. Reading `launchctl list` (mirroring the Linux `crontab -l` branch)
   # means a not-running agent is correctly seen as absent and retried.
+  # Match the label as a whole field, not a substring: `launchctl list` puts
+  # the label in the last column, and the cron marker ends the line. Anchoring
+  # avoids a longer label that merely contains this one (anchored-identifier).
   case "$os" in
-    Darwin) launchctl list 2>/dev/null | grep -qF "$label" ;;
-    *)      crontab -l 2>/dev/null | grep -qF "# ${label}" ;;
+    Darwin) launchctl list 2>/dev/null | awk -v l="$label" '$NF==l{f=1} END{exit !f}' ;;
+    *)      crontab -l 2>/dev/null | grep -q -- "# ${label}\$" ;;
   esac
 }
 
