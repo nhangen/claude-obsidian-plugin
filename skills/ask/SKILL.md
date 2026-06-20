@@ -18,9 +18,15 @@ information.
 
 ## Steps
 
-1. Dispatch the `vault-librarian` agent with the user's request verbatim and an
+1. Run `bash "${CLAUDE_PLUGIN_ROOT}/scripts/ask-staleness.sh"`; if it prints a
+   line, show it to the user as a `⚠` banner before the answer.
+2. Dispatch the `vault-librarian` agent with the user's request verbatim and an
    explicit operation hint (`QUERY` or `INSERT`).
-2. Relay the subagent's result to the user: for QUERY, the cited answer +
+3. Relay the subagent's result to the user: for QUERY, the cited answer +
    confidence; for INSERT, what was written and where.
-3. If the subagent reports low-confidence routing or a near-duplicate, surface
+4. If the subagent reports low-confidence routing or a near-duplicate, surface
    its question to the user — do not auto-resolve it.
+
+**QUERY is read-only.** The QUERY path never writes to the vault. It reads
+frontmatter, INDEX links, and note text via the live substrate — it does not
+produce side-effects. Routes to `recall` or claude-mem as typed by the question.

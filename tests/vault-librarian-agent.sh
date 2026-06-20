@@ -15,4 +15,9 @@ need "Pending.md"                 # low-confidence routing -> [ask]
 need "dry-run"                    # destructive ops gated
 need "strict_domains"             # respects allow-list
 grep -q '## Hard Rules' "$A" || fail "missing Hard Rules section"
+# FIX E — guard the never-read-.base clause so deleting it breaks the suite.
+need "Never read a"   # "Never read a .base to answer"
+need ".base"          # the specific file type named in the prohibition
+need "write-only"     # the rationale word that anchors the clause
+
 echo "PASS: vault-librarian-agent"
