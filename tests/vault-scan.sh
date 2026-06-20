@@ -58,4 +58,23 @@ done
 grep -qF 'Librarian.md' <<<"$UNFILED" && fail "Librarian.md leaked into UNFILED"
 grep -qF 'Pending.md'   <<<"$UNFILED" && fail "Pending.md leaked into UNFILED"
 
+# FIX D — space-in-filename must not produce spurious single-word tokens.
+# "weekly review.md" has a space; without the fix, "review" becomes a lone token
+# and could falsely inflate a cluster alongside the hyphen-split files.
+mkdir -p "$V/SpaceTest"
+printf 'a\n' > "$V/SpaceTest/weekly review.md"
+printf 'a\n' > "$V/SpaceTest/weekly-review-1.md"
+printf 'a\n' > "$V/SpaceTest/weekly-review-2.md"
+SPACE_CLUSTERS="$(scan_clusters "$V" 2)"
+# "weekly" appears across all 3 SpaceTest files (count >= 2) — must still be detected
+has "CLUSTER"$'\t'"SpaceTest"$'\t'"weekly" "$SPACE_CLUSTERS"
+# With the fix, "review" is split from "weekly review.md" via space→hyphen
+# normalization, so it also counts across all 3 files — threshold met, emitted.
+has "CLUSTER"$'\t'"SpaceTest"$'\t'"review" "$SPACE_CLUSTERS"
+# Verify no cluster entry in SpaceTest shows count 1 (threshold is 2; all
+# tokens should meet it — no spurious single-file tokens from word-splitting).
+if printf '%s\n' "$SPACE_CLUSTERS" | grep "SpaceTest" | awk -F'\t' '{print $4}' | grep -q '^1$'; then
+  fail "space-filename produced a spurious count-1 cluster token"
+fi
+
 echo "PASS: vault-scan"

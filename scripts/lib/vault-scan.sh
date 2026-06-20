@@ -52,7 +52,7 @@ scan_clusters() {
     done < <(
       while IFS= read -r f; do
         base="$(basename "$f" .md)"
-        for tok in $(printf '%s\n' "$base" | tr '-' '\n' | sort -u); do
+        for tok in $(printf '%s\n' "$base" | tr ' ' '-' | tr '-' '\n' | sort -u); do
           [ -z "$tok" ] && continue
           # drop purely numeric tokens
           printf '%s' "$tok" | grep -qE '^[0-9]+$' && continue
