@@ -4,9 +4,15 @@
 
 keeper_vault_id() {
   local out
-  out="$(printf '%s' "$1" | shasum -a 256 2>/dev/null | awk '{print $1}')"
-  if [ -z "$out" ]; then
+  if command -v shasum >/dev/null 2>&1; then
+    out="$(printf '%s' "$1" | shasum -a 256 2>/dev/null | awk '{print $1}')"
+  fi
+  if [ -z "${out:-}" ] && command -v sha256sum >/dev/null 2>&1; then
     out="$(printf '%s' "$1" | sha256sum 2>/dev/null | awk '{print $1}')"
+  fi
+  if [ -z "${out:-}" ]; then
+    printf 'keeper_vault_id: no sha256 tool (shasum/sha256sum) available\n' >&2
+    return 1
   fi
   printf '%s' "${out:0:16}"
 }
