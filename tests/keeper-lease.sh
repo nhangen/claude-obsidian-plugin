@@ -69,4 +69,23 @@ grep -q "QUARANTINE"$'\t'"Pending.sync-conflict" <<<"$OUT2" || fail "Pending con
 [ "$(find "$V2/.vaultkeeper-quarantine" -name '*Pending.sync-conflict*' 2>/dev/null | wc -l | tr -d ' ')" = "1" ] \
   || fail "Pending conflict not preserved in quarantine (data loss)"
 
+# FIX C — .base over-match: user .base conflict must be left alone; only
+# _vaultkeeper-stem .base conflicts are quarantined.
+V3="$TMP/vault3"; mkdir -p "$V3"
+USER_BASE_CONFLICT="$V3/database.sync-conflict-20260620-120000-ABCDEFG.base"
+VK_BASE_CONFLICT="$V3/_vaultkeeper.sync-conflict-20260620-120000-ABCDEFG.base"
+printf 'user data\n' > "$USER_BASE_CONFLICT"
+printf 'vaultkeeper base\n' > "$VK_BASE_CONFLICT"
+OUT3="$(keeper_quarantine_conflicts "$V3")"
+# user .base conflict: must be left in place, not quarantined, not in output
+[ -e "$USER_BASE_CONFLICT" ] || fail "user .base conflict must remain at original path"
+[ "$(find "$V3/.vaultkeeper-quarantine" -name '*database.sync-conflict*' 2>/dev/null | wc -l | tr -d ' ')" = "0" ] \
+  || fail "user .base conflict must NOT be under quarantine"
+grep -q "database" <<<"$OUT3" && fail "user .base conflict must NOT appear in QUARANTINE output"
+# _vaultkeeper .base conflict: must be quarantined
+grep -q "QUARANTINE"$'\t'"_vaultkeeper.sync-conflict" <<<"$OUT3" || fail "_vaultkeeper .base conflict not surfaced"
+[ ! -e "$VK_BASE_CONFLICT" ] || fail "_vaultkeeper .base conflict not moved out of vault root"
+[ "$(find "$V3/.vaultkeeper-quarantine" -name '*_vaultkeeper.sync-conflict*' 2>/dev/null | wc -l | tr -d ' ')" = "1" ] \
+  || fail "_vaultkeeper .base conflict not preserved in quarantine"
+
 echo "PASS: keeper-lease"

@@ -53,7 +53,7 @@ keeper_quarantine_conflicts() {
   local vault="$1" q="$1/.vaultkeeper-quarantine" c base
   while IFS= read -r c; do
     base="$(basename "$c")"
-    if printf '%s\n' "$base" | grep -qE '^Librarian\.sync-conflict-|^Pending\.sync-conflict-|^.*\.base\.sync-conflict-|^.*\.sync-conflict-.*\.base$'; then
+    if printf '%s\n' "$base" | grep -qE '^Librarian\.sync-conflict-|^Pending\.sync-conflict-|^_vaultkeeper\.base\.sync-conflict-|^_vaultkeeper\.sync-conflict-.*\.base$'; then
       mkdir -p "$q"
       if ! mv "$c" "$q/$(now_epoch)-$base"; then
         printf 'keeper_quarantine_conflicts: failed to quarantine %s\n' "$c" >&2
