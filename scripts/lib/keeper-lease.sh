@@ -55,7 +55,10 @@ keeper_quarantine_conflicts() {
     base="$(basename "$c")"
     if printf '%s\n' "$base" | grep -qE '^Librarian\.sync-conflict-|^Pending\.sync-conflict-|^.*\.base\.sync-conflict-|^.*\.sync-conflict-.*\.base$'; then
       mkdir -p "$q"
-      mv "$c" "$q/$(now_epoch)-$base"
+      if ! mv "$c" "$q/$(now_epoch)-$base"; then
+        printf 'keeper_quarantine_conflicts: failed to quarantine %s\n' "$c" >&2
+        continue
+      fi
       printf 'QUARANTINE\t%s\n' "${c#"$vault"/}"
     fi
   done < <(find "$vault" -maxdepth 2 -type f -name '*.sync-conflict-*' \
