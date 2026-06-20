@@ -30,7 +30,7 @@ EOF
 render_cron() {
   local tick="$1" interval="$2" minutes
   minutes=$(( interval / 60 )); [ "$minutes" -lt 1 ] && minutes=1
-  printf '*/%s * * * * /bin/bash %s >/dev/null 2>&1 # %s\n' "$minutes" "$tick" "$LABEL"
+  printf '*/%s * * * * /bin/bash "%s" >/dev/null 2>&1 # %s\n' "$minutes" "$tick" "$LABEL"
 }
 
 install_watcher() {

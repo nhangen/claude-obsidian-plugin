@@ -13,6 +13,7 @@ grep -q '<integer>900</integer>' <<<"$PLIST" || fail "plist missing StartInterva
 CRON="$(bash "$SH" render-cron "$TICK" 900)"
 grep -qF "$TICK" <<<"$CRON" || fail "cron line missing tick path"
 grep -q '# com.nhangen.obsidian-vaultkeeper' <<<"$CRON" || fail "cron line missing namespace marker"
+grep -qF "\"$TICK\"" <<<"$CRON" || fail "cron line tick path not wrapped in double quotes"
 
 # Unknown subcommand must fail loudly (enum-config-typo-fallback discipline).
 if bash "$SH" frobnicate "$TICK" 900 >/dev/null 2>&1; then
