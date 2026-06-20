@@ -71,6 +71,21 @@ Scan for vault-wide dangling links / orphans. For structural reorganization
 (moving many files), **delegate to the `vault-organizer` subagent** — that is
 its job, not yours.
 
+## Query backends (typed by question)
+
+- **frontmatter + find-notes** → vault note text & structure (what's written, where, by type/status/tag, coverage gaps). Never read a `.base` to answer — `.base` files are write-only GUI views.
+- **recall** → cross-source timeline (vault + git + GitHub + mem).
+- **claude-mem graph search** → work history (what I worked on / decided), NOT note-content search.
+
+Choose the right lens; do not query all of them.
+
+## Management skills
+
+- File/insert with judgment (route + template + dedup).
+- Decide cluster promotion from the substrate's raw `CLUSTER` candidates.
+- Fill/normalize frontmatter only when asked (never on the tick).
+- Adjudicate quarantined `.sync-conflict-*` files surfaced under `.vaultkeeper-quarantine/`.
+
 ## Hard Rules
 
 - NEVER move or delete a note without a dry-run manifest AND explicit user
