@@ -61,13 +61,19 @@ The plugin includes a two-layer background maintenance system that keeps the vau
 
 `Librarian.md` is written exclusively by the keeper tick. Manual edits do not persist — the next tick overwrites it atomically. Read it as a live dashboard; don't edit it.
 
-### Install
+### Activation (automatic)
+
+The keeper activates itself. The first time the session-end hook (`session-save.sh`) runs on a host where the keeper isn't scheduled yet, it seeds the frontmatter schema, writes default keeper config, and installs the namespaced scheduler — no command to run. Once installed it's a cheap no-op on every later session end.
+
+Because Syncthing carries the vault but not a launchd plist / crontab line, each host self-activates the first time you work on it. Opt out with `keeper_autostart: false` in `obsidian.local.md`.
+
+To install manually (or on a host you never run a session on), the engine is still directly invokable:
 
 ```bash
 bash scripts/install-watcher.sh install "$(pwd)/scripts/vaultkeeper-tick.sh"
 ```
 
-This registers the keeper under the `com.nhangen.obsidian-vaultkeeper` namespace — visible in `crontab -l` (Linux) or `launchctl list | grep obsidian-vaultkeeper` (macOS) for audits.
+Either way the keeper registers under the `com.nhangen.obsidian-vaultkeeper` namespace — visible in `crontab -l` (Linux) or `launchctl list | grep obsidian-vaultkeeper` (macOS) for audits.
 
 ### No CEO writes
 

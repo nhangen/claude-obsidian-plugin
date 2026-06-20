@@ -25,6 +25,12 @@ if [ -z "$VAULT_PATH" ] || [ ! -d "$VAULT_PATH" ]; then
   exit 0
 fi
 
+# Self-activate the vaultkeeper watcher on this host if it isn't scheduled yet.
+# Cheap no-op once installed; never blocks autosave (opt out: keeper_autostart: false).
+. "${SCRIPT_DIR}/lib/keeper-bootstrap.sh"
+KEEPER_INTERVAL=$(grep '^keeper_interval_secs:' "$CONFIG_FILE" | head -1 | sed 's/^keeper_interval_secs:[[:space:]]*//')
+keeper_ensure_active "$CONFIG_FILE" "$VAULT_PATH" "${KEEPER_INTERVAL:-900}" || true
+
 if ! command -v python3 >/dev/null 2>&1; then
   echo "session-save.sh: python3 not found; autosave requires python3 to parse hook JSON" >&2
   exit 0
