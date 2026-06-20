@@ -19,6 +19,10 @@ note $'\n' 'x' ".obsidian/cfg.md"
 note $'\n' 'x' ".trash/old.md"
 # a .base file present — must never appear in any scan output
 printf 'filters: {}\n' > "$V/_vaultkeeper.base"
+# keeper-owned files at vault root — must never appear in any scan output
+printf '## Open [ask] items\n\n- [ ] review foo\n' > "$V/Librarian.md"
+printf '## Gap items\n\n- [ ] fix bar\n'            > "$V/Pending.md"
+printf 'filters: {}\n'                              > "$V/keeper.base"
 # cluster: 3 files sharing token "weekly" in Projects/
 printf 'a\n' > "$V/Projects/weekly-review-1.md"
 printf 'a\n' > "$V/Projects/weekly-review-2.md"
@@ -44,5 +48,14 @@ has "CLUSTER"$'\t'"Projects"$'\t'"weekly"$'\t'"3" "$CLUSTERS"
 # "review" appears in only 2 files (below threshold 3) -> must NOT be emitted.
 lacks "CLUSTER"$'\t'"Projects"$'\t'"review" "$CLUSTERS"
 grep -q '\.base' <<<"$CLUSTERS" && fail ".base leaked into clusters"
+
+# keeper-owned files must not appear in any scan output
+for _scan_out in "$GAPS" "$ASKS" "$CLUSTERS"; do
+  grep -qF 'Librarian.md' <<<"$_scan_out" && fail "Librarian.md leaked into scan output"
+  grep -qF 'Pending.md'   <<<"$_scan_out" && fail "Pending.md leaked into scan output"
+  grep -qF 'keeper.base'  <<<"$_scan_out" && fail ".base file leaked into scan output"
+done
+grep -qF 'Librarian.md' <<<"$UNFILED" && fail "Librarian.md leaked into UNFILED"
+grep -qF 'Pending.md'   <<<"$UNFILED" && fail "Pending.md leaked into UNFILED"
 
 echo "PASS: vault-scan"

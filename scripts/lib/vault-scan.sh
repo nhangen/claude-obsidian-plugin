@@ -7,7 +7,9 @@
 _scan_find_md() {
   find "$1" -type f -name '*.md' \
     ! -path '*/.obsidian/*' ! -path '*/.trash/*' \
-    ! -path '*/.git/*' ! -path '*/.vaultkeeper-quarantine/*'
+    ! -path '*/.git/*' ! -path '*/.vaultkeeper-quarantine/*' \
+    ! -path '*/.vaultkeeper/*' \
+    ! -name 'Librarian.md' ! -name 'Pending.md' ! -name '*.base'
 }
 
 scan_frontmatter_gaps() {
@@ -64,5 +66,6 @@ scan_clusters() {
             ! -path '*/.obsidian' ! -path '*/.obsidian/*' \
             ! -path '*/.trash'    ! -path '*/.trash/*' \
             ! -path '*/.git'      ! -path '*/.git/*' \
-            ! -path '*/.vaultkeeper-quarantine' ! -path '*/.vaultkeeper-quarantine/*')
+            ! -path '*/.vaultkeeper-quarantine' ! -path '*/.vaultkeeper-quarantine/*' \
+            ! -path '*/.vaultkeeper'            ! -path '*/.vaultkeeper/*')
 }
