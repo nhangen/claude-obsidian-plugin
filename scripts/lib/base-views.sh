@@ -20,7 +20,7 @@ EOF
 
 base_view_write() {
   local target="$1" tmp
-  tmp="$(mktemp "${TMPDIR:-/tmp}/base-XXXXXX")" || return 1
+  tmp="$(mktemp "$(dirname "$target")/.base-XXXXXX")" || return 1
   base_view_content > "$tmp"
   if [ -f "$target" ] && cmp -s "$tmp" "$target"; then
     rm -f "$tmp"
