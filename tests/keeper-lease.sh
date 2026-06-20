@@ -50,4 +50,23 @@ grep -q "QUARANTINE"$'\t'"Librarian.sync-conflict" <<<"$OUT" || fail "conflict n
   || fail "conflict not preserved in quarantine (data loss)"
 [ -f "$V/Librarian.md" ] || fail "canonical Librarian.md must be untouched"
 
+# Quarantine: non-keeper conflict is left in place; Pending keeper conflict is quarantined.
+# Single keeper_quarantine_conflicts call processes all conflicts at once.
+V2="$TMP/vault2"; mkdir -p "$V2"
+NONKEEPER="$V2/MyNote.sync-conflict-20260620-120000-ABCDEFG.md"
+KEEPER_CONFLICT="$V2/Pending.sync-conflict-20260620-120000-ABCDEFG.md"
+printf 'non-keeper conflict\n' > "$NONKEEPER"
+printf 'pending keeper conflict\n' > "$KEEPER_CONFLICT"
+OUT2="$(keeper_quarantine_conflicts "$V2")"
+# non-keeper: still at original path, not in quarantine dir, not in output
+[ -e "$NONKEEPER" ] || fail "MyNote conflict must remain at original path"
+[ "$(find "$V2/.vaultkeeper-quarantine" -name '*MyNote*' 2>/dev/null | wc -l | tr -d ' ')" = "0" ] \
+  || fail "MyNote conflict must NOT be under quarantine"
+grep -q "MyNote" <<<"$OUT2" && fail "MyNote must NOT appear in QUARANTINE output"
+# keeper (Pending): surfaced, moved out of root, preserved in quarantine
+grep -q "QUARANTINE"$'\t'"Pending.sync-conflict" <<<"$OUT2" || fail "Pending conflict not surfaced"
+[ ! -e "$KEEPER_CONFLICT" ] || fail "Pending conflict not moved out of vault root"
+[ "$(find "$V2/.vaultkeeper-quarantine" -name '*Pending.sync-conflict*' 2>/dev/null | wc -l | tr -d ' ')" = "1" ] \
+  || fail "Pending conflict not preserved in quarantine (data loss)"
+
 echo "PASS: keeper-lease"
