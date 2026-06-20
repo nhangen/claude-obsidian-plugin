@@ -5,7 +5,7 @@
 set -euo pipefail
 LABEL="com.nhangen.obsidian-vaultkeeper"
 
-usage() { echo "usage: install-watcher.sh {render-launchd|render-cron|install} <tick_abs_path> [interval_secs]" >&2; exit 2; }
+usage() { echo "usage: install-watcher.sh {label|render-launchd|render-cron|install} <tick_abs_path> [interval_secs]" >&2; exit 2; }
 
 render_launchd() {
   local tick="$1" interval="$2"
@@ -50,6 +50,7 @@ install_watcher() {
 }
 
 case "${1:-}" in
+  label)          printf '%s\n' "$LABEL" ;;
   render-launchd) [ $# -ge 3 ] || usage; render_launchd "$2" "$3" ;;
   render-cron)    [ $# -ge 3 ] || usage; render_cron "$2" "$3" ;;
   install)        [ $# -ge 2 ] || usage; install_watcher "$2" "${3:-900}" ;;

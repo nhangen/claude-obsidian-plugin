@@ -13,6 +13,7 @@ moc_promotion_threshold: 3
 frontmatter_required: tags type
 keeper_host_priority: ml-1 mbp
 keeper_interval_secs: 900
+keeper_autostart: true
 intent_high_score: 0.70
 intent_margin: 0.15
 capture_high_score: 0.70
@@ -79,9 +80,13 @@ unfiled notes / open `[ask]`s / promotable clusters into the machine-owned
 `Librarian.md`, appends only genuinely-new items to `Pending.md`, and maintains
 `_vaultkeeper.base` (a write-only GUI view — never read to answer queries).
 
-- `frontmatter_required` — keys every note should carry (seed once via
-  `scripts/seed-frontmatter-schema.sh`). The tick only *surfaces* gaps; it never
-  auto-writes frontmatter.
+- `keeper_autostart` — when not `false`, the session-end hook self-installs the
+  keeper scheduler on this host the first time it runs (seeds the schema, writes
+  these defaults, installs the namespaced launchd/cron job). Set `false` to keep
+  activation fully manual.
+- `frontmatter_required` — keys every note should carry. Seeded automatically on
+  first activation (or manually via `scripts/seed-frontmatter-schema.sh`). The
+  tick only *surfaces* gaps; it never auto-writes frontmatter.
 - `keeper_host_priority` — host election order over Syncthing (highest-priority
   live host owns shared writes; others defer). `.sync-conflict-*` files on
   keeper-owned files are quarantined under `.vaultkeeper-quarantine/`, never
