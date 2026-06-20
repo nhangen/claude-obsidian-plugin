@@ -47,6 +47,32 @@ Per-INDEX machine state (content hashes + last-reconciled timestamp) lives in a
 hidden `.<index>.state` sidecar file beside each `INDEX.md`, so the human-
 readable index is only ever appended to, never rewritten.
 
+## vaultkeeper watcher
+
+The plugin includes a two-layer background maintenance system that keeps the vault accurate without LLM overhead on every tick.
+
+### Two-layer model
+
+**Layer 1 — deterministic substrate tick** (`scripts/vaultkeeper-tick.sh`): a pure-bash script that runs on cron (Linux) or launchd (macOS), namespaced `com.nhangen.obsidian-vaultkeeper`. It validates frontmatter against the required keys, scans for unfiled notes, open `[ask]` markers, and promotable clusters, then surfaces candidates into `Librarian.md` and appends only genuinely-new items to `Pending.md`. No LLM involved; no writes to the CEO vault.
+
+**Layer 2 — on-demand agent** (`/obsidian:ask`): the `vault-librarian` subagent answers queries and acts on the pre-computed candidate lists from Layer 1, only spinning up an LLM when a human query needs it.
+
+### Machine-owned Librarian.md
+
+`Librarian.md` is written exclusively by the keeper tick. Manual edits do not persist — the next tick overwrites it atomically. Read it as a live dashboard; don't edit it.
+
+### Install
+
+```bash
+bash scripts/install-watcher.sh install "$(pwd)/scripts/vaultkeeper-tick.sh"
+```
+
+This registers the keeper under the `com.nhangen.obsidian-vaultkeeper` namespace — visible in `crontab -l` (Linux) or `launchctl list | grep obsidian-vaultkeeper` (macOS) for audits.
+
+### No CEO writes
+
+The keeper writes only to the Obsidian vault (`vault_path` from `obsidian.local.md`). It never writes to the CEO vault or any other synced store.
+
 ## Hooks
 
 | Event | Script | Behavior |

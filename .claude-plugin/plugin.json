@@ -1,10 +1,10 @@
 {
   "name": "obsidian",
-  "version": "1.8.0",
+  "version": "1.9.0",
   "description": "Obsidian vault integration for Claude Code. Auto-capture git commit context, auto-save sessions via background claude CLI summarizer, export conversations, create/retrieve notes, and auto-organize content.",
   "author": {
     "name": "nhangen"
   },
   "license": "MIT",
-  "keywords": ["obsidian", "notes", "vault", "knowledge", "export", "commit-capture", "recall", "ask", "librarian"]
+  "keywords": ["obsidian", "notes", "vault", "knowledge", "export", "commit-capture", "recall", "ask", "librarian", "vaultkeeper"]
 }
