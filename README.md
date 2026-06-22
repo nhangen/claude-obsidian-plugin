@@ -83,6 +83,7 @@ The keeper writes only to the Obsidian vault (`vault_path` from `obsidian.local.
 
 | Event | Script | Behavior |
 |---|---|---|
+| `SessionStart` | `scripts/config-doctor.sh` | If the plugin is installed but unconfigured on this host (no `obsidian.local.md`) while a synced vault is detectable, surfaces an advisory so the agent can offer `/obsidian:setup`. Silent once configured, and silent on hosts with no vault. Advisory only — a hook can't prompt. |
 | `Stop` | `scripts/session-save.sh` | Auto-saves significant sessions via background `claude --print` summarizer. Skips trivial sessions. |
 | `PostToolUse` (Bash) | `scripts/commit-capture.sh` | After a successful `git commit`, appends a context block to `<vault>/Projects/Development/<org>_<repo>/<YYYY-MM-DD>.md`. Per-repo overrides supported (e.g. `altamira2/mtf-builder` → flat `<vault>/Altamira/<date>-mtf-builder-commits.md`). |
 
