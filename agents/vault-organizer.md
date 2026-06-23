@@ -12,7 +12,7 @@ Find the vault path for THIS machine — never hardcode it. Read `vault_path` fr
 
 ```bash
 CONFIG="${OBSIDIAN_LOCAL_MD:-${XDG_CONFIG_HOME:-$HOME/.config}/claude-obsidian/obsidian.local.md}"
-VAULT=$(grep -m1 '^vault_path:' "$CONFIG" | sed 's/^vault_path:[[:space:]]*//')
+VAULT=$(grep -m1 '^vault_path:' "$CONFIG" | sed 's/^vault_path:[[:space:]]*//; s/[[:space:]]*#.*//; s/^"//; s/"[[:space:]]*$//; s/[[:space:]]*$//')
 ```
 
 (Same config the obsidian skills use. e.g. `/Users/nhangen/Documents/Obsidian` on macOS, `/mnt/z/Users/nhang/Documents/Obsidian` on WSL.) If the config is missing, stop and ask the user to run `/obsidian:setup`.
@@ -34,7 +34,7 @@ TARS/             — AI agent configs
 
 ## Process
 
-1. Get full vault tree: `find ~/obsidian -name "*.md" -not -path "*/.obsidian/*" | sort`
+1. Get full vault tree: `find "$VAULT" -name "*.md" -not -path "*/.obsidian/*" | sort`
 2. Identify issues:
    - Files in wrong domain folder
    - Notes in root that should be in a subfolder
@@ -43,7 +43,7 @@ TARS/             — AI agent configs
 3. Build a proposed move list — every change as `OLD → NEW`
 4. Present to user for approval — include count of changes
 5. On approval:
-   a. Write rollback manifest to `Reference/vault-reorg-YYYY-MM-DD.md`
+   a. Write rollback manifest to `$VAULT/Reference/vault-reorg-YYYY-MM-DD.md`
    b. Execute each move with `mv`
    c. Report completion summary
 6. On rejection: ask what to adjust, re-propose
