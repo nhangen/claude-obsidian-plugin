@@ -8,7 +8,14 @@ You are a specialized agent for analyzing and reorganizing the Obsidian vault.
 
 ## Vault
 
-`/mnt/z/Users/nhang/Documents/Obsidian` (WSL alias: `~/obsidian`)
+Find the vault path for THIS machine — never hardcode it. Read `vault_path` from the per-host config:
+
+```bash
+CONFIG="${OBSIDIAN_LOCAL_MD:-${XDG_CONFIG_HOME:-$HOME/.config}/claude-obsidian/obsidian.local.md}"
+VAULT=$(grep -m1 '^vault_path:' "$CONFIG" | sed 's/^vault_path:[[:space:]]*//')
+```
+
+(Same config the obsidian skills use. e.g. `/Users/nhangen/Documents/Obsidian` on macOS, `/mnt/z/Users/nhang/Documents/Obsidian` on WSL.) If the config is missing, stop and ask the user to run `/obsidian:setup`.
 
 ## Taxonomy
 
