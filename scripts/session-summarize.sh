@@ -73,6 +73,21 @@ Capture action values:
 - substrate_update: research-substrate claim/evidence/literature/experiment update is warranted
 - decision_record: durable decision or plan record is warranted
 
+Research state change values:
+- none: no claim/evidence/experiment/literature state changed
+- supports_claim: session added support for an existing research claim
+- weakens_claim: session weakened or invalidated an existing research claim
+- new_claim: session produced a durable new research claim
+- new_experiment: session produced or materially refined an experiment
+- new_evidence: session produced a durable evidence or literature object
+
+Research substrate check:
+- Ask: Did this session create, weaken, support, or test a research claim?
+- Use research_state_change: none when the answer is no, even for normal execution/planning notes.
+- Use substrate_object for the expected or updated Obsidian wikilink when research_state_change is not none.
+- If capture_action is substrate_update, research_state_change must not be none and substrate_object should point under Projects/Physics-AI-ML/Research-Substrate/.
+- If an execution session tests an active research claim, keep session_intent: execution and set the appropriate research_state_change.
+
 Scoring rules:
 - Assign a numeric score from 0.00 to 1.00 for session_intent and capture_action.
 - session_intent confidence is high if score >= INTENT_HIGH_SCORE_PLACEHOLDER and the margin over the next plausible option is >= INTENT_MARGIN_PLACEHOLDER.
@@ -97,6 +112,8 @@ capture_action: <none|daily_only|project_note|substrate_update|decision_record>
 capture_action_score: <0.00-1.00>
 capture_action_confidence: <high|medium|low>
 capture_needs_confirmation: <true|false>
+research_state_change: <none|supports_claim|weakens_claim|new_claim|new_experiment|new_evidence>
+substrate_object: "<Obsidian wikilink or empty string>"
 tags: [<relevant tags>]
 ---
 
@@ -105,6 +122,8 @@ tags: [<relevant tags>]
 ## Capture Inference
 - **Session intent:** `<value>` (`<confidence>`, `<score>`)
 - **Capture action:** `<value>` (`<confidence>`, `<score>`)
+- **Research state change:** `<value>`
+- **Substrate object:** `<wikilink or none>`
 - **Evidence:**
   - <concrete signal 1>
   - <concrete signal 2>
@@ -148,11 +167,13 @@ VAULT_FOLDER=$(printf '%s\n' "$RESULT" | grep '^vault_folder:' | head -1 | sed '
 SLUG=$(printf '%s\n' "$RESULT" | grep '^slug:' | head -1 | sed 's/^slug:[[:space:]]*//')
 SESSION_INTENT=$(printf '%s\n' "$RESULT" | grep '^session_intent:' | head -1 | sed 's/^session_intent:[[:space:]]*//')
 CAPTURE_ACTION=$(printf '%s\n' "$RESULT" | grep '^capture_action:' | head -1 | sed 's/^capture_action:[[:space:]]*//')
+RESEARCH_STATE_CHANGE=$(printf '%s\n' "$RESULT" | grep '^research_state_change:' | head -1 | sed 's/^research_state_change:[[:space:]]*//')
 
 : "${VAULT_FOLDER:=Inbox/}"
 : "${SLUG:=session-note}"
 : "${SESSION_INTENT:=scratch}"
 : "${CAPTURE_ACTION:=project_note}"
+: "${RESEARCH_STATE_CHANGE:=none}"
 
 # Sanitize: strip path traversal, restrict slug to safe characters
 VAULT_FOLDER=$(printf '%s' "$VAULT_FOLDER" | sed 's|\.\./||g; s|^\./||; s|^/||')
@@ -160,11 +181,24 @@ SLUG=$(printf '%s' "$SLUG" | sed 's/[^a-z0-9-]//g')
 : "${SLUG:=session-note}"
 case "$SESSION_INTENT" in
   execution|research|planning|reflection|operations|scratch) ;;
-  *) SESSION_INTENT="scratch" ;;
+  *)
+    RESULT=$(printf '%s\n' "$RESULT" | sed 's/^session_intent:.*/session_intent: scratch/')
+    SESSION_INTENT="scratch"
+    ;;
 esac
 case "$CAPTURE_ACTION" in
   none|daily_only|project_note|substrate_update|decision_record) ;;
-  *) CAPTURE_ACTION="project_note" ;;
+  *)
+    RESULT=$(printf '%s\n' "$RESULT" | sed 's/^capture_action:.*/capture_action: project_note/')
+    CAPTURE_ACTION="project_note"
+    ;;
+esac
+case "$RESEARCH_STATE_CHANGE" in
+  none|supports_claim|weakens_claim|new_claim|new_experiment|new_evidence) ;;
+  *)
+    RESULT=$(printf '%s\n' "$RESULT" | sed 's/^research_state_change:.*/research_state_change: none/')
+    RESEARCH_STATE_CHANGE="none"
+    ;;
 esac
 if [ "$CAPTURE_ACTION" = "none" ]; then
   exit 0

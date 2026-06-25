@@ -112,6 +112,8 @@ capture_action: substrate_update
 capture_action_score: 0.88
 capture_action_confidence: high
 capture_needs_confirmation: false
+research_state_change: new_evidence
+substrate_object: "[[Projects/Physics-AI-ML/Research-Substrate/evidence/ai-scientist-substrate]]"
 tags: [research]
 ---
 
@@ -120,6 +122,8 @@ tags: [research]
 ## Capture Inference
 - **Session intent:** `research` (`high`, `0.91`)
 - **Capture action:** `substrate_update` (`high`, `0.88`)
+- **Research state change:** `new_evidence`
+- **Substrate object:** `[[Projects/Physics-AI-ML/Research-Substrate/evidence/ai-scientist-substrate]]`
 - **Evidence:**
   - user supplied papers
   - user asked for substrate update
@@ -134,6 +138,8 @@ tags: [research]
   assert_file "$daily"
   assert_contains "$note" "session_intent: research"
   assert_contains "$note" "capture_action: substrate_update"
+  assert_contains "$note" "research_state_change: new_evidence"
+  assert_contains "$note" "substrate_object: \"[[Projects/Physics-AI-ML/Research-Substrate/evidence/ai-scientist-substrate]]\""
   assert_contains "$note" "## Capture Inference"
   assert_not_contains "$note" "vault_folder:"
   assert_not_contains "$note" "slug:"
@@ -141,6 +147,8 @@ tags: [research]
   assert_contains "${CASE_DIR}/prompt.txt" "session_intent confidence is high if score >= 0.82"
   assert_contains "${CASE_DIR}/prompt.txt" "capture_action confidence is high if score >= 0.77"
   assert_contains "${CASE_DIR}/prompt.txt" "capture_needs_confirmation"
+  assert_contains "${CASE_DIR}/prompt.txt" "Research state change values:"
+  assert_contains "${CASE_DIR}/prompt.txt" "Did this session create, weaken, support, or test a research claim?"
 }
 
 test_scratch_none_skips() {
@@ -159,6 +167,8 @@ capture_action: none
 capture_action_score: 0.92
 capture_action_confidence: high
 capture_needs_confirmation: false
+research_state_change: none
+substrate_object: ""
 tags: []
 ---
 
@@ -184,6 +194,8 @@ capture_action: none
 capture_action_score: 0.81
 capture_action_confidence: high
 capture_needs_confirmation: false
+research_state_change: none
+substrate_object: ""
 tags: []
 ---
 
@@ -209,6 +221,8 @@ capture_action: daily_only
 capture_action_score: 0.70
 capture_action_confidence: medium
 capture_needs_confirmation: true
+research_state_change: none
+substrate_object: ""
 tags: [reflection]
 ---
 
@@ -251,6 +265,8 @@ capture_action: daily_only
 capture_action_score: 0.74
 capture_action_confidence: medium
 capture_needs_confirmation: true
+research_state_change: none
+substrate_object: ""
 tags: [reflection]
 ---
 
@@ -286,6 +302,8 @@ capture_action: project_note
 capture_action_score: 0.79
 capture_action_confidence: high
 capture_needs_confirmation: false
+research_state_change: none
+substrate_object: ""
 tags: [operations]
 ---
 
@@ -306,6 +324,7 @@ tags: [operations]
   assert_file "$note"
   assert_contains "$note" "session_intent: operations"
   assert_contains "$note" "capture_action: project_note"
+  assert_contains "$note" "research_state_change: none"
   assert_not_contains "$note" "capture_action: substrate_update"
 }
 
@@ -325,6 +344,8 @@ capture_action: decision_record
 capture_action_score: 0.78
 capture_action_confidence: high
 capture_needs_confirmation: false
+research_state_change: new_experiment
+substrate_object: "[[Projects/Physics-AI-ML/Research-Substrate/experiments/substrate-session-policy]]"
 tags: [planning, decision]
 ---
 
@@ -333,6 +354,8 @@ tags: [planning, decision]
 ## Capture Inference
 - **Session intent:** `planning` (`high`, `0.82`)
 - **Capture action:** `decision_record` (`high`, `0.78`)
+- **Research state change:** `new_experiment`
+- **Substrate object:** `[[Projects/Physics-AI-ML/Research-Substrate/experiments/substrate-session-policy]]`
 - **Evidence:**
   - durable policy decision
   - implementation plan accepted
@@ -345,6 +368,52 @@ tags: [planning, decision]
   assert_file "$note"
   assert_contains "$note" "session_intent: planning"
   assert_contains "$note" "capture_action: decision_record"
+  assert_contains "$note" "research_state_change: new_experiment"
+}
+
+test_invalid_research_state_falls_back_to_none() {
+  setup_case
+  trap cleanup_case RETURN
+
+  run_summarizer '---
+date: 2026-05-22
+domain: Research
+vault_folder: Projects/Physics-AI-ML/
+slug: invalid-research-state
+session_intent: review-and-fix
+session_intent_score: 0.78
+session_intent_confidence: high
+capture_action: substrate-ish
+capture_action_score: 0.74
+capture_action_confidence: high
+capture_needs_confirmation: false
+research_state_change: kinda
+substrate_object: ""
+tags: [research]
+---
+
+# Invalid Research State
+
+## Capture Inference
+- **Session intent:** `review-and-fix` (`high`, `0.78`)
+- **Capture action:** `substrate-ish` (`high`, `0.74`)
+- **Research state change:** `kinda`
+- **Substrate object:** none
+- **Evidence:**
+  - invalid enum from model
+- **Needs confirmation:** `false`
+
+## Summary
+- Sanitized invalid research state.'
+
+  note="${VAULT_DIR}/Projects/Physics-AI-ML/${TODAY}-invalid-research-state.md"
+  assert_file "$note"
+  assert_contains "$note" "session_intent: scratch"
+  assert_contains "$note" "capture_action: project_note"
+  assert_contains "$note" "research_state_change: none"
+  assert_not_contains "$note" "session_intent: review-and-fix"
+  assert_not_contains "$note" "capture_action: substrate-ish"
+  assert_not_contains "$note" "research_state_change: kinda"
 }
 
 test_substrate_metadata_note
@@ -354,5 +423,6 @@ test_daily_only_routes_to_daily_folder
 test_daily_only_uses_safe_daily_fallback
 test_operations_project_note_stays_project_note
 test_planning_decision_record_metadata
+test_invalid_research_state_falls_back_to_none
 
 printf 'session-summarize intent tests passed\n'
