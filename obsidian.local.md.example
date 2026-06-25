@@ -3,7 +3,7 @@ vault_path: /Users/yourname/Documents/Obsidian
 vault_name: Obsidian
 daily_path: Daily/
 auto_save: true
-auto_open: true
+auto_open: false
 time_gap_minutes: 30
 smart_detect: true
 strict_domains: true
@@ -103,5 +103,9 @@ Session capture infers both what happened and what durable action is warranted:
 
 - `session_intent`: `execution`, `research`, `planning`, `reflection`, `operations`, or `scratch`
 - `capture_action`: `none`, `daily_only`, `project_note`, `substrate_update`, or `decision_record`
+- `research_state_change`: `none`, `supports_claim`, `weakens_claim`, `new_claim`, `new_experiment`, or `new_evidence`
+- `substrate_object`: an Obsidian wikilink to the Research Substrate object to create/update, or `""` when no research state changed
 
 The confidence thresholds above tune when the inference is treated as high confidence. Manual save paths should ask only when ambiguity changes the durable action. Non-interactive autosave records `capture_needs_confirmation: true` when a safer fallback was chosen.
+
+For research-adjacent sessions, agents should ask whether the session created, weakened, supported, or tested a research claim. When it did, create or update one small object under `Projects/Physics-AI-ML/Research-Substrate/` and link it from the session note.

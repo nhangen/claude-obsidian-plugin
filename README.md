@@ -9,7 +9,7 @@ Long Claude sessions and the commits they produce hold context that's gone the m
 ## How it works
 
 - A **Stop hook** runs at session end; if the session is significant, a background `claude --print` summarizer writes a structured note to your vault.
-- Session capture infers both `session_intent` and `capture_action` with confidence scores and evidence bullets, so routing can distinguish execution, research, planning, operations, reflection, and scratch work.
+- Session capture infers `session_intent`, `capture_action`, and `research_state_change` with confidence scores and evidence bullets, so routing can distinguish execution, research, planning, operations, reflection, scratch work, and claim/evidence changes that should land in the Research Substrate.
 - A **PostToolUse hook** on `Bash` detects successful `git commit` calls and appends goal / investigation / decision / loose-ends bullets to a per-repo daily file.
 - **Slash commands** (skills) cover the manual paths: save, find, recall, daily, new, bookmark, setup.
 - **Routing** is driven by `obsidian.local.md` — a vault path and a keyword-based domain taxonomy you edit directly.
@@ -136,7 +136,7 @@ vault_path: /absolute/path/to/your/vault
 vault_name: Obsidian          # must match the vault name in the Obsidian app
 daily_path: Daily/            # relative to vault root
 auto_save: true               # disable session autosave
-auto_open: true               # open note in GUI after writing
+auto_open: false              # open note in GUI after writing (opt-in)
 strict_domains: true          # refuse to create folders outside the taxonomy
 moc_promotion: true           # promote recurring topics to Maps of Content
 intent_high_score: 0.70       # high-confidence intent/action threshold
@@ -149,6 +149,7 @@ The body of `obsidian.local.md` defines two things the skills read directly:
 - **`## Project Taxonomy`** — table mapping each domain to a vault path. This is the canonical allow-list; with `strict_domains: true`, saves to any other top-level folder are refused.
 - **`## Routing Rules`** — plain-English keyword lists that decide which domain a session or note belongs to. Ambiguous content falls back to `Inbox/` with a `#needs-filing` tag.
 - **Session intent inference** — capture now records `session_intent`, `capture_action`, confidence scores, and evidence bullets. Folder routing still uses the taxonomy; intent decides whether the session is execution, research, planning, reflection, operations, or scratch, and whether it warrants no capture, daily-only capture, a project note, a research-substrate update, or a decision record.
+- **Research substrate contract** — capture also records `research_state_change` and `substrate_object`. Agents should use this to create or update one small object under `Projects/Physics-AI-ML/Research-Substrate/` whenever a session creates, weakens, supports, or tests a research claim.
 
 Per-repo commit-capture overrides go in the same file under a `## Commit Capture Overrides` section.
 

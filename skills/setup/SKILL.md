@@ -133,7 +133,7 @@ vault_path: VAULT_ABSOLUTE_PATH
 vault_name: VAULT_FOLDER_NAME
 daily_path: DAILY_PATH
 auto_save: true
-auto_open: true
+auto_open: false
 time_gap_minutes: 30
 smart_detect: true
 strict_domains: true
@@ -165,6 +165,8 @@ If a `Precedence` column is present, lower number wins when keywords from multip
 ## Session Intent Inference
 
 Session capture infers `session_intent` (`execution`, `research`, `planning`, `reflection`, `operations`, `scratch`) separately from `capture_action` (`none`, `daily_only`, `project_note`, `substrate_update`, `decision_record`). The confidence thresholds in frontmatter control when the inference is treated as high confidence.
+
+It also records `research_state_change` (`none`, `supports_claim`, `weakens_claim`, `new_claim`, `new_experiment`, `new_evidence`) and `substrate_object`. For research-adjacent sessions, agents should ask whether the session created, weakened, supported, or tested a research claim. When it did, create or update one small object under `Projects/Physics-AI-ML/Research-Substrate/` and link it from the session note.
 
 ## Routing Rules
 

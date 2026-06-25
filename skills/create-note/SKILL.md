@@ -36,7 +36,7 @@ If the resolver prints nothing (no config at `$OBSIDIAN_LOCAL_MD`, `${XDG_CONFIG
 6. **Create dirs if needed** — `mkdir -p <path>` (only after validation passes)
 7. **Write file(s)** — use Write tool
 8. **Confirm path** — tell user exactly where it was created
-9. **Open in GUI** — `bash ${CLAUDE_PLUGIN_ROOT}/scripts/open-in-obsidian.sh <path>`
+9. **Open in GUI (opt-in)** — do not open the note by default. Read `auto_open` from `$CONFIG` (`grep '^auto_open:' "$CONFIG"`); it defaults to `false` when absent. Only when it is explicitly `true`, or the user explicitly asks to open/view the note, run `bash ${CLAUDE_PLUGIN_ROOT}/scripts/open-in-obsidian.sh <path>`.
 
 ## Note Template
 
