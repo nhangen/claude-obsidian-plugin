@@ -47,6 +47,33 @@ Per-INDEX machine state (content hashes + last-reconciled timestamp) lives in a
 hidden `.<index>.state` sidecar file beside each `INDEX.md`, so the human-
 readable index is only ever appended to, never rewritten.
 
+### keeper-save (agent-facing write)
+
+`keeper-save` is the structured write entry point for **agents and sub-skills**.
+Humans use `/obsidian:ask`; agents that need to persist a note programmatically
+use this skill instead.
+
+Payload format — a temp file with header lines then a `---` separator:
+
+```
+title: <required>
+folder_hint: <optional — target folder path>
+type: <optional — finding, decision, observation, …>
+links: <optional — comma-separated wikilink targets>
+---
+<body — required>
+```
+
+The skill validates the payload (title + body required), then dispatches the
+`vault-librarian` INSERT with the structured fields. Routing, dedup, and template
+selection are owned by the librarian — a keeper-saved note is identical to a
+librarian-filed one.
+
+**Opt-in by design.** Calling `keeper-save` routes through the librarian.
+Not calling it bypasses the librarian entirely — existing writers are unchanged.
+No existing writer is migrated by this change; migration is a separate opt-in
+decision per writer.
+
 ## vaultkeeper watcher
 
 The plugin includes a two-layer background maintenance system that keeps the vault accurate without LLM overhead on every tick.
