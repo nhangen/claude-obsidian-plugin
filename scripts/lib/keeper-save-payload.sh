@@ -21,15 +21,34 @@ kspayload_body() {
 }
 
 kspayload_validate() {
-  local title body
-  title="$(kspayload_field "$1" title)"
-  if [ -z "$title" ]; then
-    printf 'keeper-save: missing required field: title\n' >&2; return 1
-  fi
+  local op title body date target
+  op="$(kspayload_field "$1" op)"; [ -z "$op" ] && op="insert"
   body="$(kspayload_body "$1" | sed '/^[[:space:]]*$/d')"
-  if [ -z "$body" ]; then
-    printf 'keeper-save: missing required field: body\n' >&2; return 1
-  fi
+
+  case "$op" in
+    insert)
+      title="$(kspayload_field "$1" title)"
+      if [ -z "$title" ]; then
+        printf 'keeper-save: missing required field: title\n' >&2; return 1
+      fi
+      if [ -z "$body" ]; then
+        printf 'keeper-save: missing required field: body\n' >&2; return 1
+      fi
+      ;;
+    append)
+      date="$(kspayload_field "$1" date)"
+      target="$(kspayload_field "$1" target)"
+      if [ -z "$date" ] && [ -z "$target" ]; then
+        printf 'keeper-save: append requires a date or target\n' >&2; return 1
+      fi
+      if [ -z "$body" ]; then
+        printf 'keeper-save: missing required field: body\n' >&2; return 1
+      fi
+      ;;
+    *)
+      printf 'keeper-save: unknown op: %s (expected insert or append)\n' "$op" >&2; return 1
+      ;;
+  esac
 }
 
 kspayload_links() {

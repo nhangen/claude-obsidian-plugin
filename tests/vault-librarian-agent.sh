@@ -14,6 +14,8 @@ need "find-notes"                 # raw-text fallback to find-notes skill
 need "Pending.md"                 # low-confidence routing -> [ask]
 need "dry-run"                    # destructive ops gated
 need "strict_domains"             # respects allow-list
+need "## APPEND"                  # append-to-dated-note operation present
+need "_Daily Template.md"         # APPEND creates from the daily template on absent
 grep -q '## Hard Rules' "$A" || fail "missing Hard Rules section"
 # FIX E — guard the never-read-.base clause so deleting it breaks the suite.
 need "Never read a"   # "Never read a .base to answer"
