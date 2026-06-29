@@ -3,3 +3,6 @@ obsidian.local.md
 
 # OS files
 .DS_Store
+
+# subagent-driven-development scratch reports
+.sdd-*.md
