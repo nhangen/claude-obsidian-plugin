@@ -1,0 +1,92 @@
+#!/usr/bin/env bash
+# keeper — deterministic, zero-AI write primitives for the Obsidian vault keeper.
+#
+# The keeper's "hands": mechanical writes that need no judgment (append a section
+# to a known target). Routing/dedup judgment stays in the vault-librarian agent
+# (the "brain"). Callers — the commit-capture hook-skill, the librarian's APPEND
+# step, cost-sensitive scripts — go through this one implementation so vault
+# writes are consistent without dispatching a subagent for mechanical work.
+#
+# Portable: no realpath, no flock, no bash-only traps — sources/runs clean under
+# bash and zsh (the substrate libs deliberately avoid those; see vault-index.sh).
+
+set -euo pipefail
+
+keeper_die() { printf 'keeper: %s\n' "$*" >&2; exit 1; }
+
+# append a timestamped section to a dated note, creating it on absence.
+cmd_append() {
+  local vault="" target="" date="" section="" body_file="" init_file=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --vault)     vault="${2:-}";     shift 2 ;;
+      --target)    target="${2:-}";    shift 2 ;;
+      --date)      date="${2:-}";      shift 2 ;;
+      --section)   section="${2:-}";   shift 2 ;;
+      --body-file) body_file="${2:-}"; shift 2 ;;
+      --init-file) init_file="${2:-}"; shift 2 ;;
+      *) keeper_die "append: unknown arg: $1" ;;
+    esac
+  done
+
+  # --vault: explicit (cost-sensitive callers pass it inline); else resolve config.
+  if [ -z "$vault" ]; then
+    local cfg
+    cfg="$(bash "$(dirname "$0")/lib/resolve-config.sh" 2>/dev/null || true)"
+    [ -n "$cfg" ] && [ -f "$cfg" ] && vault="$(grep '^vault_path:' "$cfg" | sed 's/vault_path: //')"
+  fi
+  [ -n "$vault" ]  || keeper_die "append: --vault required (or configure via /obsidian:setup)"
+  [ -d "$vault" ]  || keeper_die "append: vault is not a directory: $vault"
+
+  # exactly one of --target / --date
+  if [ -n "$target" ] && [ -n "$date" ]; then keeper_die "append: pass --target OR --date, not both"; fi
+  if [ -z "$target" ] && [ -z "$date" ]; then keeper_die "append: --target or --date required"; fi
+  [ -n "$date" ] && target="Daily/$date.md"
+
+  # path-traversal guard: relative, no '..' component (portable — no realpath).
+  case "$target" in
+    /*) keeper_die "append: --target must be vault-relative, not absolute: $target" ;;
+  esac
+  case "/$target/" in
+    *"/../"*) keeper_die "append: --target must not contain a '..' component: $target" ;;
+  esac
+
+  local vault_abs full parent
+  vault_abs="$(cd "$vault" && pwd -P)"
+  full="$vault_abs/$target"
+  parent="$(dirname "$full")"
+  mkdir -p "$parent"
+
+  if [ ! -f "$full" ]; then
+    if [ -n "$init_file" ]; then
+      [ -f "$init_file" ] || keeper_die "append: --init-file not found: $init_file"
+      cat "$init_file" > "$full"
+    else
+      : > "$full"
+    fi
+  fi
+
+  [ -n "$section" ] || section="## $(date +%H:%M) — entry"
+
+  local body
+  if [ -n "$body_file" ]; then
+    [ -f "$body_file" ] || keeper_die "append: --body-file not found: $body_file"
+    body="$(cat "$body_file")"
+  else
+    body="$(cat)"
+  fi
+
+  printf '\n%s\n\n%s\n' "$section" "$body" >> "$full"
+  printf '%s\n' "$full"
+}
+
+main() {
+  [ $# -ge 1 ] || keeper_die "usage: keeper append --vault <path> (--target <relpath> | --date <YYYY-MM-DD>) [--section <h>] [--body-file <f>] [--init-file <f>]"
+  local sub="$1"; shift
+  case "$sub" in
+    append) cmd_append "$@" ;;
+    *) keeper_die "unknown subcommand: $sub (expected: append)" ;;
+  esac
+}
+
+main "$@"

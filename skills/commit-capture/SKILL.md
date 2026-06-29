@@ -1,7 +1,7 @@
 ---
 name: commit-capture
 description: Captures conversation context around git commits to Obsidian vault. Fires automatically via PostToolUse hook.
-version: 2.1.0
+version: 2.2.0
 ---
 
 # Commit Capture
@@ -11,6 +11,15 @@ The value here is not commit metadata — git already has that. The value is the
 ## Architecture
 
 Detection and metadata extraction are handled by `scripts/commit-capture.sh` (shell script, zero AI cost). This skill is invoked when the hook outputs a line starting with `obsidian-commit-capture:` — all metadata is inline, no file read needed.
+
+The actual write goes through the **keeper CLI** (`scripts/keeper append`) — the
+keeper's deterministic write primitive. The CLI creates the file on absence,
+makes parent dirs, and appends the section; this skill does not `Read`/`Write`/
+`mkdir` directly. The CLI is a plain command (zero AI cost, **no subagent**), so
+commit-capture stays as cheap as before — the keeper is used, via command. This
+skill's only job is to synthesize the context bullets (which require the
+conversation, so they must be built here in the agent turn) and hand the write
+to the CLI.
 
 ## Config
 
@@ -22,12 +31,37 @@ Vault path is passed inline by the hook (parsed once from the resolved config �
    `obsidian-commit-capture: hash=<h> | msg=<m> | branch=<b> | files=<f> | org_repo=<o> | repo_name=<r> | ticket=<t> | date=<d> | time=<ti> | vault_path=<v>`
    Extract: `hash`, `msg`, `branch`, `files`, `org_repo`, `repo_name`, `ticket`, `date`, `time`, `vault_path`.
 
-2. **Determine target path** (relative to `vault_path` from the hook output):
-   `Projects/Development/<org_repo>/<date>.md`
+2. **Target** (relative to `vault_path`): `Projects/Development/<org_repo>/<date>.md`.
 
-3. **Read existing file** at the target path. If it doesn't exist, create it.
+3. **Build the session context** — this is the primary output and the only part
+   that needs the conversation (so it must be done here, in the agent turn).
 
-4. **If file is new**, write with this template:
+   Review the full conversation since the last commit (or session start if first commit). Capture:
+
+   - **Goal** — what task or problem was being worked on
+   - **Investigation** — what was explored, what files were read, what was searched for
+   - **Decisions** — choices made, alternatives considered and rejected, tradeoffs
+   - **Debugging** — if applicable: symptoms, hypotheses tested, root cause found
+   - **Loose ends** — anything unresolved, flagged for follow-up, or noted for later
+
+   3-8 bullet points. Dense and specific. Written so you can reconstruct the reasoning months later.
+
+4. **Write the body** to a temp file — the section content the keeper will append:
+
+   ```markdown
+   **Branch:** <branch>
+   **Message:** <msg>
+   **Files:** <files>
+
+   ### Context
+
+   - <bullet points from step 3>
+
+   ---
+   ```
+
+5. **Write the new-file header** to a second temp file — used by the keeper only
+   if the dated note doesn't exist yet:
 
    ```markdown
    ---
@@ -42,40 +76,21 @@ Vault path is passed inline by the hook (parsed once from the resolved config �
 
    If `ticket` is non-empty, add `ticket-<ticket>` to the tags array.
 
-5. **Build the session context** — this is the primary output.
+6. **Hand the write to the keeper CLI:**
 
-   Review the full conversation since the last commit (or session start if first commit). Capture:
-
-   - **Goal** — what task or problem was being worked on
-   - **Investigation** — what was explored, what files were read, what was searched for
-   - **Decisions** — choices made, alternatives considered and rejected, tradeoffs
-   - **Debugging** — if applicable: symptoms, hypotheses tested, root cause found
-   - **Loose ends** — anything unresolved, flagged for follow-up, or noted for later
-
-   3-8 bullet points. Dense and specific. Written so you can reconstruct the reasoning months later.
-
-6. **Append this section** to the end of the file:
-
-   ```markdown
-
-   ## <time> — <hash>
-
-   **Branch:** <branch>
-   **Message:** <msg>
-   **Files:** <files>
-
-   ### Context
-
-   - <bullet points from step 5>
-
-   ---
+   ```bash
+   bash "${CLAUDE_PLUGIN_ROOT}/scripts/keeper" append \
+     --vault "<vault_path>" \
+     --target "Projects/Development/<org_repo>/<date>.md" \
+     --section "## <time> — <hash>" \
+     --body-file "<body-temp>" \
+     --init-file "<header-temp>"
    ```
 
-7. **Create parent directories** if needed (`mkdir -p` via Bash).
+   The CLI creates parent dirs, writes the header on first commit of the day,
+   and appends the section. No `Read`/`Write`/`mkdir`, no subagent.
 
-8. **No file cleanup needed** — metadata was passed inline, no temp file was written.
-
-9. **Confirm silently** — output only: `Captured <hash> → <org_repo>/<date>.md`
+7. **Confirm silently** — output only: `Captured <hash> → <org_repo>/<date>.md`
 
 ## Important
 
