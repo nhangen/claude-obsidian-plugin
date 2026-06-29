@@ -73,7 +73,10 @@ vault_index_apply() {
 
   tmp="$(mktemp "${TMPDIR:-/tmp}/idxstate-XXXXXX")" || return 1
   tmp2="$(mktemp "${TMPDIR:-/tmp}/idxstate-XXXXXX")" || { rm -f "$tmp"; return 1; }
-  trap 'rm -f "$tmp" "$tmp2"' RETURN
+  # No RETURN trap: it is bash-only (zsh prints "undefined signal: RETURN" when
+  # this lib is sourced into a zsh shell). There are no early returns past this
+  # point, so explicit cleanup before the function's output is equivalent and
+  # portable across bash and zsh.
 
   # Carry forward existing entries except those touched by the plan.
   if [ -f "$state" ]; then
@@ -103,5 +106,6 @@ vault_index_apply() {
 
   { printf '# last_reconciled:%s\n' "$(now_epoch)"; sort "$tmp"; } > "$tmp2"
   mv "$tmp2" "$state"
+  rm -f "$tmp" "$tmp2"
   (( ${#added[@]} )) && printf '%s\n' "${added[@]}" || true
 }

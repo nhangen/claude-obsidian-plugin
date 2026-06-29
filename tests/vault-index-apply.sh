@@ -82,4 +82,23 @@ STORED_UNREAD="$(state_hash_for "$STATE3" "unreadable.md")"
 [ -z "$STORED_UNREAD" ] || note_hash_valid "$STORED_UNREAD" \
   || fail "unreadable file produced malformed state entry: $STORED_UNREAD"
 
+# --- zsh portability: vault_index_apply must not use a bash-only trap ---
+# A `trap ... RETURN` prints "undefined signal: RETURN" when the lib is sourced
+# into a zsh shell (the librarian/keeper runtime). Run the function under zsh
+# and assert its stderr is clean. Reverting the fix to the RETURN trap fails this.
+if command -v zsh >/dev/null 2>&1; then
+  ZT="$(mktemp -d "${TMPDIR:-/tmp}/vault-zsh-XXXXXX")"
+  ZF="$ZT/Z"; mkdir -p "$ZF"; printf '# Z Index\n' > "$ZF/INDEX.md"
+  printf 'zsh note\n' > "$ZF/z.md"
+  ZERR="$(ROOT_DIR="$ROOT_DIR" ZF="$ZF" zsh -c '
+    . "$ROOT_DIR/scripts/lib/note-hash.sh"
+    . "$ROOT_DIR/scripts/lib/vault-index.sh"
+    vault_index_apply "$ZF" "$ZF/INDEX.md" >/dev/null
+  ' 2>&1 >/dev/null)" || true
+  case "$ZERR" in
+    *"undefined signal"*) fail "vault-index.sh uses a bash-only trap under zsh: $ZERR" ;;
+  esac
+  rm -rf "$ZT"
+fi
+
 echo "PASS: vault-index-apply"
