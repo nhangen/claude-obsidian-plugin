@@ -1,12 +1,21 @@
 ---
 name: save-conversation
 description: Exports the current Claude conversation to the Obsidian vault. Triggers on phrases like "save this to Obsidian", "export to obsidian", "document this session", "save our conversation", "write this up", "put this in obsidian". Formats the conversation as structured markdown, determines the correct project folder from context, and saves with a timestamped filename. Optionally opens the note in the Obsidian GUI.
-version: 1.0.0
+version: 1.1.0
 ---
 
 # Save Conversation to Obsidian
 
 Exports the current Claude Code session to the Obsidian vault as a structured markdown note.
+
+This skill owns the **cognition** — session-intent inference, routing
+(precedence tiebreaker + cross-domain cache), same-day dedup, research-substrate
+detection, MOC clustering, chapter segmentation — and then hands the actual
+**write** to the keeper (`obsidian:keeper-save`). It does not write note files
+directly. The keeper is the sole writer; this skill resolves the target and
+passes a `resolved: true` payload so the keeper writes it as-is without
+re-routing or re-deduping. The one exception is MOC-promotion *file moves*, which
+remain native (structural reorg is the vault-organizer's domain, not a note-write).
 
 ## Config
 
@@ -97,6 +106,15 @@ When `research_state_change` is not `none`, create or update one small object un
 - `experiments/` for tests, benchmarks, protocols, or validation plans.
 - `evidence/` for repo runs, audits, result summaries, reproduced failures, or artifacts.
 - `literature/` for papers and source-backed frontier markers.
+
+**File it through the keeper, with a dedup pre-step.** Before writing, glob
+`Research-Substrate/<type>/` for an existing object on the same claim/slug; if
+one matches, update that object rather than creating a twin. Then hand the
+create-or-update to `obsidian:keeper-save` with `op: insert`, `resolved: true`,
+`folder_hint: Projects/Physics-AI-ML/Research-Substrate/<type>`,
+`title: <slug>`, `body: <the object>`. The dedup pre-step is required because
+`resolved: true` skips the keeper's own dedup and this skill has no other
+substrate dedup — without it, duplicate claims/evidence accumulate silently.
 
 If `capture_action: substrate_update`, the research state change cannot be `none`, and `substrate_object` must point to the object created or updated. If an execution session tests an active claim, keep `session_intent: execution`; set `research_state_change` to the actual claim/evidence effect.
 
@@ -224,11 +242,21 @@ source: claude-code
 8. **Determine full path** — `<vault_path>/<target-folder>/<YYYY-MM-DD-title>.md`
 9. **Validate allow-list** — `strict_domains` defaults to `true` when absent; only an explicit `false` skips validation. See "Allow-list Validation (strict_domains)" above. If the top-level folder is not allow-listed, refuse and surface the closest match. Do not create the folder. If routing landed in `Inbox/` because no clear domain matched, prompt for confirmation ("No clear domain match — routing to `Inbox/`. Confirm or supply a topic hint") rather than writing silently.
 10. **Same-day dedup check** — see "Same-Day Dedup Check" below. Before writing, scan the **confirmed** target folder (after any Inbox redirect or topic-hint correction from step 7) for same-day notes and offer append vs new-file when an existing match scores above the threshold.
-11. **Create parent dirs if needed** — `mkdir -p <vault_path>/<target-folder>` (only after validation passes)
-12. **Write or append** — use Write tool for new files; use Edit tool to append a timestamped section when the user chose append mode in step 9.
-13. **Confirm** — tell user where the file was saved (and whether it was a new file or an append)
-14. **Open in GUI (opt-in)** — do not open the note by default. Read `auto_open` from `$CONFIG` (`grep '^auto_open:' "$CONFIG"`); it defaults to `false` when absent. Only when it is explicitly `true`, or the user explicitly asks to open/view the saved note, call `bash ${CLAUDE_PLUGIN_ROOT}/scripts/open-in-obsidian.sh <relative-path>`.
-15. **MOC-promotion prompt (post-save, soft)** — see "MOC-Promotion Prompt" below. After a successful new-file write, check whether the parent folder has accumulated 3+ notes sharing a topic stem. If so, prompt once to promote into a dedicated subfolder with a `README.md` index. Skip on append. Skip if the user previously declined promotion for this stem.
+11. **Write through the keeper.** The keeper creates parent dirs, applies the
+    template, writes the file, and links the INDEX — this skill does not `mkdir`
+    or `Write` a note directly.
+    - **New file** → invoke `obsidian:keeper-save` with `op: insert`,
+      `resolved: true`, `folder_hint: <the target folder resolved in step 5>`,
+      `title: <YYYY-MM-DD-title>`, `body: <the built session note>`, and
+      `links`. `resolved: true` is correct here because steps 2–10 already did
+      the routing and same-day dedup — the keeper must not re-route or re-dedup.
+    - **Append (same-day twin)** → invoke `obsidian:keeper-save` with
+      `op: append`, `target: <the twin file from the Same-Day Dedup Check>`,
+      `section: ## HH:MM — <Title>`, and `body: <the FULL h3 sub-block
+      structure>` (see Same-Day Dedup Check "Append mode" for the exact body).
+12. **Confirm** — relay the path the keeper returns (new file or append).
+13. **Open in GUI (opt-in)** — do not open the note by default. Read `auto_open` from `$CONFIG` (`grep '^auto_open:' "$CONFIG"`); it defaults to `false` when absent. Only when it is explicitly `true`, or the user explicitly asks to open/view the saved note, call `bash ${CLAUDE_PLUGIN_ROOT}/scripts/open-in-obsidian.sh <relative-path>`.
+14. **MOC-promotion prompt (post-save, soft)** — see "MOC-Promotion Prompt" below. After a successful new-file write, check whether the parent folder has accumulated 3+ notes sharing a topic stem. If so, prompt once to promote into a dedicated subfolder with a `README.md` index. Skip on append. Skip if the user previously declined promotion for this stem.
 
 ## Same-Day Dedup Check
 
@@ -246,13 +274,26 @@ Before writing a new note in the resolved target folder, check whether a same-da
    > - **append** → add `## HH:MM — <new-topic>` section to the existing file
    > - **new** → write the proposed new file anyway
    > Choose: append / new
-4. **Append mode**:
-   - Read the existing file with the Read tool.
-   - Use the Edit tool to insert a new section at the end (after the existing content, before any trailing whitespace). The new section starts with an h2 header: `## HH:MM — <Title>` (24h local time). The h2 header itself stays at h2 — do **not** demote it to h3.
-   - Preserve frontmatter exactly as-is — do not edit the `---` fenced block.
-   - Inside the new `## HH:MM — <Title>` section, the sub-blocks (`Summary`, `Key Findings / Decisions`, `Details`, `Related Notes`) are written as **`###` (h3) headings**, since they are children of the h2 timestamp section. Do not nest deeper than h3.
-5. **New mode**: proceed with the original Write to a new file. Check for filename collision with `test -f "<full-path>"` before writing; if true, append `-2`, `-3`, etc. and recheck until the path is free. (Collisions only happen when two saves run within the same minute against the same slug.)
-6. **No match (highest < 0.4)**: skip the prompt and proceed with Write.
+4. **Append mode** — hand the section-write to the keeper (do not `Edit` the
+   file directly):
+   - Build the section body: an `## HH:MM — <Title>` h2 timestamp header (24h
+     local; stays h2, never demoted), then the sub-blocks (`Summary`,
+     `Key Findings / Decisions`, `Details`, `Related Notes`) as **`###` (h3)
+     headings** — children of the timestamp section, never nested deeper than h3.
+   - Invoke `obsidian:keeper-save` with `op: append`, `target: <the matched
+     same-day file>`, `section: ## HH:MM — <Title>`, and `body: <the h3
+     sub-block structure built above>`. The keeper appends verbatim after the
+     existing content and preserves the frontmatter; it does not reconstruct the
+     h3 nesting, so the full structure must be in `body`. The target already
+     exists, so the keeper's create-on-absent does not fire.
+5. **New mode**: route the new-file write through the keeper per step 11 of the
+   main Steps (`op: insert`, `resolved: true`). Before handing off, check for a
+   filename collision with `test -f "<full-path>"`; if true, append `-2`, `-3`,
+   etc. and recheck until the path is free, then pass the free path's folder as
+   `folder_hint`. (Collisions only happen when two saves run within the same
+   minute against the same slug.)
+6. **No match (highest < 0.4)**: skip the prompt and proceed with the keeper
+   INSERT (step 11, new file).
 
 ### Threshold
 
