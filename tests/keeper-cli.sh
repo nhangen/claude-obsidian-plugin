@@ -67,11 +67,58 @@ bash "$KEEPER" append --vault "$V" --target "/etc/keeper-escape.md" --section x 
 # 13. unknown flag
 bash "$KEEPER" append --vault "$V" --target a.md --bogus z 2>/dev/null && fail "unknown flag must fail"
 
-# 14. zsh portability — the CLI must run clean under zsh (no bash-only constructs)
+# --- insert subcommand ---
+printf '%s\n' '---' 'date: 2026-06-29' '---' '' '# My Session Note' 'content' > "$TMP/note.md"
+
+# I1: insert writes the note verbatim + creates folder INDEX with a human link
+NF="$V/Decisions/2026-06-29-my-note.md"
+bash "$KEEPER" insert --vault "$V" --target "Decisions/2026-06-29-my-note.md" \
+  --body-file "$TMP/note.md" --title "My Session Note" >/dev/null
+[ -f "$NF" ]                          || fail "insert did not write the note"
+grep -q '^# My Session Note' "$NF"    || fail "insert body not written verbatim"
+[ -f "$V/Decisions/INDEX.md" ]        || fail "insert did not create folder INDEX"
+grep -qxF -- '- [[My Session Note]]' "$V/Decisions/INDEX.md" || fail "insert did not append INDEX link"
+
+# I2: refuse-on-exists (never overwrite)
+bash "$KEEPER" insert --vault "$V" --target "Decisions/2026-06-29-my-note.md" --body-file "$TMP/note.md" 2>/dev/null && fail "insert must refuse to overwrite an existing note"
+
+# I3: --session-link-date links into Daily/<date> under ## Session Links
+DLY="$V/Daily/2026-06-29.md"
+bash "$KEEPER" insert --vault "$V" --target "Decisions/2026-06-29-other.md" \
+  --body-file "$TMP/note.md" --title "Other Note" --session-link-date 2026-06-29 >/dev/null
+[ -f "$DLY" ]                          || fail "session-link-date did not create the daily note"
+grep -q '^## Session Links' "$DLY"     || fail "Session Links section missing"
+grep -qxF -- '- [[Other Note]]' "$DLY" || fail "Session Links entry missing"
+
+# I4: Session Links idempotent — a second note with the same title does not double-link
+bash "$KEEPER" insert --vault "$V" --target "Decisions/2026-06-29-dup.md" \
+  --body-file "$TMP/note.md" --title "Other Note" --session-link-date 2026-06-29 >/dev/null
+[ "$(grep -cF -- '- [[Other Note]]' "$DLY")" = "1" ] || fail "Session Links link duplicated"
+
+# I5: malformed --session-link-date rejected
+bash "$KEEPER" insert --vault "$V" --target "Decisions/z.md" --body-file "$TMP/note.md" --session-link-date "2026/06/29" 2>/dev/null && fail "malformed session-link-date must fail"
+
+# I6: --title default is the filename stem (date prefix KEPT, so the wikilink resolves)
+bash "$KEEPER" insert --vault "$V" --target "Notes/2026-06-29-derived-title.md" --body-file "$TMP/note.md" >/dev/null
+grep -qxF -- '- [[2026-06-29-derived-title]]' "$V/Notes/INDEX.md" || fail "default title (filename stem) failed"
+
+# I7: --title default without a date prefix keeps the full basename
+bash "$KEEPER" insert --vault "$V" --target "Notes/plain.md" --body-file "$TMP/note.md" >/dev/null
+grep -qxF -- '- [[plain]]' "$V/Notes/INDEX.md" || fail "default title (no date prefix) failed"
+
+# I8: insert path-traversal guard
+bash "$KEEPER" insert --vault "$V" --target "../evil.md" --body-file "$TMP/note.md" 2>/dev/null && fail "insert path traversal must fail"
+[ -f "$TMP/evil.md" ] && fail "insert traversal wrote outside the vault"
+
+# 14. zsh portability — both subcommands clean under zsh (insert sources the substrate libs)
 if command -v zsh >/dev/null 2>&1; then
   zsh "$KEEPER" append --vault "$V" --target "Notes/z.md" --section '## z — t' --body-file "$TMP/b.md" >/dev/null 2>"$TMP/zerr" \
-    || { cat "$TMP/zerr" >&2; fail "keeper CLI broke under zsh"; }
+    || { cat "$TMP/zerr" >&2; fail "keeper append broke under zsh"; }
   grep -q '^## z — t' "$V/Notes/z.md" || fail "zsh keeper append did not write"
+  zsh "$KEEPER" insert --vault "$V" --target "Notes/2026-06-29-zinsert.md" \
+    --body-file "$TMP/note.md" --title "Z Insert" --session-link-date 2026-06-29 >/dev/null 2>>"$TMP/zerr" \
+    || { cat "$TMP/zerr" >&2; fail "keeper insert broke under zsh"; }
+  grep -qxF -- '- [[Z Insert]]' "$V/Notes/INDEX.md" || fail "zsh keeper insert did not link INDEX"
 fi
 
 echo "PASS: keeper-cli"

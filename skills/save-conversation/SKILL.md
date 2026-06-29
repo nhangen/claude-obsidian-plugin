@@ -246,10 +246,14 @@ source: claude-code
     template, writes the file, and links the INDEX — this skill does not `mkdir`
     or `Write` a note directly.
     - **New file** → invoke `obsidian:keeper-save` with `op: insert`,
-      `resolved: true`, `folder_hint: <the target folder resolved in step 5>`,
-      `title: <YYYY-MM-DD-title>`, `body: <the built session note>`, and
-      `links`. `resolved: true` is correct here because steps 2–10 already did
-      the routing and same-day dedup — the keeper must not re-route or re-dedup.
+      `resolved: true`, `target: <target-folder>/<YYYY-MM-DD-title>.md` (the full
+      path resolved in steps 5/8), `title: <YYYY-MM-DD-title>` (the filename stem
+      — the resolvable INDEX/Session-Links link text), `body: <the built session
+      note>`, `links`, and `session_link_date: <today YYYY-MM-DD>`. `resolved:
+      true` is correct because steps 2–10 already did the routing and same-day
+      dedup. `session_link_date` preserves the daily `## Session Links` entry the
+      librarian used to add implicitly — keeper-save routes this straight to
+      `keeper insert` (no subagent).
     - **Append (same-day twin)** → invoke `obsidian:keeper-save` with
       `op: append`, `target: <the twin file from the Same-Day Dedup Check>`,
       `section: ## HH:MM — <Title>`, and `body: <the FULL h3 sub-block

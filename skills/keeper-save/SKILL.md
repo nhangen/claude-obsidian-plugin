@@ -24,16 +24,20 @@ Write a temp file with this exact layout:
 
 ```
 op: <optional — insert (default) | append>
-title: <required for insert — note title>
+title: <required for insert — note title (also the INDEX/Session-Links link text)>
 folder_hint: <optional — target folder path, e.g. CEO/agents/hari-seldon>
 resolved: <optional — true: caller already routed + deduped; keeper writes to
-           folder_hint as-is, skipping its own routing and dedup. Any other
-           value / absent = keeper routes + dedups (folder_hint is a hint only).>
+           the resolved target as-is, skipping its own routing and dedup. Any
+           other value / absent = keeper routes + dedups (folder_hint a hint).>
 type: <optional — note type, e.g. finding, decision, observation>
 links: <optional — comma-separated wikilink targets, e.g. Note A, Note B>
 date: <append: YYYY-MM-DD; resolves to the daily note for that date>
-target: <append: explicit note path, e.g. Daily/2026-06-29.md>
+target: <append: explicit note path, e.g. Daily/2026-06-29.md.
+         insert+resolved: the full vault-relative path the caller resolved,
+         e.g. Decisions/2026-06-29-my-note.md>
 section: <append, optional — section heading, e.g. ## 14:30 — Topic>
+session_link_date: <insert+resolved, optional — YYYY-MM-DD; adds a
+                    `- [[title]]` entry under that daily note's ## Session Links>
 ---
 <body — required; everything after the --- line>
 ```
@@ -58,29 +62,41 @@ is rejected, never coerced.
    Run `bash "${CLAUDE_PLUGIN_ROOT}/scripts/ask-staleness.sh"`; if it prints a
    line, surface it as a `⚠` banner before proceeding.
 
-4. **Dispatch the vault-librarian.** Read `op` with
-   `kspayload_field <payload-file> op` (empty means `insert`).
+4. **Route by op + resolution.** Read `op` (`kspayload_field <payload> op`;
+   empty = insert). **Mechanical writes go straight to the keeper CLI — no
+   subagent.** Only an *unresolved* insert needs the librarian's routing/dedup
+   judgment. Resolve the vault once (read `vault_path` from the config that
+   `${CLAUDE_PLUGIN_ROOT}/scripts/lib/resolve-config.sh` prints) and write the
+   body to a temp file: `kspayload_body <payload> > <body-temp>`.
 
-   For `insert` — call the `obsidian:vault-librarian` subagent with operation
-   hint `INSERT`, passing:
-   - `title` from `kspayload_field <payload-file> title`
-   - `body` from `kspayload_body <payload-file>`
-   - `folder_hint` from `kspayload_field <payload-file> folder_hint` (may be empty)
-   - `resolved` from `kspayload_field <payload-file> resolved` (may be empty).
-     When `true`, the librarian writes to `folder_hint` as-is and skips its own
-     routing + dedup — the caller has already done both. Otherwise the librarian
-     routes + dedups and `folder_hint` is only a hint.
-   - `type` from `kspayload_field <payload-file> type` (may be empty)
-   - normalized links from `kspayload_links <payload-file>` (may be empty)
+   **`append`** → run the CLI directly:
+   ```bash
+   bash "${CLAUDE_PLUGIN_ROOT}/scripts/keeper" append --vault "$VAULT" \
+     {--target "<target>" | --date "<date>"} --section "<section>" \
+     --body-file "<body-temp>" [--init-file "<init-temp>"]
+   ```
+   For a `--date` append whose daily note may not exist, first render an
+   `--init-file`: read `$VAULT/Daily/_Daily Template.md` (substitute `{{date}}`)
+   if present, else a minimal `---\ndate: <date>\ntags: [daily]\n---\n\n# <date>\n`.
 
-   For `append` — call the `obsidian:vault-librarian` subagent with operation
-   hint `APPEND`, passing:
-   - `target` from `kspayload_field <payload-file> target`, or `date` from
-     `kspayload_field <payload-file> date` (the librarian resolves a date to
-     its daily note)
-   - `section` from `kspayload_field <payload-file> section` (may be empty)
-   - `body` from `kspayload_body <payload-file>`
+   **`insert` with `resolved: true`** → the caller already routed + deduped; run
+   the CLI directly (no subagent):
+   ```bash
+   bash "${CLAUDE_PLUGIN_ROOT}/scripts/keeper" insert --vault "$VAULT" \
+     --target "<target>" --body-file "<body-temp>" --title "<title>" \
+     [--session-link-date "<session_link_date>"]
+   ```
+   Use the payload's `target` (the caller's resolved full path); if absent, build
+   it from `folder_hint` + a kebab-cased `title`. Pass `--session-link-date` from
+   the `session_link_date` field when set. The CLI writes the note, links the
+   folder INDEX, and (if dated) adds the Session-Links entry.
+
+   **`insert` without `resolved`** → dispatch the `obsidian:vault-librarian`
+   subagent with hint `INSERT` (it routes, dedups, templates, links INDEX),
+   passing `title`, body, `folder_hint`, `type`, and normalized
+   `kspayload_links`. This is the only path that still spawns a subagent — the
+   one that needs judgment.
 
 5. **Relay the committed path** back to the caller: what was written and where.
-   If the librarian reports low-confidence routing or a near-duplicate, surface
-   its question — do not auto-resolve it.
+   For an unresolved insert, if the librarian reports low-confidence routing or a
+   near-duplicate, surface its question — do not auto-resolve it.
