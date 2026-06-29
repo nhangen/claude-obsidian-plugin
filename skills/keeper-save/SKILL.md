@@ -26,6 +26,9 @@ Write a temp file with this exact layout:
 op: <optional — insert (default) | append>
 title: <required for insert — note title>
 folder_hint: <optional — target folder path, e.g. CEO/agents/hari-seldon>
+resolved: <optional — true: caller already routed + deduped; keeper writes to
+           folder_hint as-is, skipping its own routing and dedup. Any other
+           value / absent = keeper routes + dedups (folder_hint is a hint only).>
 type: <optional — note type, e.g. finding, decision, observation>
 links: <optional — comma-separated wikilink targets, e.g. Note A, Note B>
 date: <append: YYYY-MM-DD; resolves to the daily note for that date>
@@ -63,6 +66,10 @@ is rejected, never coerced.
    - `title` from `kspayload_field <payload-file> title`
    - `body` from `kspayload_body <payload-file>`
    - `folder_hint` from `kspayload_field <payload-file> folder_hint` (may be empty)
+   - `resolved` from `kspayload_field <payload-file> resolved` (may be empty).
+     When `true`, the librarian writes to `folder_hint` as-is and skips its own
+     routing + dedup — the caller has already done both. Otherwise the librarian
+     routes + dedups and `folder_hint` is only a hint.
    - `type` from `kspayload_field <payload-file> type` (may be empty)
    - normalized links from `kspayload_links <payload-file>` (may be empty)
 

@@ -90,4 +90,17 @@ body here
 EOF
 kspayload_validate "$TMP/insert-notitle.md" 2>/dev/null && fail "explicit insert without title must fail"
 
+# --- pre-resolved insert (caller owns routing + dedup) ---
+cat > "$TMP/resolved.md" <<'EOF'
+op: insert
+resolved: true
+title: Pre-resolved note
+folder_hint: Projects/Development/nhangen/foo
+---
+body
+EOF
+kspayload_validate "$TMP/resolved.md" || fail "pre-resolved insert should pass"
+[ "$(kspayload_field "$TMP/resolved.md" resolved)" = "true" ] || fail "resolved field parse"
+[ "$(kspayload_field "$TMP/resolved.md" folder_hint)" = "Projects/Development/nhangen/foo" ] || fail "folder_hint parse on resolved"
+
 echo "PASS: keeper-save-payload"

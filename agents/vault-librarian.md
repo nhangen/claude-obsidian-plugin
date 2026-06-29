@@ -49,6 +49,16 @@ slice is one or two domain folders, never the whole vault.
 
 ## INSERT — "remember / file / record this"
 
+**Pre-resolved callers.** If the payload sets `resolved: true`, the caller
+already owns routing and dedup (e.g. `save-conversation`, which runs its own
+precedence tiebreaker + same-day dedup before handing off). In that case: write
+to `folder_hint` as-is, **do not run routing** (skip step 1), and **skip the dedup scan** (skip step 2).
+Then continue from step 3 (template + INDEX link).
+`resolved: true` is the only thing that enables this skip — a bare `folder_hint`
+without `resolved` is a hint only, and steps 1–2 run as normal. (`hari-seldon`
+and `create-note` pass `folder_hint` today and must keep getting routed +
+deduped.)
+
 1. Route the content to a target folder. **Always state the chosen folder.** If
    routing confidence is low, do **not** commit silently — append an
    `[ask:where should this go?]` entry to `$VAULT_PATH/Pending.md` and ask the
