@@ -45,7 +45,7 @@ Header lines before `---`: `key: value` pairs. Order is not significant.
    line, surface it as a `⚠` banner before proceeding.
 
 4. **Dispatch the vault-librarian INSERT.**
-   Call the `vault-librarian` subagent with operation hint `INSERT`, passing:
+   Call the `obsidian:vault-librarian` subagent with operation hint `INSERT`, passing:
    - `title` from `kspayload_field <payload-file> title`
    - `body` from `kspayload_body <payload-file>`
    - `folder_hint` from `kspayload_field <payload-file> folder_hint` (may be empty)
