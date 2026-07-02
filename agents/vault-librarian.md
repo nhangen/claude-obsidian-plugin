@@ -17,6 +17,8 @@ CONFIG="$(bash "${CLAUDE_PLUGIN_ROOT}/scripts/lib/resolve-config.sh")"
 VAULT_PATH="$(grep '^vault_path:' "$CONFIG" | sed 's/vault_path: //')"
 . "${CLAUDE_PLUGIN_ROOT}/scripts/lib/note-hash.sh"
 . "${CLAUDE_PLUGIN_ROOT}/scripts/lib/vault-index.sh"
+. "${CLAUDE_PLUGIN_ROOT}/scripts/lib/allowlist-validate.sh"
+. "${CLAUDE_PLUGIN_ROOT}/scripts/lib/dedup-scan.sh"
 ```
 
 Read `$VAULT_PATH/VAULT.md` (the map) and `$VAULT_PATH/Profile.md` (identity +
@@ -59,13 +61,12 @@ without `resolved` is a hint only, and steps 1–2 run as normal. (`hari-seldon`
 and `create-note` pass `folder_hint` today and must keep getting routed +
 deduped.)
 
-1. Route the content to a target folder. **Always state the chosen folder.** If
-   routing confidence is low, do **not** commit silently — append an
-   `[ask:where should this go?]` entry to `$VAULT_PATH/Pending.md` and ask the
-   user once.
-2. **Dedup:** run the find-notes skill / scan the target INDEX for near-duplicates
-   (Jaccard ~0.4). If a likely duplicate exists, **surface it and ask** whether
-   to append to the existing note — never silently merge.
+1. Route the content to a target folder. **Always state the chosen folder.** Call
+   `allowlist_validate "<target>"` — if it fails, do not write; surface the error
+   and ask the user where to file. If routing confidence is low, do **not** commit
+   silently — append an `[ask:where should this go?]` entry to `$VAULT_PATH/Pending.md`
+   and ask the user once.
+2. **Dedup:** call the shared scanner — `dedup_same_day "<vault>/<folder>" "$(date +%Y-%m-%d)" "<slug>"`. If it echoes a `path<TAB>score`, surface that note and ask whether to append rather than file a duplicate — never silently merge.
 3. Write the note using the matching template in `$VAULT_PATH/Templates/`.
    Append a link to the correct INDEX (`Decisions/INDEX.md`,
    `Artifacts/INDEX.md`, or the domain MOC). Link session notes to the daily

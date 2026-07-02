@@ -25,4 +25,9 @@ need "Never read a"   # "Never read a .base to answer"
 need ".base"          # the specific file type named in the prohibition
 need "write-only"     # the rationale word that anchors the clause
 
+need '/scripts/lib/allowlist-validate.sh'
+need 'allowlist_validate'
+need '/scripts/lib/dedup-scan.sh'
+need 'dedup_same_day'
+
 echo "PASS: vault-librarian-agent"
