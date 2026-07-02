@@ -19,8 +19,8 @@ jaccard() {
   local ta tb inter uni
   ta="$(tokenize_slug "$1" | sort -u)"
   tb="$(tokenize_slug "$2" | sort -u)"
-  inter="$(comm -12 <(printf '%s\n' "$ta" | grep -v '^$' | sort -u) <(printf '%s\n' "$tb" | grep -v '^$' | sort -u) | grep -c .)"
-  uni="$(printf '%s\n%s\n' "$ta" "$tb" | grep -v '^$' | sort -u | grep -c .)"
+  inter="$(comm -12 <(printf '%s\n' "$ta" | grep -v '^$' | sort -u) <(printf '%s\n' "$tb" | grep -v '^$' | sort -u) | grep -c . || true)"
+  uni="$(printf '%s\n%s\n' "$ta" "$tb" | grep -v '^$' | sort -u | grep -c . || true)"
   [ "$uni" -eq 0 ] && { printf '0.00\n'; return; }
   awk -v i="$inter" -v u="$uni" 'BEGIN{printf "%.2f\n", i/u}'
 }

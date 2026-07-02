@@ -14,6 +14,9 @@ got="$(tokenize_slug "2026-06-29-Keeper-a-PR-ai" | tr '\n' ' ')"
 [ "$(jaccard alpha-beta gamma-delta)" = "0.00" ] || fail "jaccard disjoint"
 # half overlap: {keeper,cli} vs {keeper,gui} -> inter 1 / union 3 = 0.33
 [ "$(jaccard keeper-cli keeper-gui)" = "0.33" ] || fail "jaccard partial: $(jaccard keeper-cli keeper-gui)"
+# all-numeric slugs produce empty token sets; must yield 0.00 and not abort under set -e
+# Direct-call form (no $(...)) is the mutation check: broken grep -c aborts the subshell here.
+bash -c "set -euo pipefail; . '$ROOT_DIR/scripts/lib/dedup-scan.sh'; jaccard 2026-01 2026-02" | grep -q '^0\.00$' || fail "all-numeric jaccard should be 0.00 and not abort"
 
 # dedup_same_day: same-day match above threshold is found; other-day ignored
 mkdir -p "$TMP/f"
@@ -29,5 +32,6 @@ echo "$hit" | grep -q '2026-06-28' && fail "other-day file wrongly matched"
 if command -v zsh >/dev/null 2>&1; then
   zsh -c ". '$ROOT_DIR/scripts/lib/dedup-scan.sh'; tokenize_slug a-2026-bb" >/dev/null 2>"$TMP/zerr" || { cat "$TMP/zerr" >&2; fail "dedup-scan broke under zsh"; }
   grep -qi 'undefined signal\|bad pattern\|parse error' "$TMP/zerr" && { cat "$TMP/zerr" >&2; fail "zsh warning in dedup-scan"; }
+  zsh -c ". '$ROOT_DIR/scripts/lib/dedup-scan.sh'; jaccard keeper-cli keeper-gui" >/dev/null 2>>"$TMP/zerr" || { cat "$TMP/zerr" >&2; fail "jaccard broke under zsh"; }
 fi
 echo "PASS: dedup-scan"
