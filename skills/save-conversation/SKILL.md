@@ -1,7 +1,7 @@
 ---
 name: save-conversation
 description: Exports the current Claude conversation to the Obsidian vault. Triggers on phrases like "save this to Obsidian", "export to obsidian", "document this session", "save our conversation", "write this up", "put this in obsidian". Formats the conversation as structured markdown, determines the correct project folder from context, and saves with a timestamped filename. Optionally opens the note in the Obsidian GUI.
-version: 1.1.0
+version: 1.2.0
 ---
 
 # Save Conversation to Obsidian
@@ -164,16 +164,17 @@ Mirror the precedence column in the example file's `## Project Taxonomy`. The se
 
 `strict_domains` defaults to **`true`** when the field is absent from the config frontmatter. Treat the field as opt-out, not opt-in. Only `strict_domains: false` (explicit) skips validation.
 
-When strict mode is on, validate the resolved target before any write:
+When strict mode is on, validate the resolved target:
 
-1. Parse the `## Project Taxonomy` table; collect every value in the `Vault path` column as the canonical allow-list (e.g. `Projects/Development/`, `Daily/`, `Inbox/`).
-2. Normalize both the allow-list entries and the resolved target before comparison: strip any trailing `/`, and lowercase both sides. The on-disk filesystem is often case-insensitive (macOS HFS+, default APFS); the prompt comparison must match.
-3. Compute the resolved target's **top-level prefix** — i.e. the path up to and including the first allow-listed root match. Dated subfolders and per-repo namespacing *under* an allow-listed root are valid (e.g. `Projects/Development/nhangen/foo/2026-05-09.md` is fine because `Projects/Development/` is allow-listed).
-4. If no normalized allow-list entry is a prefix of the normalized target, **refuse to write**. Surface the closest match (Levenshtein on the top-level component, in the original casing from the taxonomy) and tell the user:
+Source the shared validator and call it — do not re-implement the parse/normalize/prefix logic:
 
-   > Refusing to write to `<target>` — top-level folder is not in the allow-list. Closest match: `<closest>`. Either correct the topic hint, or add `<target-toplevel>` to `## Project Taxonomy` in `obsidian.local.md` (or rerun `/obsidian:setup`).
+    . "${CLAUDE_PLUGIN_ROOT}/scripts/lib/allowlist-validate.sh"
+    if ! allowlist_validate "<target>"; then
+      # allowlist_validate printed the refusal + closest match to stderr; surface it and stop.
+      exit 0
+    fi
 
-5. Do **not** create the unrecognized folder. The taxonomy is the only place new top-level folders get added.
+`allowlist_validate` reads the `## Project Taxonomy` table as the canonical allow-list, normalizes case, matches the target's top-level prefix (dated subfolders and per-repo namespacing under a root are valid), and on failure prints the closest match. Do not create unrecognized top-level folders.
 
 If `strict_domains: false`, skip this validation.
 
@@ -268,11 +269,13 @@ Before writing a new note in the resolved target folder, check whether a same-da
 
 ### Steps
 
-1. **Glob the target folder** for `<YYYY-MM-DD>-*.md` where `<YYYY-MM-DD>` is today's date. Bash example:
-   ```bash
-   find "<vault_path>/<target-folder>" -maxdepth 1 -type f -name "$(date +%Y-%m-%d)-*.md" 2>/dev/null
-   ```
-2. **Score topic similarity** between the proposed kebab-case slug (the part after the date prefix in the new filename) and each existing same-day file's slug. Use **token Jaccard similarity**: split each slug on `-`, lowercase, **drop tokens that are purely numeric (e.g. `2026`, `04`, `1234`) or exactly one character (e.g. `a`, `v`, `x`)**. Keep 2-char tokens like `pr`, `om`, `wp`, `ai` — these carry signal in dev/work slugs. Then compute `|A ∩ B| / |A ∪ B|`.
+1. Source the shared scanner and call it:
+
+       . "${CLAUDE_PLUGIN_ROOT}/scripts/lib/dedup-scan.sh"
+       dedup_same_day "<vault>/<target-folder>" "$(date +%Y-%m-%d)" "<proposed-slug>" "${dedup_jaccard_threshold:-0.4}"
+
+   `dedup_same_day` globs today's notes in the folder, scores each slug's token Jaccard against the proposed slug (via the single `tokenize_slug`), and echoes `path<TAB>score` for the best match at or above the threshold, or nothing.
+2. If it echoed a match, prompt the user (append vs new), as below.
 3. **If the highest score is ≥ 0.4**, treat as a likely match and prompt the user:
    > Same-day note already exists: `<existing-path>` (similarity: `<score>`).
    > - **append** → add `## HH:MM — <new-topic>` section to the existing file
@@ -369,7 +372,10 @@ After a successful new-file write, check whether the parent folder has grown a c
 
 ### Tokenization for stem detection
 
-Same filter as dedup: split slug on `-`, lowercase, drop tokens that are purely numeric (`2026`, `04`) or exactly one character (`a`, `v`, `x`). Keep 2-char tokens (`pr`, `om`, `wp`, `ai`).
+Tokenize every candidate slug with the shared `tokenize_slug` (source `dedup-scan.sh`) — the same tokenizer the dedup check uses, so the two never diverge:
+
+    . "${CLAUDE_PLUGIN_ROOT}/scripts/lib/dedup-scan.sh"
+    tokenize_slug "<slug>"
 
 **Stem selection (precise rule):**
 1. For each filtered token, count the **number of distinct file-slugs in the candidate cluster that contain it** (not total occurrences across all files).
