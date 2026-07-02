@@ -33,12 +33,9 @@ config from `$CONFIG`.
 
 ## Routing Logic
 
-Read routing rules from `$CONFIG` (resolved above):
+Route per the canonical **## Routing Rules** in the resolved config (valid folders = `allowlist_list`; lowest `Precedence` wins on multi-match). Do not restate the rules here.
 
-1. Extract the `## Routing Rules` section from the config file
-2. Extract the `## Project Taxonomy` section for folder paths — the `Vault path` column is the **canonical allow-list** of top-level folders. The optional `precedence` column ranks routes when more than one matches (lower number wins; absent → 100).
-3. Match the conversation's dominant topics against the keywords in those sections — collect **every** matching candidate, not just the first.
-4. If exactly one candidate matches above threshold, use it. If two or more match, run the **Cross-Domain Tiebreaker** below.
+If exactly one candidate matches above threshold, use it. If two or more match, run the **Cross-Domain Tiebreaker** below.
 
 If the resolver prints nothing (no config exists at any location), tell the user to run `/obsidian:setup` first and stop.
 

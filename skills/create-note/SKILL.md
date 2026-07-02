@@ -47,7 +47,7 @@ native here.
    `/obsidian:setup` first and stop. If `VAULT.md` exists at the vault root,
    read it and follow any structure conventions it defines.
 
-5. **Route to correct domain** — use routing logic from `obsidian:save-conversation` skill.
+5. **Route to correct domain** — route per the canonical **## Routing Rules** in the resolved config (valid folders = `allowlist_list`; lowest `Precedence` wins on multi-match). Do not restate the rules here.
 
 6. **Validate allow-list** — `strict_domains` defaults to `true` when absent; only an explicit `false` skips validation. When on, source the shared validator and call it — do not re-implement the parse/normalize/prefix/closest-match logic:
 

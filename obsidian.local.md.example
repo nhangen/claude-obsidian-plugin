@@ -52,12 +52,7 @@ The `Precedence` column ranks routes when more than one keyword matches (lower w
 
 ## Routing Rules
 
-- Keywords "code, git, bug, deploy, api, plugin, terminal, claude" → Projects/Development/
-- Keywords "client, meeting, standup, sprint, project, jira, ticket" → Projects/Work/
-- Keywords "personal, journal, health, goals, finance" → Projects/Personal/
-- Keywords "book, course, paper, research, study, learn" → Projects/Learning/
-- Keywords "daily, journal, today" → Daily/
-- Ambiguous → Inbox/ (with #needs-filing tag)
+Valid target folders are exactly what `allowlist_list` emits from the `## Project Taxonomy` table above — never hardcode folder names here or in any skill. To route: match the note's dominant topic(s) to the taxonomy Domain keywords, collect every candidate, and when 2+ match, prefer the lowest `Precedence`. This block is the single source of routing rules; skills reference it rather than restating it.
 
 ## Strict Domain Validation
 
