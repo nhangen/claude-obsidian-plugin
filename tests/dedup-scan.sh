@@ -28,6 +28,9 @@ echo "$hit" | grep -q '2026-06-28' && fail "other-day file wrongly matched"
 # below threshold -> no output
 [ -z "$(dedup_same_day "$TMP/f" 2026-06-29 totally-unrelated-topic 0.4)" ] || fail "below-threshold should be empty"
 
+dedup_same_day "$TMP/f" 2026-06-29 zzz-no-such-topic 0.4 >/dev/null
+echo "ok: bare no-match dedup_same_day survived set -e" >/dev/null
+
 # zsh cleanliness
 if command -v zsh >/dev/null 2>&1; then
   zsh -c ". '$ROOT_DIR/scripts/lib/dedup-scan.sh'; tokenize_slug a-2026-bb" >/dev/null 2>"$TMP/zerr" || { cat "$TMP/zerr" >&2; fail "dedup-scan broke under zsh"; }

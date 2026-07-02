@@ -36,5 +36,5 @@ dedup_same_day() {
       best_score="$score"; best_path="$f"
     fi
   done
-  [ -n "$best_path" ] && printf '%s\t%s\n' "$best_path" "$best_score"
+  if [ -n "$best_path" ]; then printf '%s\t%s\n' "$best_path" "$best_score"; fi
 }
