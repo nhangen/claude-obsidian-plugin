@@ -36,5 +36,19 @@ if command -v zsh >/dev/null 2>&1; then
   zsh -c ". '$ROOT_DIR/scripts/lib/dedup-scan.sh'; tokenize_slug a-2026-bb" >/dev/null 2>"$TMP/zerr" || { cat "$TMP/zerr" >&2; fail "dedup-scan broke under zsh"; }
   grep -qi 'undefined signal\|bad pattern\|parse error' "$TMP/zerr" && { cat "$TMP/zerr" >&2; fail "zsh warning in dedup-scan"; }
   zsh -c ". '$ROOT_DIR/scripts/lib/dedup-scan.sh'; jaccard keeper-cli keeper-gui" >/dev/null 2>>"$TMP/zerr" || { cat "$TMP/zerr" >&2; fail "jaccard broke under zsh"; }
+  # dedup_same_day smoke under zsh (match still works).
+  zt="$(mktemp -d "${TMPDIR:-/tmp}/dedupz-XXXXXX")"; : > "$zt/2026-06-29-alpha-beta.md"
+  m="$(zsh -c ". '$ROOT_DIR/scripts/lib/dedup-scan.sh'; dedup_same_day '$zt' 2026-06-29 alpha-beta 0.4")"
+  echo "$m" | grep -q 'alpha-beta' || fail "dedup_same_day match failed under zsh"
+  rm -rf "$zt"
 fi
+
+# Structural guard: the same-day scan must use find, never a bare glob-for. The
+# `for f in "$dir"/*.md` idiom errors under rc'd interactive zsh (nomatch) on the
+# common no-match path; that failure can't be reproduced portably via `zsh -c`,
+# so guard the implementation shape directly.
+grep -Eq 'for[[:space:]]+[A-Za-z_]+[[:space:]]+in[^;]*\*\.md' "$ROOT_DIR/scripts/lib/dedup-scan.sh" \
+  && fail "same-day scan must use find, not a glob-for (breaks under zsh nomatch)"
+grep -q 'find .* -name' "$ROOT_DIR/scripts/lib/dedup-scan.sh" \
+  || fail "dedup_same_day should scan via find"
 echo "PASS: dedup-scan"

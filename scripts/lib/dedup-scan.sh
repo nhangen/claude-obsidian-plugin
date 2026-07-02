@@ -28,13 +28,13 @@ jaccard() {
 dedup_same_day() {
   local folder="$1" date="$2" slug="$3" threshold="${4:-0.4}"
   local f base score best_path="" best_score="0.00"
-  for f in "$folder/$date"-*.md; do
-    [ -e "$f" ] || continue
+  while IFS= read -r f; do
+    [ -n "$f" ] || continue
     base="$(basename "$f" .md)"; base="${base#"$date"-}"
     score="$(jaccard "$slug" "$base")"
     if awk -v s="$score" -v t="$threshold" -v b="$best_score" 'BEGIN{exit !(s>=t && s>b)}'; then
       best_score="$score"; best_path="$f"
     fi
-  done
+  done < <(find "$folder" -maxdepth 1 -type f -name "$date-*.md" 2>/dev/null)
   if [ -n "$best_path" ]; then printf '%s\t%s\n' "$best_path" "$best_score"; fi
 }
