@@ -23,7 +23,7 @@ VAULT_PATH="$(grep '^vault_path:' "$CONFIG" | sed 's/vault_path: //')"
 
 Read `$VAULT_PATH/VAULT.md` (the map) and `$VAULT_PATH/Profile.md` (identity +
 Constraints) before acting. Read the `## Project Taxonomy` and `## Routing
-Rules` from `$CONFIG` exactly as `skills/save-conversation/SKILL.md` describes
+Rules` from `$CONFIG` — the canonical source for routing
 (allow-list + precedence + cross-domain tiebreaker).
 
 ## Routing a topic to a slice
