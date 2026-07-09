@@ -26,6 +26,7 @@ Long Claude sessions and the commits they produce hold context that's gone the m
 | `/obsidian:bookmark [label]` | Mark a chapter boundary; saved as a separate note at session end. |
 | `/obsidian:recall <query>` | Cross-search vault, git history, GitHub PRs, and claude-mem. |
 | `/obsidian:ask` | Ask the vault librarian — index-grounded answers with citations, or file new info without back-and-forth. |
+| _(trigger-only, no slash command)_ | `reorganize` — analyzes and reorganizes the vault or a project folder via the `vault-organizer` subagent; proposes a plan and waits for approval before moving anything. Triggers on phrases like "reorganize my vault", "clean up obsidian". |
 
 ### Vault Librarian
 
@@ -70,9 +71,10 @@ selection are owned by the librarian — a keeper-saved note is identical to a
 librarian-filed one.
 
 **Opt-in by design.** Calling `keeper-save` routes through the librarian.
-Not calling it bypasses the librarian entirely — existing writers are unchanged.
-No existing writer is migrated by this change; migration is a separate opt-in
-decision per writer.
+Not calling it bypasses the librarian entirely. `create-note`, `daily-note`,
+and `save-conversation` have been migrated to route their writes through
+`keeper-save` (v1.11.0–1.13.0); any other writer not yet migrated is unchanged
+until it opts in.
 
 ## vaultkeeper watcher
 
@@ -189,6 +191,11 @@ skills/*/SKILL.md             Skill logic (save, find, recall, setup, …)
 hooks/hooks.json              Stop + PostToolUse hook registration
 scripts/                      Hook executables (commit-capture, session-save, …)
 scripts/lib/resolve-config.sh Version-independent config-path resolver
+scripts/lib/allowlist-validate.sh Frontmatter/path allowlist validation shared by writers
+scripts/lib/dedup-scan.sh     Shared dedup-against-existing-notes scan
+scripts/lib/keeper-save-payload.sh Payload parsing/validation for keeper-save
+scripts/lib/vault-index.sh    Shared INDEX.md read/refresh helpers
+scripts/keeper                CLI entry point for keeper insert/append operations
 agents/                       Subagents (vault-organizer for /obsidian reorganize paths)
 integrations/                 External tool integrations
 obsidian.local.md.example     Config template (real config lives at the stable path, gitignored)
