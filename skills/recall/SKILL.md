@@ -76,50 +76,13 @@ Use the 3-layer workflow:
 
 If claude-mem is unavailable or returns errors, note "claude-mem: unavailable" and continue with other sources.
 
-### Source E: claude-mem-graph MCP (causal tracing)
+### Source E: claude-mem-graph MCP — RETIRED (2026-07-08)
 
-Three entry paths with concrete triggers. Each is independent — fire any that apply.
-
-**Path E1: trace from the top flat-search hit.**
-
-Trigger: Source D returned at least one observation.
-
-```
-graph_neighbors({ observation_id: <top hit id>, max_results: 30 })
-```
-
-Surface only these edge types: `produced_by` (same-session siblings), `depends_on` (causal upstream), `informed_by` (narrative-extracted causal), `continues` (cross-session arc). Do not show `relates_to` — upstream `graph_neighbors` (claude-mem-graph ≥ v0.2.3) filters it at the source; this client does not double-filter. If you see a `relates_to` row in output, the installed graph is older than v0.2.3 — silently discard and add a one-line note to the report so the user knows to upgrade.
-
-**Path E2: file path lookup (exact match only).**
-
-Trigger: the query contains a **literal file path** — a token with a `/` separator OR a filename ending in `.md` / `.ts` / `.tsx` / `.jsx` / `.py` / `.php` / `.sh` / `.go` / `.rs`.
-
-```
-graph_file_history({ file_path: "<the literal token from the query>" })
-```
-
-`graph_file_history` does **exact-match lookup** against the graph's `file:<path>` nodes — no substring, no basename, no glob. Only literal paths from the query work here. **Do NOT pass kebab-case skill names, repo slugs, or guessed directory names — they will silently return empty.**
-
-**Path E3: cross-project graph search.**
-
-Trigger when EITHER:
-- (a) Source D returned 0 rows, OR
-- (b) Source D's top hit's title (lowercased) shares no token of length ≥ 4 with the query keywords (lowercased, stopwords removed), OR
-- (c) the query contains a kebab/snake_case identifier with 1+ separators (e.g. `pr-czar`, `branch-worktree-cleanup`, `mem_search`) that did NOT trigger Path E2.
-
-```
-graph_search({ task_description: "<original keywords>", max_sessions: 30, since_days: 365 })
-```
-
-Path E3 searches title, subtitle, narrative, text, facts, and concepts — different indexing from Source D's FTS, so it can surface observations Source D missed (e.g. when a skill/script name appears in a narrative but not a title). It's weaker than flat search for general keyword queries — that's why the trigger is conditional, not always-on.
-
-If E2 returned exact file-history results, you can skip E3's (c) branch — you've already located the entry via file path.
-
-If all three paths return empty, claude-mem-graph adds nothing for this query — proceed without it.
+The `claude-mem-graph` plugin has been retired and delisted from the marketplace; its `graph_neighbors` / `graph_file_history` / `graph_search` MCP tools are no longer available. Recall now runs on Sources A–D only. (It previously expanded the story arc via causal edges and cross-session `continues` links; that capability is gone until a replacement ships.)
 
 ## Step 3: Synthesize Report
 
-When merging Source D (flat claude-mem) with Source E (graph), use flat hits to anchor the report and graph neighbors to expand the story arc. A `produced_by` sibling chain typically becomes a "Session Context" subsection; `depends_on` and `informed_by` chains become entries in "Timeline" or "Key Decisions"; `continues` edges become "Related Sessions".
+Synthesize from the flat claude-mem hits (Source D) and the local sources (A–C). (Source E / claude-mem-graph is retired — no graph expansion of the story arc.)
 
 Combine all results into this format:
 
