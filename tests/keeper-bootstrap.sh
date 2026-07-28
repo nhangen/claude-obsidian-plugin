@@ -6,7 +6,10 @@ fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
 INSTALLER="${ROOT_DIR}/scripts/install-watcher.sh"
 
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/kb-XXXXXX")"
-trap 'rm -rf "$WORK"' EXIT
+# Two arms below chmod a config dir read-only. rm -rf clears it anyway on macOS
+# 15 as the owner (verified — no crumb is left), but that is a permission detail
+# this teardown should not depend on to avoid stranding a dir in the real TMPDIR.
+trap 'chmod -R u+w "$WORK" 2>/dev/null; rm -rf "$WORK"' EXIT
 
 # install-watcher.sh exposes the namespace label, and the bootstrap lib reads
 # from it — one source of truth, no drift between the two files.
@@ -96,6 +99,41 @@ ERR="$(KEEPER_OS="Darwin" keeper_ensure_active "$CFGF" "$VAULTF" 900 2>&1 >/dev/
 [ -s "$FAILCALLS" ] || fail "failing install was never attempted"
 grep -qi 'FAILED' <<<"$ERR" || fail "failed install was silent — no diagnostic emitted: '$ERR'"
 
+# --- a failed config write leaves a trace (#40) ---
+# A read-only parent dir makes _kb_cfg_ensure's `mv` fail the way a full or
+# permission-denied filesystem does. Staying non-fatal is correct — a Stop hook
+# must not abort — but the config then never gains keeper_interval_secs and the
+# keeper runs at the compiled-in default forever, so it cannot be silent. Note
+# the contrast just above it in production: the schema seed already names its
+# fallback when it fails.
+ROD="$WORK/ro"; mkdir -p "$ROD"
+RCFG="$ROD/obsidian.local.md"; RVAULT="$WORK/vaultro"
+printf -- '---\nvault_path: %s\n---\n' "$RVAULT" > "$RCFG"
+mk_vault "$RVAULT"
+export VAULTKEEPER_INSTALL="$WORK/stub-install.sh"
+chmod a-w "$ROD"
+RERR="$(KEEPER_OS="Darwin" keeper_ensure_active "$RCFG" "$RVAULT" 900 2>&1 >/dev/null)" \
+  || { chmod u+w "$ROD"; fail "ensure_active must return 0 when a config write fails"; }
+chmod u+w "$ROD"
+grep -q 'keeper_autostart' <<<"$RERR" \
+  || fail "failed keeper_autostart write was silent: [$RERR]"
+grep -q 'keeper_interval_secs' <<<"$RERR" \
+  || fail "failed keeper_interval_secs write was silent: [$RERR]"
+
+# --- _kb_cfg_ensure cleans up its temp file when the swap fails (#40) ---
+# awk succeeds, `mv` fails, and the rendered config sits in TMPDIR forever. The
+# Stop hook runs this on every session, so the leak accumulates one file per
+# session for as long as the config stays unwritable. Subshell so the temporary
+# TMPDIR cannot outlive the call.
+LEAK="$WORK/leaktmp"; mkdir -p "$LEAK"
+chmod a-w "$ROD"
+if ( TMPDIR="$LEAK"; _kb_cfg_ensure leak_probe 1 "$RCFG" ); then
+  chmod u+w "$ROD"; fail "_kb_cfg_ensure reported success when mv could not write the config"
+fi
+chmod u+w "$ROD"
+LEFT="$(find "$LEAK" -name 'kbcfg-*' -type f | wc -l | tr -d ' ')"
+[ "$LEFT" = "0" ] || fail "_kb_cfg_ensure leaked $LEFT temp file(s) into $LEAK"
+
 # --- opt-out: keeper_autostart: false skips install entirely ---
 CFG2="$WORK/optout.local.md"; VAULT2="$WORK/vault2"
 printf -- '---\nvault_path: %s\nkeeper_autostart: false\n---\n' "$VAULT2" > "$CFG2"
@@ -142,5 +180,111 @@ grep -q 'cannot find the scripts dir' <<<"$OERR" \
   || fail "self-location failure was not named; got: [$OERR]"
 grep -q 'install-watcher.sh broken' <<<"$OERR" \
   && fail "self-location failure blamed install-watcher.sh: [$OERR]"
+
+# --- a broken installer is reported in its own words (#40) ---
+# _kb_scripts succeeds here — install-watcher.sh is present beside the lib — so
+# this is the case #34 left behind: the installer itself is broken. Its stderr is
+# the only thing separating a syntax error from a missing dependency, and
+# `2>/dev/null` threw it away, leaving the refusal to guess "broken?".
+BRK="$WORK/broken/scripts"; mkdir -p "$BRK/lib"
+cp "${ROOT_DIR}/scripts/lib/keeper-bootstrap.sh" "$BRK/lib/"
+cat > "$BRK/install-watcher.sh" <<'EOF'
+#!/usr/bin/env bash
+echo "BOOM-INSTALLER-DIAGNOSTIC" >&2
+exit 3
+EOF
+# Both flag sets: session-save.sh is `set -uo pipefail` today, but an errexit
+# caller aborted at `label="$(keeper_label ...)"` — the installer's exit 3 became
+# the assignment's status — killing the hook before the refusal ever printed. A
+# diagnostic the shell never reaches is the #34 defect, so pin both.
+BCFG="$WORK/broken.local.md"; BVAULT="$WORK/vaultb"
+printf -- '---\nvault_path: %s\n---\n' "$BVAULT" > "$BCFG"   # no keeper_autostart key
+mk_vault "$BVAULT"
+for _flags in '' 'set -euo pipefail;'; do
+  BERR="$(KEEPER_OS="Darwin" bash -c "${_flags} . '$BRK/lib/keeper-bootstrap.sh'; keeper_ensure_active '$BCFG' '$BVAULT' 900" 2>&1 >/dev/null)" \
+    || fail "[${_flags:-no flags}] ensure_active must return 0 when the installer is broken (never abort the hook)"
+  grep -q 'BOOM-INSTALLER-DIAGNOSTIC' <<<"$BERR" \
+    || fail "[${_flags:-no flags}] installer stderr was discarded; refusal said only: [$BERR]"
+done
+# Compare against the pwd-normalized path: _kb_lib_dir resolves through
+# `cd && pwd`, so a TMPDIR with a trailing slash collapses "T//kb-x" to "T/kb-x".
+BRKREAL="$(cd "$BRK" && pwd)"
+grep -qF "$BRKREAL/install-watcher.sh" <<<"$BERR" \
+  || fail "refusal did not name the installer it actually called: [$BERR]"
+
+# --- a loud installer is still quoted, and the quote stays bounded (#41) ---
+# The bound must not be a pipeline: `tr ... | head -c 300` makes head exit early,
+# tr take SIGPIPE, and pipefail hand rc=141 to the assignment — so the `|| lblerr=""`
+# fallback blanked a value that had been filled correctly. That is this PR's own
+# subject (a diagnostic the shell throws away) reintroduced by its bound.
+# 300 KB, and control bytes that must not reach the hook's stderr live.
+LOUD="$WORK/loud/scripts"; mkdir -p "$LOUD/lib"
+cp "${ROOT_DIR}/scripts/lib/keeper-bootstrap.sh" "$LOUD/lib/"
+cat > "$LOUD/install-watcher.sh" <<'EOF'
+#!/usr/bin/env bash
+{ printf 'LOUD-HEAD\033[31m\r\a'; head -c 300000 /dev/zero | tr '\0' 'X'; printf 'LOUD-TAIL\n'; } >&2
+exit 4
+EOF
+chmod +x "$LOUD/install-watcher.sh"
+for _flags in 'set -uo pipefail;' 'set -euo pipefail;'; do
+  LERR="$(KEEPER_OS="Darwin" bash -c "${_flags} . '$LOUD/lib/keeper-bootstrap.sh'; keeper_ensure_active '$BCFG' '$BVAULT' 900" 2>&1 >/dev/null)" \
+    || fail "[$_flags] ensure_active must return 0 against a loud broken installer"
+  grep -q 'LOUD-HEAD' <<<"$LERR" \
+    || fail "[$_flags] the quote was dropped when the installer said too much: [${LERR:0:200}]"
+  [ "${#LERR}" -lt 600 ] \
+    || fail "[$_flags] refusal was ${#LERR} bytes; the quote is not bounded"
+  case "$LERR" in
+    *$'\r'*|*$'\a'*|*$'\033'*) fail "[$_flags] control bytes reached the hook's stderr: [${LERR:0:120}]" ;;
+  esac
+done
+
+# --- the session-end path on a working host spawns the installer once (#41) ---
+# Asking for the label twice — once in keeper_ensure_active, once inside the
+# predicate it calls — put a second install-watcher.sh process on every activated
+# host's Stop hook, alongside a mktemp/rm pair capturing stderr from an installer
+# that had nothing to say. This is the dominant path: every session, forever.
+CNT="$WORK/counted/scripts"; mkdir -p "$CNT/lib"
+cp "${ROOT_DIR}/scripts/lib/keeper-bootstrap.sh" "$CNT/lib/"
+SPAWNS="$WORK/label-spawns.log"; : > "$SPAWNS"
+cat > "$CNT/install-watcher.sh" <<EOF
+#!/usr/bin/env bash
+printf '%s\n' "\$1" >> "$SPAWNS"
+printf '%s\n' "$LABEL"
+EOF
+chmod +x "$CNT/install-watcher.sh"
+# Count mktemp too: capturing the installer's stderr unconditionally meant the
+# working host paid a temp file per session to quote an installer with nothing to
+# say. The spawn count alone does not see that.
+MKC="$WORK/mktemp-calls.log"; : > "$MKC"
+cat > "$WORK/bin/mktemp" <<EOF
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$MKC"
+exec /usr/bin/mktemp "\$@"
+EOF
+chmod +x "$WORK/bin/mktemp"
+printf '%s\n' "$LABEL" > "$STATE"
+KEEPER_OS="Darwin" bash -c ". '$CNT/lib/keeper-bootstrap.sh'; keeper_ensure_active '$CFG' '$VAULT' 900" \
+  || fail "ensure_active returned non-zero on an already-installed host"
+[ ! -s "$MKC" ] \
+  || fail "the session-end path on an installed host used mktemp: [$(cat "$MKC")]"
+SPAWNED="$(wc -l < "$SPAWNS" | tr -d ' ')"
+[ "$SPAWNED" = "1" ] \
+  || fail "an installed host spawned install-watcher.sh $SPAWNED times per session, want 1"
+: > "$STATE"
+
+# --- the predicate answers; it never leaks the installer's status or stderr ---
+# keeper_scheduler_installed is public (the launchctl arms above call it bare) and
+# its `label="$(keeper_label)"` carried the installer's exit 3 as the assignment's
+# status: an errexit caller died on that line and never reached the
+# `[ -n "$label" ] || return 1` below it. In production the `&&` at the call site
+# hid that positionally. A predicate also has no channel to explain a fault on, so
+# the installer's stderr must not surface here unprefixed — keeper_ensure_active
+# is the caller that quotes it.
+PRC=0
+PERR="$(KEEPER_OS="Darwin" bash -c "set -euo pipefail; . '$BRK/lib/keeper-bootstrap.sh'; keeper_scheduler_installed" 2>&1 >/dev/null)" || PRC=$?
+[ "$PRC" = 1 ] \
+  || fail "keeper_scheduler_installed returned the installer's status ($PRC), so the handler under the assignment was never reached"
+[ -z "$PERR" ] \
+  || fail "the predicate leaked the installer's stderr to its caller: [$PERR]"
 
 echo "PASS: keeper-bootstrap"
