@@ -131,14 +131,16 @@ cmd_insert() {
   # resolves to the file — the librarian's filename-based INDEX convention.
   [ -n "$title" ] || title="$(basename "$target" .md)"
 
-  # Folder INDEX: append the human link (create INDEX on absence), then sync
-  # index state so a later QUERY won't re-emit this note as ADDED (no double link).
+  # Folder INDEX: vault_index_apply is the single link writer — it derives the
+  # resolvable target and dedups. Hand-appending here too meant a --title that
+  # differed from the stem produced two entries, the title one resolving to
+  # nothing. Keep stderr: apply's coverage report is the only signal that the
+  # slice is under-indexed.
   local idx="$folder/INDEX.md"
   [ -f "$idx" ] || printf '# %s Index\n' "$(basename "$folder")" > "$idx"
-  grep -qxF -- "- [[$title]]" "$idx" || printf -- '- [[%s]]\n' "$title" >> "$idx"
   . "$KEEPER_DIR/lib/note-hash.sh"
   . "$KEEPER_DIR/lib/vault-index.sh"
-  vault_index_apply "$folder" "$idx" >/dev/null 2>&1 || true
+  vault_index_apply "$folder" "$idx" >/dev/null || true
 
   # Optional: link the note into Daily/<date> under ## Session Links.
   if [ -n "$sldate" ]; then
@@ -146,8 +148,18 @@ cmd_insert() {
     mkdir -p "$vault_abs/Daily"
     [ -f "$daily" ] || printf -- '---\ndate: %s\ntags: [daily]\n---\n\n# %s\n' "$sldate" "$sldate" > "$daily"
     grep -q '^## Session Links' "$daily" || printf '\n## Session Links\n' >> "$daily"
-    if ! grep -qxF -- "- [[$title]]" "$daily"; then
-      awk -v link="- [[$title]]" '{print} /^## Session Links/ && !d {print link; d=1}' \
+    # Link the note by its vault-relative path so it resolves from Daily/, with
+    # the human title as an alias. Dedup on the path: two different notes can
+    # share a title, and keying on title text dropped the second one's link.
+    local ltarget link
+    # Same target derivation as the folder INDEX (vault root = nearest .obsidian
+    # ancestor), so the two links can't disagree about where the root is when
+    # --vault points below it.
+    ltarget="$(vault_link_target "$folder" "$(basename "$target" .md)")"
+    link="- [[$ltarget]]"
+    [ "$title" = "$(basename "$target" .md)" ] || link="- [[$ltarget|$title]]"
+    if ! grep -qF -- "[[$ltarget]]" "$daily" && ! grep -qF -- "[[$ltarget|" "$daily"; then
+      awk -v link="$link" '{print} /^## Session Links/ && !d {print link; d=1}' \
         "$daily" > "$daily.ktmp" && mv "$daily.ktmp" "$daily"
     fi
   fi

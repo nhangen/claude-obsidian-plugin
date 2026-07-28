@@ -36,9 +36,15 @@ slice is one or two domain folders, never the whole vault.
 
 1. Route the question to its slice (folder + INDEX).
 2. Refresh the slice: ``ADDED="$(vault_index_apply "$FOLDER" "$FOLDER/INDEX.md")"``.
-   For each filename in `$ADDED`, append a human link ``- [[<title>]]`` to
-   `INDEX.md` (append-only; never rewrite the file). The `ADD` set is the
-   **coverage** result — these notes existed but were not indexed.
+   `vault_index_apply` writes the links itself (append-only), as
+   ``- [[<path/from/vault/root>]]`` — a bare basename is ambiguous once two notes
+   in different subfolders share one. Do **not** append them by hand; that is a
+   second implementation that drifts. The `ADD` set it returns on stdout is the
+   **coverage** result: these notes existed but were not indexed. If apply
+   reports `coverage defect` on stderr, links it meant to write did not land —
+   say so rather than treating the slice as complete. To assess a whole folder
+   rather than one run, call ``vault_index_coverage_check "$FOLDER"
+   "$FOLDER/INDEX.md"``; it prints every tracked note that has no link.
 3. Read only the notes the INDEX points at for the topic.
 4. **Coverage invariant:** if the slice had `ADD`/gaps you could not fully
    summarize, or the INDEX is otherwise known-incomplete, say so and lower your
@@ -67,13 +73,14 @@ deduped.)
    silently — append an `[ask:where should this go?]` entry to `$VAULT_PATH/Pending.md`
    and ask the user once.
 2. **Dedup:** call the shared scanner — `dedup_same_day "<vault>/<folder>" "$(date +%Y-%m-%d)" "<slug>"`. If it echoes a `path<TAB>score`, surface that note and ask whether to append rather than file a duplicate — never silently merge.
-3. Write the note using the matching template in `$VAULT_PATH/Templates/`.
-   Append a link to the correct INDEX (`Decisions/INDEX.md`,
-   `Artifacts/INDEX.md`, or the domain MOC). Link session notes to the daily
-   note under `## Session Links`.
+3. Write the note using the matching template in `$VAULT_PATH/Templates/`. Its
+   INDEX link is written by step 5 (`vault_index_apply`), not by hand. Link
+   session notes to the daily note under `## Session Links`. A domain MOC that
+   is not the folder's `INDEX.md` is still a manual append.
 4. Unknown fields → `[ask]` markers in the note + entries in `Pending.md`
    (defer the question; do not interrogate the user mid-task).
-5. Refresh the touched INDEX: ``vault_index_apply "$FOLDER" "$FOLDER/INDEX.md"``.
+5. Refresh the touched INDEX: ``vault_index_apply "$FOLDER" "$FOLDER/INDEX.md"`` —
+   this is what links the new note.
 6. Return what you wrote, where, and a one-line summary.
 
 ## APPEND — "add this to today's note / log this entry"
