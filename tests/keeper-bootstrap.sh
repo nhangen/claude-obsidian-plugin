@@ -212,6 +212,32 @@ BRKREAL="$(cd "$BRK" && pwd)"
 grep -qF "$BRKREAL/install-watcher.sh" <<<"$BERR" \
   || fail "refusal did not name the installer it actually called: [$BERR]"
 
+# --- a loud installer is still quoted, and the quote stays bounded (#41) ---
+# The bound must not be a pipeline: `tr ... | head -c 300` makes head exit early,
+# tr take SIGPIPE, and pipefail hand rc=141 to the assignment — so the `|| lblerr=""`
+# fallback blanked a value that had been filled correctly. That is this PR's own
+# subject (a diagnostic the shell throws away) reintroduced by its bound.
+# 300 KB, and control bytes that must not reach the hook's stderr live.
+LOUD="$WORK/loud/scripts"; mkdir -p "$LOUD/lib"
+cp "${ROOT_DIR}/scripts/lib/keeper-bootstrap.sh" "$LOUD/lib/"
+cat > "$LOUD/install-watcher.sh" <<'EOF'
+#!/usr/bin/env bash
+{ printf 'LOUD-HEAD\033[31m\r\a'; head -c 300000 /dev/zero | tr '\0' 'X'; printf 'LOUD-TAIL\n'; } >&2
+exit 4
+EOF
+chmod +x "$LOUD/install-watcher.sh"
+for _flags in 'set -uo pipefail;' 'set -euo pipefail;'; do
+  LERR="$(KEEPER_OS="Darwin" bash -c "${_flags} . '$LOUD/lib/keeper-bootstrap.sh'; keeper_ensure_active '$BCFG' '$BVAULT' 900" 2>&1 >/dev/null)" \
+    || fail "[$_flags] ensure_active must return 0 against a loud broken installer"
+  grep -q 'LOUD-HEAD' <<<"$LERR" \
+    || fail "[$_flags] the quote was dropped when the installer said too much: [${LERR:0:200}]"
+  [ "${#LERR}" -lt 600 ] \
+    || fail "[$_flags] refusal was ${#LERR} bytes; the quote is not bounded"
+  case "$LERR" in
+    *$'\r'*|*$'\a'*|*$'\033'*) fail "[$_flags] control bytes reached the hook's stderr: [${LERR:0:120}]" ;;
+  esac
+done
+
 # --- the session-end path on a working host spawns the installer once (#41) ---
 # Asking for the label twice — once in keeper_ensure_active, once inside the
 # predicate it calls — put a second install-watcher.sh process on every activated
@@ -226,9 +252,21 @@ printf '%s\n' "\$1" >> "$SPAWNS"
 printf '%s\n' "$LABEL"
 EOF
 chmod +x "$CNT/install-watcher.sh"
+# Count mktemp too: capturing the installer's stderr unconditionally meant the
+# working host paid a temp file per session to quote an installer with nothing to
+# say. The spawn count alone does not see that.
+MKC="$WORK/mktemp-calls.log"; : > "$MKC"
+cat > "$WORK/bin/mktemp" <<EOF
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$MKC"
+exec /usr/bin/mktemp "\$@"
+EOF
+chmod +x "$WORK/bin/mktemp"
 printf '%s\n' "$LABEL" > "$STATE"
 KEEPER_OS="Darwin" bash -c ". '$CNT/lib/keeper-bootstrap.sh'; keeper_ensure_active '$CFG' '$VAULT' 900" \
   || fail "ensure_active returned non-zero on an already-installed host"
+[ ! -s "$MKC" ] \
+  || fail "the session-end path on an installed host used mktemp: [$(cat "$MKC")]"
 SPAWNED="$(wc -l < "$SPAWNS" | tr -d ' ')"
 [ "$SPAWNED" = "1" ] \
   || fail "an installed host spawned install-watcher.sh $SPAWNED times per session, want 1"

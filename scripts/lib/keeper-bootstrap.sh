@@ -15,7 +15,10 @@
 
 # Captured at source time — see the note in allowlist-validate.sh: zsh has no
 # BASH_SOURCE, and its `$0` only names the sourced file while it is being read.
-_kb_lib_dir="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd)"
+# `|| _kb_lib_dir=""` for the same reason as the assignments below: the `cd` can
+# legitimately fail, and this one runs at *source* time, where session-save.sh has
+# no `|| true` to catch it. Empty is a state _kb_scripts already refuses on.
+_kb_lib_dir="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd)" || _kb_lib_dir=""
 
 # Returns non-zero rather than printing an empty path. The old `cd ../ && pwd`
 # propagated its failure; a bare parameter strip cannot, and both callers
@@ -121,7 +124,13 @@ keeper_ensure_active() {
     lbltmp="$(mktemp "${TMPDIR:-/tmp}/kblbl-XXXXXX" 2>/dev/null)" || lbltmp=""
     if [ -n "$lbltmp" ]; then
       keeper_label >/dev/null 2>"$lbltmp" || true
-      lblerr="$(tr -c '[:print:]' ' ' < "$lbltmp" | head -c 300)" || lblerr=""
+      # Truncate with a parameter expansion, not `| head -c`: head exits at its
+      # limit, tr takes SIGPIPE, and pipefail makes that rc=141 the assignment's
+      # status — so `|| lblerr=""` blanked a value that had just been filled
+      # correctly, and a loud installer went unquoted. Bounding the diagnostic
+      # must not be able to delete it.
+      lblerr="$(tr -c '[:print:]' ' ' < "$lbltmp")" || lblerr=""
+      lblerr="${lblerr:0:300}"
       rm -f "$lbltmp"
     fi
     printf 'vaultkeeper: %s/install-watcher.sh did not report the scheduler label%s; skipping activation\n' \
