@@ -42,13 +42,17 @@ keeper_label() {
 }
 
 keeper_scheduler_installed() {
-  local os="${KEEPER_OS:-$(uname -s)}" label
-  # A predicate has no channel to explain a fault on, so it must not leak the
-  # installer's exit status — that status became this assignment's, and an errexit
-  # caller died here, before the handler on the next line could turn it into a
-  # plain "not installed". Nor its stderr, which would land unprefixed on whoever
-  # asked. keeper_ensure_active is the caller that quotes the installer.
-  label="$(keeper_label 2>/dev/null)" || label=""
+  # Accepts an already-resolved label so keeper_ensure_active does not pay for a
+  # second installer spawn; still resolves its own when called bare as a predicate.
+  local os="${KEEPER_OS:-$(uname -s)}" label="${1:-}"
+  if [ -z "$label" ]; then
+    # A predicate has no channel to explain a fault on, so it must not leak the
+    # installer's exit status — that status became this assignment's, and an
+    # errexit caller died here, before the handler below could turn it into a
+    # plain "not installed". Nor its stderr, which would land unprefixed on
+    # whoever asked. keeper_ensure_active is the caller that quotes the installer.
+    label="$(keeper_label 2>/dev/null)" || label=""
+  fi
   [ -n "$label" ] || return 1
   # Check LIVE state, not an on-disk artifact: install-watcher writes the plist
   # before `launchctl load`, so a failed load can leave a plist that was never
@@ -98,28 +102,33 @@ keeper_ensure_active() {
 
   # A missing/empty label means the installer is broken — that's an error to
   # report, not a "not installed" signal to barrel past into a doomed install.
-  # Capture the installer's own stderr so the refusal quotes the actual fault
-  # instead of guessing; a failed mktemp costs only the quote, not the refusal.
-  local label lblerr lbltmp
-  lbltmp="$(mktemp "${TMPDIR:-/tmp}/kblbl-XXXXXX" 2>/dev/null)" || lbltmp=""
   # `|| label=""` is load-bearing, not defensive: a broken installer exits
   # non-zero, that status becomes the assignment's, and an errexit caller would
   # die right here — before the refusal below could print a word.
-  if [ -n "$lbltmp" ]; then
-    label="$(keeper_label 2>"$lbltmp")" || label=""
-    lblerr="$(tr '\n' ' ' < "$lbltmp")" || lblerr=""
-    rm -f "$lbltmp"
-  else
-    label="$(keeper_label 2>/dev/null)" || label=""
-    lblerr=""
-  fi
+  local label lblerr=""
+  label="$(keeper_label 2>/dev/null)" || label=""
   if [ -z "$label" ]; then
+    # Only now is the installer's stderr worth a temp file. Capturing it on every
+    # call put a mktemp + rm on the session-end path of every working host to
+    # quote an installer that had nothing to say. Re-running it here costs a
+    # second spawn on the one path that is already refusing to do anything.
+    # Bounded and stripped of control bytes: this is third-party text headed for
+    # a hook's stderr, and `tr -c` folds the newlines as a side effect.
+    local lbltmp
+    lbltmp="$(mktemp "${TMPDIR:-/tmp}/kblbl-XXXXXX" 2>/dev/null)" || lbltmp=""
+    if [ -n "$lbltmp" ]; then
+      keeper_label >/dev/null 2>"$lbltmp" || true
+      lblerr="$(tr -c '[:print:]' ' ' < "$lbltmp" | head -c 300)" || lblerr=""
+      rm -f "$lbltmp"
+    fi
     printf 'vaultkeeper: %s/install-watcher.sh did not report the scheduler label%s; skipping activation\n' \
-      "$scripts" "${lblerr:+ — it said: ${lblerr% }}" >&2
+      "$scripts" "${lblerr:+ — it said: ${lblerr%"${lblerr##*[![:space:]]}"}}" >&2
     return 0
   fi
 
-  keeper_scheduler_installed && return 0
+  # Pass the label we already resolved: the predicate would otherwise spawn the
+  # installer a second time, every session, to ask what we just asked it.
+  keeper_scheduler_installed "$label" && return 0
 
   local tick="$scripts/vaultkeeper-tick.sh"
   if ! bash "$scripts/seed-frontmatter-schema.sh" "$vault" "$cfg" >/dev/null 2>&1; then

@@ -209,6 +209,28 @@ BRKREAL="$(cd "$BRK" && pwd)"
 grep -qF "$BRKREAL/install-watcher.sh" <<<"$BERR" \
   || fail "refusal did not name the installer it actually called: [$BERR]"
 
+# --- the session-end path on a working host spawns the installer once (#41) ---
+# Asking for the label twice — once in keeper_ensure_active, once inside the
+# predicate it calls — put a second install-watcher.sh process on every activated
+# host's Stop hook, alongside a mktemp/rm pair capturing stderr from an installer
+# that had nothing to say. This is the dominant path: every session, forever.
+CNT="$WORK/counted/scripts"; mkdir -p "$CNT/lib"
+cp "${ROOT_DIR}/scripts/lib/keeper-bootstrap.sh" "$CNT/lib/"
+SPAWNS="$WORK/label-spawns.log"; : > "$SPAWNS"
+cat > "$CNT/install-watcher.sh" <<EOF
+#!/usr/bin/env bash
+printf '%s\n' "\$1" >> "$SPAWNS"
+printf '%s\n' "$LABEL"
+EOF
+chmod +x "$CNT/install-watcher.sh"
+printf '%s\n' "$LABEL" > "$STATE"
+KEEPER_OS="Darwin" bash -c ". '$CNT/lib/keeper-bootstrap.sh'; keeper_ensure_active '$CFG' '$VAULT' 900" \
+  || fail "ensure_active returned non-zero on an already-installed host"
+SPAWNED="$(wc -l < "$SPAWNS" | tr -d ' ')"
+[ "$SPAWNED" = "1" ] \
+  || fail "an installed host spawned install-watcher.sh $SPAWNED times per session, want 1"
+: > "$STATE"
+
 # --- the predicate answers; it never leaks the installer's status or stderr ---
 # keeper_scheduler_installed is public (the launchctl arms above call it bare) and
 # its `label="$(keeper_label)"` carried the installer's exit 3 as the assignment's
