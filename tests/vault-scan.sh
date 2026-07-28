@@ -141,4 +141,22 @@ if printf '%s\n' "$SPACE_CLUSTERS" | grep "SpaceTest" | awk -F'\t' '{print $4}' 
   fail "space-filename produced a spurious count-1 cluster token"
 fi
 
+# The canonical tokenizer wins over whatever the caller already had in scope. The
+# old `command -v tokenize_slug ||` guard adopted the caller's definition instead,
+# which is the drift the shared tokenizer exists to prevent.
+HOSTILE="$(bash -c "tokenize_slug() { printf 'HOSTILE\n'; }; . '$ROOT_DIR/scripts/lib/frontmatter.sh'; . '$ROOT_DIR/scripts/lib/vault-scan.sh'; scan_clusters '$V' 3")"
+grep -qF 'HOSTILE' <<<"$HOSTILE" && fail "a caller-defined tokenize_slug won over the canonical one: [$HOSTILE]"
+grep -qF "CLUSTER"$'\t'"Projects"$'\t'"weekly" <<<"$HOSTILE" \
+  || fail "canonical tokenizer produced no clusters after overriding the caller's: [$HOSTILE]"
+
+# A missing dedup-scan.sh must be named at source time, not surface later as a
+# clean-looking empty scan.
+VSORPH="$TMP/vs-orphan"; mkdir -p "$VSORPH"
+cp "$ROOT_DIR/scripts/lib/vault-scan.sh" "$VSORPH/"
+if bash -c ". '$ROOT_DIR/scripts/lib/frontmatter.sh'; . '$VSORPH/vault-scan.sh'" 2>"$TMP/vserr"; then
+  fail "sourcing vault-scan.sh without dedup-scan.sh beside it must fail"
+fi
+grep -q 'cannot source dedup-scan.sh' "$TMP/vserr" \
+  || fail "missing tokenizer was not named; got: $(cat "$TMP/vserr")"
+
 echo "PASS: vault-scan"
