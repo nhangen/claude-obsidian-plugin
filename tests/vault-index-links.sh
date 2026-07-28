@@ -96,3 +96,55 @@ vault_index_coverage_check "$F6" "$F6/INDEX.md" 2>/dev/null \
   || fail "coverage check failed on an empty folder"
 
 echo "PASS: vault-index-links"
+
+# --- recursion: notes below the root are tracked, not reported deleted -------
+# Regression guard for the second half of #30 (see #32): a single-level glob
+# reported every relocated note as a DROP and tracked none of them, so
+# organizing a folder silently untracked it.
+R="$TMP/Recursive"; mkdir -p "$R/sub/deep"
+RIDX="$R/INDEX.md"; printf '# Recursive Index\n' > "$RIDX"
+printf 'flat\n'  > "$R/flat.md"
+printf 'one\n'   > "$R/sub/one.md"
+printf 'two\n'   > "$R/sub/deep/two.md"
+RSTATE="$(index_state_file "$RIDX")"
+
+vault_index_apply "$R" "$RIDX" >/dev/null
+for n in flat one two; do
+  grep -qxF -- "- [[$n]]" "$RIDX" || fail "recursion: no link written for $n"$'\n'"$(cat "$RIDX")"
+done
+[ "$(grep -vc '^#' "$RSTATE")" = "3" ] || fail "recursion: expected 3 tracked, got $(grep -vc '^#' "$RSTATE")"$'\n'"$(cat "$RSTATE")"
+# state must be keyed by folder-relative path, or two same-named notes in
+# different subfolders collide on one key.
+grep -qF 'sub/deep/two.md' "$RSTATE" || fail "recursion: state not keyed by relative path"$'\n'"$(cat "$RSTATE")"
+# link text must be the bare basename: Obsidian resolves a slashed target
+# against the vault root, so [[sub/deep/two]] would not resolve here.
+grep -qF -- '- [[sub/deep/two]]' "$RIDX" && fail "recursion: link written as path, not basename"
+
+# settled: a second apply is a no-op
+vault_index_apply "$R" "$RIDX" >/dev/null
+[ -z "$(vault_index_plan "$R" "$RIDX")" ] || fail "recursion: not idempotent"$'\n'"$(vault_index_plan "$R" "$RIDX")"
+
+# --- has_link matches a path-form link, so apply does not duplicate ----------
+# A hand-written INDEX links [[Vault/sub/note]]; matching only the basename
+# form re-appended a duplicate (observed on a real 106-note index).
+P="$TMP/PathForm"; mkdir -p "$P/sub"
+PIDX="$P/INDEX.md"
+printf '# PathForm Index\n- [[PathForm/sub/note]]\n' > "$PIDX"
+printf 'note\n' > "$P/sub/note.md"
+vault_index_apply "$P" "$PIDX" >/dev/null
+[ "$(grep -cF -- '- [[' "$PIDX")" = "1" ] || fail "path-form link was duplicated"$'\n'"$(cat "$PIDX")"
+
+# --- a note moved into a subfolder re-keys instead of losing coverage --------
+M="$TMP/Moved"; mkdir -p "$M"
+MIDX="$M/INDEX.md"; printf '# Moved Index\n' > "$MIDX"
+printf 'mover\n' > "$M/mover.md"
+vault_index_apply "$M" "$MIDX" >/dev/null
+MSTATE="$(index_state_file "$MIDX")"
+grep -qxF -- 'mover.md' <(cut -f1 "$MSTATE" | grep -v '^#') || fail "moved: not tracked before move"
+mkdir -p "$M/bucket" && mv "$M/mover.md" "$M/bucket/mover.md"
+vault_index_apply "$M" "$MIDX" >/dev/null
+grep -qF 'bucket/mover.md' "$MSTATE" || fail "moved: not re-keyed to new path"$'\n'"$(cat "$MSTATE")"
+[ "$(grep -vc '^#' "$MSTATE")" = "1" ] || fail "moved: stale key left behind"$'\n'"$(cat "$MSTATE")"
+[ "$(grep -cF -- '- [[' "$MIDX")" = "1" ] || fail "moved: link duplicated after move"$'\n'"$(cat "$MIDX")"
+
+printf 'ok   vault-index-links.sh (recursion + path-form dedup + move re-key)\n'

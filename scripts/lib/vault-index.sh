@@ -21,10 +21,18 @@ state_hash_for() {
 
 # True when INDEX.md already points at this note. Fixed-string matching: note
 # titles routinely contain regex metacharacters (dates, parens, brackets, +).
+#
+# `title` may be a folder-relative path (sub/dir/note) for a note below the
+# root. A hand-written or path-form INDEX links the same note as
+# [[Vault/sub/dir/note]] while an apply-written one uses [[note]], so match on
+# the trailing segment and accept any path prefix. Matching only one form
+# re-appends a link that is already there — observed appending duplicate
+# [[TODO]] lines to an INDEX that already had [[Altamira/TODO]].
 vault_index_has_link() {
-  local idx="$1" title="$2"
+  local idx="$1" title="$2" leaf="${2##*/}"
   [ -f "$idx" ] || return 1
-  grep -qF -e "[[${title}]]" -e "[[${title}|" -e "[[${title}#" -- "$idx"
+  grep -qF -e "[[${leaf}]]" -e "[[${leaf}|" -e "[[${leaf}#" \
+           -e "/${leaf}]]" -e "/${leaf}|" -e "/${leaf}#" -- "$idx"
 }
 
 # Coverage assertion: state must never claim more notes than INDEX.md links.
@@ -52,7 +60,11 @@ vault_index_plan() {
   last="$(state_last_reconciled "$state")"
   idxbase="$(basename "$idx")"
 
-  # DROP: state entries whose note no longer exists.
+  # DROP: state entries whose note no longer exists at that key. A note moved
+  # into a subfolder drops its stale basename key and is re-added under its
+  # path key by the walk below; because has_link matches the trailing segment,
+  # its existing INDEX link is not duplicated. Net effect of organizing a
+  # folder is a re-key, not a loss of coverage.
   if [ -f "$state" ]; then
     while IFS=$'\t' read -r fn _h; do
       [ -z "$fn" ] && continue
@@ -61,16 +73,19 @@ vault_index_plan() {
     done < "$state"
   fi
 
-  for f in "$folder"/*.md; do
+  # Recursive: a folder organized into subfolders must stay visible. A
+  # single-level glob reported all 103 relocated notes as deleted and tracked
+  # none of them, so the index machinery actively penalized an organized vault.
+  while IFS= read -r f; do
     [ -e "$f" ] || continue
-    base="$(basename "$f")"
+    base="${f#"$folder"/}"           # folder-relative path, so subfolders are visible
     # Skip filenames containing tabs or newlines — they corrupt TSV state.
     case "$base" in
       *$'\t'*|*$'\n'*)
         printf 'vault_index_plan: skipping TSV-incompatible filename: %s\n' "$base" >&2
         continue ;;
     esac
-    [ "$base" = "$idxbase" ] && continue
+    [ "${base##*/}" = "$idxbase" ] && continue
     stored="$(state_hash_for "$state" "$base")"
     if [ -z "$stored" ]; then
       printf 'ADD\t%s\n' "$base"          # coverage gap — name-only, no content read
@@ -89,7 +104,9 @@ vault_index_plan() {
       cur="$(note_hash "$f")"
       [ "$cur" != "$stored" ] && printf 'CHANGED\t%s\n' "$base"   # confirmed by hash
     fi
-  done
+  done <<EOF
+$(find "$folder" -type f -name '*.md' | LC_ALL=C sort)
+EOF
 }
 
 vault_index_apply() {
@@ -146,8 +163,15 @@ vault_index_apply() {
     if [ ! -f "$idx" ]; then
       printf '# %s Index\n' "$(basename "$folder")" > "$idx"
     fi
+    local leaf
     for fn in "${added[@]}"; do
-      vault_index_has_link "$idx" "${fn%.md}" || printf -- '- [[%s]]\n' "${fn%.md}" >> "$idx"
+      # Link text is the basename, never the folder-relative path: Obsidian
+      # resolves a slashed target against the VAULT root, so [[sub/dir/note]]
+      # would not resolve from a folder INDEX. A bare basename resolves
+      # vault-wide. has_link still matches either form, so a hand-written
+      # path-form link already present is respected.
+      leaf="${fn##*/}"
+      vault_index_has_link "$idx" "${leaf%.md}" || printf -- '- [[%s]]\n' "${leaf%.md}" >> "$idx"
     done
   fi
 
