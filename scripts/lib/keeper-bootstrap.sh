@@ -74,8 +74,11 @@ keeper_ensure_active() {
   local cfg="$1" vault="$2" interval="${3:-900}"
   [ -f "$cfg" ] && [ -d "$vault" ] || return 0
 
+  # `|| autostart=""` because a config without the key makes grep exit 1, and with
+  # `pipefail` that becomes the assignment's status — errexit would abort the
+  # sourcing hook here, on the ordinary first-run config. Absent means "not false".
   local autostart
-  autostart="$(grep '^keeper_autostart:' "$cfg" | head -1 | sed 's/^keeper_autostart:[[:space:]]*//')"
+  autostart="$(grep '^keeper_autostart:' "$cfg" | head -1 | sed 's/^keeper_autostart:[[:space:]]*//')" || autostart=""
   [ "$autostart" = "false" ] && return 0
 
   # Resolve the scripts dir before the label, so a lib that cannot find its own
@@ -93,12 +96,15 @@ keeper_ensure_active() {
   # instead of guessing; a failed mktemp costs only the quote, not the refusal.
   local label lblerr lbltmp
   lbltmp="$(mktemp "${TMPDIR:-/tmp}/kblbl-XXXXXX" 2>/dev/null)" || lbltmp=""
+  # `|| label=""` is load-bearing, not defensive: a broken installer exits
+  # non-zero, that status becomes the assignment's, and an errexit caller would
+  # die right here — before the refusal below could print a word.
   if [ -n "$lbltmp" ]; then
-    label="$(keeper_label 2>"$lbltmp")"
-    lblerr="$(tr '\n' ' ' < "$lbltmp")"
+    label="$(keeper_label 2>"$lbltmp")" || label=""
+    lblerr="$(tr '\n' ' ' < "$lbltmp")" || lblerr=""
     rm -f "$lbltmp"
   else
-    label="$(keeper_label 2>/dev/null)"
+    label="$(keeper_label 2>/dev/null)" || label=""
     lblerr=""
   fi
   if [ -z "$label" ]; then

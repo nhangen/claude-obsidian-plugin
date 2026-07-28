@@ -190,10 +190,19 @@ cat > "$BRK/install-watcher.sh" <<'EOF'
 echo "BOOM-INSTALLER-DIAGNOSTIC" >&2
 exit 3
 EOF
-BERR="$(KEEPER_OS="Darwin" bash -c ". '$BRK/lib/keeper-bootstrap.sh'; keeper_ensure_active '$CFG' '$VAULT' 900" 2>&1 >/dev/null)" \
-  || fail "ensure_active must return 0 when the installer is broken (never abort the hook)"
-grep -q 'BOOM-INSTALLER-DIAGNOSTIC' <<<"$BERR" \
-  || fail "installer stderr was discarded; refusal said only: [$BERR]"
+# Both flag sets: session-save.sh is `set -uo pipefail` today, but an errexit
+# caller aborted at `label="$(keeper_label ...)"` — the installer's exit 3 became
+# the assignment's status — killing the hook before the refusal ever printed. A
+# diagnostic the shell never reaches is the #34 defect, so pin both.
+BCFG="$WORK/broken.local.md"; BVAULT="$WORK/vaultb"
+printf -- '---\nvault_path: %s\n---\n' "$BVAULT" > "$BCFG"   # no keeper_autostart key
+mk_vault "$BVAULT"
+for _flags in '' 'set -euo pipefail;'; do
+  BERR="$(KEEPER_OS="Darwin" bash -c "${_flags} . '$BRK/lib/keeper-bootstrap.sh'; keeper_ensure_active '$BCFG' '$BVAULT' 900" 2>&1 >/dev/null)" \
+    || fail "[${_flags:-no flags}] ensure_active must return 0 when the installer is broken (never abort the hook)"
+  grep -q 'BOOM-INSTALLER-DIAGNOSTIC' <<<"$BERR" \
+    || fail "[${_flags:-no flags}] installer stderr was discarded; refusal said only: [$BERR]"
+done
 # Compare against the pwd-normalized path: _kb_lib_dir resolves through
 # `cd && pwd`, so a TMPDIR with a trailing slash collapses "T//kb-x" to "T/kb-x".
 BRKREAL="$(cd "$BRK" && pwd)"
