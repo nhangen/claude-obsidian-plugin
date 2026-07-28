@@ -95,13 +95,39 @@ vault_index_coverage_check() {
   return 1
 }
 
+# Folder-relative prefixes (trailing slash) of subdirectories holding their own
+# INDEX.md. Those notes belong to that index; a parent indexing them too both
+# duplicates the child and dissolves the librarian's "a slice is one or two
+# folders" model — Projects/Development has 11 child indexes over 1073 notes.
+vault_index_owned_subdirs() {
+  local folder="$1" f rel
+  find "$folder" -mindepth 2 -type f -name 'INDEX.md' 2>/dev/null | while IFS= read -r f; do
+    rel="${f#"$folder"/}"
+    printf '%s/\n' "${rel%/INDEX.md}"
+  done
+}
+
+# True when a folder-relative path sits under a subtree that owns its index.
+vault_index_is_owned() {
+  local rel="$1" owned="$2" prefix
+  [ -n "$owned" ] || return 1
+  while IFS= read -r prefix; do
+    [ -n "$prefix" ] || continue
+    case "$rel" in "$prefix"*) return 0 ;; esac
+  done <<EOF
+$owned
+EOF
+  return 1
+}
+
 vault_index_plan() {
   local folder="$1" idx="$2"
-  local state last f base stored mt cur idxbase dups
+  local state last f base stored mt cur idxbase dups owned
   state="$(index_state_file "$idx")"
   last="$(state_last_reconciled "$state")"
   idxbase="$(basename "$idx")"
   dups="$(vault_index_dup_leaves "$folder")"
+  owned="$(vault_index_owned_subdirs "$folder")"
 
   # DROP: state entries whose note no longer exists at that key. A note moved
   # into a subfolder drops its stale basename key and is re-added under its
@@ -112,7 +138,11 @@ vault_index_plan() {
     while IFS=$'\t' read -r fn _h; do
       [ -z "$fn" ] && continue
       case "$fn" in \#*) continue ;; esac
-      [ -f "$folder/$fn" ] || printf 'DROP\t%s\n' "$fn"
+      if [ ! -f "$folder/$fn" ]; then
+        printf 'DROP\t%s\n' "$fn"
+      elif vault_index_is_owned "$fn" "$owned"; then
+        printf 'DROP\t%s\n' "$fn"   # a child index now owns it; hand it over
+      fi
     done < "$state"
   fi
 
@@ -129,6 +159,7 @@ vault_index_plan() {
         continue ;;
     esac
     [ "${base##*/}" = "$idxbase" ] && continue
+    vault_index_is_owned "$base" "$owned" && continue
     stored="$(state_hash_for "$state" "$base")"
     if [ -z "$stored" ]; then
       printf 'ADD\t%s\n' "$base"          # coverage gap — name-only, no content read

@@ -200,6 +200,45 @@ vault_index_apply "$V/Proj" "$VIDX" >/dev/null
 grep -qxF -- '- [[Proj/sub/note]]' "$VIDX" || fail "vault-relative: nested target wrong"$'\n'"$(cat "$VIDX")"
 grep -qxF -- '- [[Proj/flat]]'     "$VIDX" || fail "vault-relative: root target wrong"$'\n'"$(cat "$VIDX")"
 
+# --- a subtree that owns its own INDEX.md is not the parent's business -------
+# Recursion must not make a parent re-index what its children already index.
+# Projects/Development holds 11 child INDEX.md files and 1073 notes below it;
+# without this the parent absorbed all of them into one file (#33).
+O="$TMP/Owned"; mkdir -p "$O/.obsidian" "$O/P/child" "$O/P/loose/deeper"
+OIDX="$O/P/INDEX.md";  printf '# P Index\n' > "$OIDX"
+CIDX="$O/P/child/INDEX.md"; printf '# Child Index\n' > "$CIDX"
+printf 'top\n'    > "$O/P/top.md"
+printf 'owned\n'  > "$O/P/child/owned.md"
+printf 'deep\n'   > "$O/P/child/deeper-owned.md"
+printf 'loose\n'  > "$O/P/loose/deeper/loose.md"
+vault_index_apply "$O/P" "$OIDX" >/dev/null 2>&1
+OSTATE="$(index_state_file "$OIDX")"
+grep -qxF -- '- [[P/top]]' "$OIDX"              || fail "owned: parent lost its own note"$'\n'"$(cat "$OIDX")"
+grep -qxF -- '- [[P/loose/deeper/loose]]' "$OIDX" \
+  || fail "owned: unindexed subtree must still be covered by the parent"$'\n'"$(cat "$OIDX")"
+grep -qF -- 'child/owned' "$OIDX" && fail "owned: parent indexed a note owned by child/INDEX.md"$'\n'"$(cat "$OIDX")"
+grep -qF -- 'child/' "$OSTATE"    && fail "owned: parent tracked a note owned by child/INDEX.md"$'\n'"$(cat "$OSTATE")"
+[ "$(grep -vc '^#' "$OSTATE")" = "2" ] || fail "owned: expected 2 tracked, got $(grep -vc '^#' "$OSTATE")"
+# The child index still covers its own notes.
+vault_index_apply "$O/P/child" "$CIDX" >/dev/null 2>&1
+grep -qxF -- '- [[P/child/owned]]' "$CIDX" || fail "owned: child index missing its own note"$'\n'"$(cat "$CIDX")"
+# Coverage is clean on both, and the parent does not claim the child's notes.
+vault_index_coverage_check "$O/P" "$OIDX" >/dev/null 2>&1 || fail "owned: parent reports a defect"
+vault_index_coverage_check "$O/P/child" "$CIDX" >/dev/null 2>&1 || fail "owned: child reports a defect"
+
+# A child index appearing later hands its notes over: the parent drops them.
+N="$TMP/NewChild"; mkdir -p "$N/.obsidian" "$N/P/sub"
+NIDX="$N/P/INDEX.md"; printf '# N Index\n' > "$NIDX"
+printf 'a\n' > "$N/P/sub/a.md"
+vault_index_apply "$N/P" "$NIDX" >/dev/null 2>&1
+NSTATE="$(index_state_file "$NIDX")"
+grep -qF -- 'sub/a.md' "$NSTATE" || fail "newchild: not tracked before the child index existed"
+printf '# Sub Index\n' > "$N/P/sub/INDEX.md"
+vault_index_apply "$N/P" "$NIDX" >/dev/null 2>&1
+grep -qF -- 'sub/a.md' "$NSTATE" && fail "newchild: parent still tracks a note the child now owns"$'\n'"$(cat "$NSTATE")"
+vault_index_coverage_check "$N/P" "$NIDX" >/dev/null 2>&1 \
+  || fail "newchild: parent reports a defect for a note it handed off"
+
 # --- apply itself reports a gap it could not close -------------------------
 # Pins the coverage_check call inside vault_index_apply. Asserting the healed
 # end-state instead passes with that call deleted, because plan's unlinked->ADD
