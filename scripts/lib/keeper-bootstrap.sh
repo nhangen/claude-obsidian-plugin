@@ -17,7 +17,16 @@
 # BASH_SOURCE, and its `$0` only names the sourced file while it is being read.
 _kb_lib_dir="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd)"
 
-_kb_scripts() { printf '%s\n' "${_kb_lib_dir%/*}"; }
+# Returns non-zero rather than printing an empty path. The old `cd ../ && pwd`
+# propagated its failure; a bare parameter strip cannot, and both callers use the
+# result unchecked to build `bash "$scripts/..."` command lines. Testing for the
+# sibling covers a `cd` that failed (empty) and one that succeeded onto the
+# caller's cwd; it also covers `${x%/*}` having no root case, where "/" strips to "".
+_kb_scripts() {
+  local d="${_kb_lib_dir%/*}"
+  [ -n "$d" ] && [ -f "$d/install-watcher.sh" ] || return 1
+  printf '%s\n' "$d"
+}
 
 # Single source of truth for the namespace label: install-watcher.sh owns it.
 keeper_label() { bash "$(_kb_scripts)/install-watcher.sh" label 2>/dev/null; }
@@ -60,6 +69,15 @@ keeper_ensure_active() {
   autostart="$(grep '^keeper_autostart:' "$cfg" | head -1 | sed 's/^keeper_autostart:[[:space:]]*//')"
   [ "$autostart" = "false" ] && return 0
 
+  # Resolve the scripts dir before the label, so a lib that cannot find its own
+  # siblings says that, instead of surfacing as "install-watcher.sh broken?" and
+  # naming a file that is perfectly fine.
+  local scripts
+  if ! scripts="$(_kb_scripts)"; then
+    printf 'vaultkeeper: cannot find the scripts dir beside this lib (looked beside "%s"); activation skipped\n' "$_kb_lib_dir" >&2
+    return 0
+  fi
+
   # A missing/empty label means the installer is broken — that's an error to
   # report, not a "not installed" signal to barrel past into a doomed install.
   local label; label="$(keeper_label)"
@@ -70,7 +88,6 @@ keeper_ensure_active() {
 
   keeper_scheduler_installed && return 0
 
-  local scripts; scripts="$(_kb_scripts)"
   local tick="$scripts/vaultkeeper-tick.sh"
   if ! bash "$scripts/seed-frontmatter-schema.sh" "$vault" "$cfg" >/dev/null 2>&1; then
     printf 'vaultkeeper: frontmatter-schema seed failed; using default (tags type)\n' >&2

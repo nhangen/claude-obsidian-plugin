@@ -12,6 +12,16 @@ _av_lib_dir="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd)"
 _allowlist_config() {
   local cfg="${1:-}"
   if [ -z "$cfg" ]; then
+    # Check the capture landed somewhere real before trusting it. Testing for the
+    # sibling rather than for an empty string catches both failure shapes: `cd`
+    # failing (empty) and `dirname ""` -> "." -> `cd .` succeeding onto the
+    # caller's cwd. Without this, either one resolves no config and reports it as
+    # a missing config, sending the reader to /obsidian:setup for what is a broken
+    # install — the same misdirection this file's own refusal was fixed for.
+    if [ ! -f "${_av_lib_dir}/resolve-config.sh" ]; then
+      printf 'allowlist: cannot find resolve-config.sh beside this lib (looked in "%s") — the install is broken, not the config\n' "$_av_lib_dir" >&2
+      return 1
+    fi
     cfg="$(bash "${_av_lib_dir}/resolve-config.sh" 2>/dev/null || true)"
   fi
   [ -n "$cfg" ] && [ -f "$cfg" ] || { printf 'allowlist: no config resolved — run /obsidian:setup\n' >&2; return 1; }

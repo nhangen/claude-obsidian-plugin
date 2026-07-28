@@ -127,4 +127,20 @@ for sh in bash zsh; do
   [ "$GOT" = "$EXPECT" ] || fail "$sh + foreign cwd: _kb_scripts gave [$GOT], want [$EXPECT]"
 done
 
+# A lib that cannot find its siblings must say so, not print an empty path and
+# report success — both callers build `bash "$scripts/..."` from it unchecked, and
+# the resulting empty-label branch used to blame install-watcher.sh by name.
+ORPHAN="$WORK/orphan/lib"; mkdir -p "$ORPHAN"
+cp "${ROOT_DIR}/scripts/lib/keeper-bootstrap.sh" "$ORPHAN/"
+if bash -c ". '$ORPHAN/keeper-bootstrap.sh'; _kb_scripts" >"$WORK/orph.out" 2>/dev/null; then
+  fail "_kb_scripts must fail when install-watcher.sh is not beside the lib, printed: [$(cat "$WORK/orph.out")]"
+fi
+[ -s "$WORK/orph.out" ] && fail "_kb_scripts printed a path on failure: [$(cat "$WORK/orph.out")]"
+OERR="$(KEEPER_OS="Darwin" bash -c ". '$ORPHAN/keeper-bootstrap.sh'; keeper_ensure_active '$CFG' '$VAULT' 900" 2>&1 >/dev/null)" \
+  || fail "keeper_ensure_active must still return 0 when self-location fails (never abort the hook)"
+grep -q 'cannot find the scripts dir' <<<"$OERR" \
+  || fail "self-location failure was not named; got: [$OERR]"
+grep -q 'install-watcher.sh broken' <<<"$OERR" \
+  && fail "self-location failure blamed install-watcher.sh: [$OERR]"
+
 echo "PASS: keeper-bootstrap"

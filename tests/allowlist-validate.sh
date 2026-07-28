@@ -102,4 +102,17 @@ for _cfg in "$NOTAX" "$EMPTYTAX"; do
   grep -q 'Closest match' "$TMP/taxerr" \
     && fail "empty-taxonomy refusal must not offer a closest match ($_cfg): $(cat "$TMP/taxerr")"
 done
+# A lib that landed away from its siblings must name the install, not the config.
+# Reporting this as "no config resolved — run /obsidian:setup" is the #27
+# misdirection one layer up: setup cannot fix a lib that lost its own path.
+ORPHAN="$TMP/orphan"; mkdir -p "$ORPHAN"
+cp "$ROOT_DIR/scripts/lib/allowlist-validate.sh" "$ORPHAN/"
+if bash -c ". '$ORPHAN/allowlist-validate.sh'; allowlist_validate 'Daily/x.md'" 2>"$TMP/orpherr"; then
+  fail "validation must fail closed when the lib cannot find resolve-config.sh"
+fi
+grep -q 'the install is broken, not the config' "$TMP/orpherr" \
+  || fail "orphaned lib should name the install; got: $(cat "$TMP/orpherr")"
+grep -q 'no config resolved' "$TMP/orpherr" \
+  && fail "orphaned lib blamed the config: $(cat "$TMP/orpherr")"
+
 echo "PASS: allowlist-validate"
