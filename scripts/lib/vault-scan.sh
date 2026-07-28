@@ -2,7 +2,12 @@
 # vault-scan.sh — compute surfacing candidates from the vault. .md only;
 # excludes .obsidian/, .trash/, .git/, .vaultkeeper-quarantine/. Never reads
 # .base files (they are not .md, so the find filters exclude them).
-# Requires frontmatter.sh.
+# Requires frontmatter.sh. Sources dedup-scan.sh for the shared tokenize_slug so
+# clustering cannot drift from dedup/MOC — vaultkeeper-tick.sh does not source it.
+# Directory captured at source time; see the note in allowlist-validate.sh for
+# why BASH_SOURCE alone is not enough (zsh).
+_vs_lib_dir="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd)"
+command -v tokenize_slug >/dev/null 2>&1 || . "${_vs_lib_dir}/dedup-scan.sh"
 
 _scan_find_md() {
   find "$1" -type f -name '*.md' \
@@ -18,6 +23,7 @@ scan_frontmatter_gaps() {
     miss="$(frontmatter_missing "$f" "$required" | sort | paste -sd, -)"
     [ -n "$miss" ] && printf 'GAP\t%s\t%s\n' "${f#"$vault"/}" "$miss"
   done < <(_scan_find_md "$vault")
+  return 0   # reports on stdout; a failed final test must not become the status
 }
 
 scan_unfiled() {
@@ -26,6 +32,7 @@ scan_unfiled() {
   while IFS= read -r f; do
     printf 'UNFILED\t%s\n' "${f#"$vault"/}"
   done < <(find "$vault/Inbox" -type f -name '*.md')
+  return 0   # reports on stdout; a failed final test must not become the status
 }
 
 scan_open_asks() {
@@ -35,6 +42,7 @@ scan_open_asks() {
       printf 'ASK\t%s\n' "${f#"$vault"/}"
     fi
   done < <(_scan_find_md "$vault")
+  return 0   # reports on stdout; a failed final test must not become the status
 }
 
 # Cluster: per immediate subfolder, count distinct files containing each slug
@@ -52,13 +60,14 @@ scan_clusters() {
     done < <(
       while IFS= read -r f; do
         base="$(basename "$f" .md)"
-        for tok in $(printf '%s\n' "$base" | tr ' ' '-' | tr '-' '\n' | sort -u); do
-          [ -z "$tok" ] && continue
-          # drop purely numeric tokens
-          printf '%s' "$tok" | grep -qE '^[0-9]+$' && continue
-          [ "${#tok}" -le 1 ] && continue
-          printf '%s\n' "$tok"
-        done
+        # Shared tokenizer, so clustering agrees with dedup and MOC promotion
+        # instead of drifting as a third inline copy (#27). Spaces are folded to
+        # the same separator first — tokenize_slug splits on `-` only, and this
+        # vault has filenames with spaces. `sort -u` keeps the count "distinct
+        # files containing the token", not total occurrences.
+        printf '%s\n' "$base" | tr ' ' '-' | while IFS= read -r slug; do
+          tokenize_slug "$slug"
+        done | sort -u
       done < <(find "$dir" -maxdepth 1 -type f -name '*.md') \
         | sort | uniq -c
     )
@@ -68,4 +77,5 @@ scan_clusters() {
             ! -path '*/.git'      ! -path '*/.git/*' \
             ! -path '*/.vaultkeeper-quarantine' ! -path '*/.vaultkeeper-quarantine/*' \
             ! -path '*/.vaultkeeper'            ! -path '*/.vaultkeeper/*')
+  return 0   # reports on stdout; a failed final test must not become the status
 }

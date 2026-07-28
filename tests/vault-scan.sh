@@ -49,6 +49,42 @@ has "CLUSTER"$'\t'"Projects"$'\t'"weekly"$'\t'"3" "$CLUSTERS"
 lacks "CLUSTER"$'\t'"Projects"$'\t'"review" "$CLUSTERS"
 grep -q '\.base' <<<"$CLUSTERS" && fail ".base leaked into clusters"
 
+# Clustering routes through the shared tokenize_slug, so it agrees with dedup and
+# MOC promotion instead of carrying a third inline tokenizer. The visible effect
+# is case folding: these three belong to one cluster, and an uppercased token is
+# not its own separate one.
+mkdir -p "$V/Casing"
+: > "$V/Casing/Alpha-first.md"
+: > "$V/Casing/alpha-second.md"
+: > "$V/Casing/ALPHA-third.md"
+CCLUST="$(scan_clusters "$V" 3)"
+has "CLUSTER"$'\t'"Casing"$'\t'"alpha"$'\t'"3" "$CCLUST"
+grep -qF 'ALPHA' <<<"$CCLUST" && fail "cluster tokens must be case-folded, got:"$'\n'"$CCLUST"
+# scan_* report through stdout, so their exit status must be success even when
+# they find nothing. scan_clusters used to return the status of its last
+# threshold test: one trailing folder with no above-threshold token made it
+# return 1, which aborts any `set -e` caller — and vaultkeeper-tick.sh runs
+# `set -euo pipefail` and assigns from it.
+mkdir -p "$V/ZZlast"
+: > "$V/ZZlast/solitary-note.md"
+CRC=0; ( set -e; scan_clusters "$V" 3 >/dev/null ) || CRC=$?
+[ "$CRC" = "0" ] || fail "scan_clusters returned $CRC with a below-threshold trailing folder"
+GRC=0; ( set -e; scan_frontmatter_gaps "$V" "tags type" >/dev/null ) || GRC=$?
+[ "$GRC" = "0" ] || fail "scan_frontmatter_gaps returned $GRC"
+URC=0; ( set -e; scan_unfiled "$V" >/dev/null ) || URC=$?
+[ "$URC" = "0" ] || fail "scan_unfiled returned $URC"
+ARC=0; ( set -e; scan_open_asks "$V" >/dev/null ) || ARC=$?
+[ "$ARC" = "0" ] || fail "scan_open_asks returned $ARC"
+rm -rf "$V/ZZlast"
+
+# Spaces still split into tokens (a filename with spaces is common in this vault).
+mkdir -p "$V/Spaced"
+: > "$V/Spaced/beta note one.md"
+: > "$V/Spaced/beta note two.md"
+: > "$V/Spaced/beta-note-three.md"
+SCLUST="$(scan_clusters "$V" 3)"
+has "CLUSTER"$'\t'"Spaced"$'\t'"beta"$'\t'"3" "$SCLUST"
+
 # keeper-owned files must not appear in any scan output
 for _scan_out in "$GAPS" "$ASKS" "$CLUSTERS"; do
   grep -qF 'Librarian.md' <<<"$_scan_out" && fail "Librarian.md leaked into scan output"
