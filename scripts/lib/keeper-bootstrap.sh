@@ -92,8 +92,15 @@ keeper_ensure_active() {
   if ! bash "$scripts/seed-frontmatter-schema.sh" "$vault" "$cfg" >/dev/null 2>&1; then
     printf 'vaultkeeper: frontmatter-schema seed failed; using default (tags type)\n' >&2
   fi
-  _kb_cfg_ensure keeper_autostart true "$cfg" || true
-  _kb_cfg_ensure keeper_interval_secs "$interval" "$cfg" || true
+  # Non-fatal, but not silent: `|| true` discarded a failed mktemp/awk/mv, and a
+  # config that never gains keeper_interval_secs then runs at the compiled-in
+  # default forever with nothing to explain why. Name the key and the
+  # consequence, the way the schema seed above names its fallback. `|| printf`
+  # keeps the exit status 0, so the hook still cannot be aborted by this.
+  _kb_cfg_ensure keeper_autostart true "$cfg" \
+    || printf 'vaultkeeper: could not write keeper_autostart to %s; opt-out state is unrecorded\n' "$cfg" >&2
+  _kb_cfg_ensure keeper_interval_secs "$interval" "$cfg" \
+    || printf 'vaultkeeper: could not write keeper_interval_secs to %s; readers will fall back to the %ss default\n' "$cfg" "$interval" >&2
 
   local ok=""
   if [ -n "${VAULTKEEPER_INSTALL:-}" ]; then

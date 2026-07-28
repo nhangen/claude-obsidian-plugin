@@ -96,6 +96,27 @@ ERR="$(KEEPER_OS="Darwin" keeper_ensure_active "$CFGF" "$VAULTF" 900 2>&1 >/dev/
 [ -s "$FAILCALLS" ] || fail "failing install was never attempted"
 grep -qi 'FAILED' <<<"$ERR" || fail "failed install was silent — no diagnostic emitted: '$ERR'"
 
+# --- a failed config write leaves a trace (#40) ---
+# A read-only parent dir makes _kb_cfg_ensure's `mv` fail the way a full or
+# permission-denied filesystem does. Staying non-fatal is correct — a Stop hook
+# must not abort — but the config then never gains keeper_interval_secs and the
+# keeper runs at the compiled-in default forever, so it cannot be silent. Note
+# the contrast one line up in production: the schema seed already names its
+# fallback when it fails.
+ROD="$WORK/ro"; mkdir -p "$ROD"
+RCFG="$ROD/obsidian.local.md"; RVAULT="$WORK/vaultro"
+printf -- '---\nvault_path: %s\n---\n' "$RVAULT" > "$RCFG"
+mk_vault "$RVAULT"
+export VAULTKEEPER_INSTALL="$WORK/stub-install.sh"
+chmod a-w "$ROD"
+RERR="$(KEEPER_OS="Darwin" keeper_ensure_active "$RCFG" "$RVAULT" 900 2>&1 >/dev/null)" \
+  || { chmod u+w "$ROD"; fail "ensure_active must return 0 when a config write fails"; }
+chmod u+w "$ROD"
+grep -q 'keeper_autostart' <<<"$RERR" \
+  || fail "failed keeper_autostart write was silent: [$RERR]"
+grep -q 'keeper_interval_secs' <<<"$RERR" \
+  || fail "failed keeper_interval_secs write was silent: [$RERR]"
+
 # --- opt-out: keeper_autostart: false skips install entirely ---
 CFG2="$WORK/optout.local.md"; VAULT2="$WORK/vault2"
 printf -- '---\nvault_path: %s\nkeeper_autostart: false\n---\n' "$VAULT2" > "$CFG2"
