@@ -18,8 +18,9 @@
 _kb_lib_dir="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd)"
 
 # Returns non-zero rather than printing an empty path. The old `cd ../ && pwd`
-# propagated its failure; a bare parameter strip cannot, and both callers use the
-# result unchecked to build `bash "$scripts/..."` command lines. Testing for the
+# propagated its failure; a bare parameter strip cannot, and both callers
+# interpolate the result into a `bash "$scripts/..."` command line, so an empty
+# success is worse for them than a failure. Testing for the
 # sibling covers a `cd` that failed (empty) and one that succeeded onto the
 # caller's cwd; it also covers `${x%/*}` having no root case, where "/" strips to "".
 _kb_scripts() {
@@ -86,14 +87,16 @@ keeper_ensure_active() {
 
   # `|| autostart=""` because a config without the key makes grep exit 1, and with
   # `pipefail` that becomes the assignment's status — errexit would abort the
-  # sourcing hook here, on the ordinary first-run config. Absent means "not false".
+  # errexit caller here, on the ordinary first-run config — session-save.sh is not
+# one today (`set -uo pipefail`, and it calls this with `|| true`), so this guards
+# the next sourcer rather than a live bug. Absent means "not false".
   local autostart
   autostart="$(grep '^keeper_autostart:' "$cfg" | head -1 | sed 's/^keeper_autostart:[[:space:]]*//')" || autostart=""
   [ "$autostart" = "false" ] && return 0
 
   # Resolve the scripts dir before the label, so a lib that cannot find its own
-  # siblings says that, instead of surfacing as "install-watcher.sh broken?" and
-  # naming a file that is perfectly fine.
+  # siblings says that, instead of blaming install-watcher.sh for a file that is
+  # perfectly fine.
   local scripts
   if ! scripts="$(_kb_scripts)"; then
     printf 'vaultkeeper: cannot find the scripts dir beside this lib (looked beside "%s"); activation skipped\n' "$_kb_lib_dir" >&2
@@ -134,11 +137,11 @@ keeper_ensure_active() {
   if ! bash "$scripts/seed-frontmatter-schema.sh" "$vault" "$cfg" >/dev/null 2>&1; then
     printf 'vaultkeeper: frontmatter-schema seed failed; using default (tags type)\n' >&2
   fi
-  # Non-fatal, but not silent: `|| true` discarded a failed mktemp/awk/mv, and a
-  # config that never gains keeper_interval_secs then runs at the compiled-in
-  # default forever with nothing to explain why. Name the key and the
-  # consequence, the way the schema seed above names its fallback. `|| printf`
-  # keeps the exit status 0, so the hook still cannot be aborted by this.
+  # `|| true` here meant a config that never gained keeper_interval_secs ran at
+  # the compiled-in default forever with nothing to explain why. Name the key and
+  # the consequence, the way the schema seed above names its fallback. Reachable
+  # once per host: the installed check above returns before this on every session
+  # after the first.
   _kb_cfg_ensure keeper_autostart true "$cfg" \
     || printf 'vaultkeeper: could not write keeper_autostart to %s; opt-out state is unrecorded\n' "$cfg" >&2
   _kb_cfg_ensure keeper_interval_secs "$interval" "$cfg" \

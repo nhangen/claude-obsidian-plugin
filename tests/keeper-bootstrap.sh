@@ -6,7 +6,10 @@ fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
 INSTALLER="${ROOT_DIR}/scripts/install-watcher.sh"
 
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/kb-XXXXXX")"
-trap 'rm -rf "$WORK"' EXIT
+# Two arms below chmod a config dir read-only. rm -rf clears it anyway on macOS
+# 15 as the owner (verified — no crumb is left), but that is a permission detail
+# this teardown should not depend on to avoid stranding a dir in the real TMPDIR.
+trap 'chmod -R u+w "$WORK" 2>/dev/null; rm -rf "$WORK"' EXIT
 
 # install-watcher.sh exposes the namespace label, and the bootstrap lib reads
 # from it — one source of truth, no drift between the two files.
@@ -101,7 +104,7 @@ grep -qi 'FAILED' <<<"$ERR" || fail "failed install was silent — no diagnostic
 # permission-denied filesystem does. Staying non-fatal is correct — a Stop hook
 # must not abort — but the config then never gains keeper_interval_secs and the
 # keeper runs at the compiled-in default forever, so it cannot be silent. Note
-# the contrast one line up in production: the schema seed already names its
+# the contrast just above it in production: the schema seed already names its
 # fallback when it fails.
 ROD="$WORK/ro"; mkdir -p "$ROD"
 RCFG="$ROD/obsidian.local.md"; RVAULT="$WORK/vaultro"
