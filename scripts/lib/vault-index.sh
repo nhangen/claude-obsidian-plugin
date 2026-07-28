@@ -76,18 +76,23 @@ vault_link_target() {
 # Returns 1 and reports on stderr when it does — that is a defect, not a normal
 # state, and it means queries are reading a narrower slice than they believe.
 vault_index_coverage_check() {
-  local idx="$2" state tracked linked
+  local folder="$1" idx="$2" state dups fn unlinked=0
   state="$(index_state_file "$idx")"
-  # Plain `[ -f x ] && y=...` would abort a `set -e` caller on an absent file.
-  tracked=0; linked=0
-  if [ -f "$state" ]; then tracked="$(grep -cv '^#' "$state" || true)"; fi
-  if [ -f "$idx" ];   then linked="$(grep -cF -- '- [[' "$idx" || true)"; fi
-  if [ "$linked" -lt "$tracked" ]; then
-    printf 'vault_index_coverage_check: coverage defect in %s — %s links for %s tracked notes\n' \
-      "$idx" "$linked" "$tracked" >&2
-    return 1
-  fi
-  return 0
+  [ -f "$state" ] || return 0
+  dups="$(vault_index_dup_leaves "$folder")"
+  # Asserted per note, against the same predicate the writer dedups on. Counting
+  # links instead let any surplus line — a duplicate, a link to a DROPped note,
+  # a `*` bullet the count pattern missed — pay for a note that has none.
+  while IFS=$'\t' read -r fn _h; do
+    case "$fn" in ''|\#*) continue ;; esac
+    vault_index_has_link "$idx" "${fn%.md}" "$dups" && continue
+    printf '%s\n' "$fn"
+    unlinked=$(( unlinked + 1 ))
+  done < "$state"
+  [ "$unlinked" -eq 0 ] && return 0
+  printf 'vault_index_coverage_check: coverage defect in %s — %s tracked note(s) have no INDEX link\n' \
+    "$idx" "$unlinked" >&2
+  return 1
 }
 
 vault_index_plan() {

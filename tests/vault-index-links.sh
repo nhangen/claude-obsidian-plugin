@@ -95,8 +95,6 @@ vault_index_apply "$F6" "$F6/INDEX.md" >/dev/null
 vault_index_coverage_check "$F6" "$F6/INDEX.md" 2>/dev/null \
   || fail "coverage check failed on an empty folder"
 
-echo "PASS: vault-index-links"
-
 # --- recursion: notes below the root are tracked, not reported deleted -------
 # Regression guard for the second half of #30 (see #32): a single-level glob
 # reported every relocated note as a DROP and tracked none of them, so
@@ -201,5 +199,38 @@ printf 'note\n' > "$V/Proj/sub/note.md"; printf 'flat\n' > "$V/Proj/flat.md"
 vault_index_apply "$V/Proj" "$VIDX" >/dev/null
 grep -qxF -- '- [[Proj/sub/note]]' "$VIDX" || fail "vault-relative: nested target wrong"$'\n'"$(cat "$VIDX")"
 grep -qxF -- '- [[Proj/flat]]'     "$VIDX" || fail "vault-relative: root target wrong"$'\n'"$(cat "$VIDX")"
+
+# --- apply itself reports a gap it could not close -------------------------
+# Pins the coverage_check call inside vault_index_apply. Asserting the healed
+# end-state instead passes with that call deleted, because plan's unlinked->ADD
+# branch closes the gap either way. A read-only INDEX is a gap apply cannot
+# close, so its own report is the only thing that can surface it.
+RO="$TMP/ReadOnly"; mkdir -p "$RO"
+ROIDX="$RO/INDEX.md"; printf '# RO Index\n' > "$ROIDX"
+printf 'ro\n' > "$RO/ro.md"
+chmod 444 "$ROIDX"
+ROERR="$(vault_index_apply "$RO" "$ROIDX" 2>&1 >/dev/null || true)"
+chmod 644 "$ROIDX"
+case "$ROERR" in
+  *"coverage defect"*) : ;;
+  *) fail "apply did not report the gap it could not close; got:"$'\n'"$ROERR" ;;
+esac
+
+# --- per-note assertion: a surplus link cannot pay for a missing one ---------
+# The count-based version reported this healthy — 2 links, 2 tracked, one of
+# them a leftover pointing at a note that no longer exists.
+SU="$TMP/Surplus"; mkdir -p "$SU"
+SUIDX="$SU/INDEX.md"; printf '# S Index\n' > "$SUIDX"
+printf 'one\n' > "$SU/one.md"; printf 'two\n' > "$SU/two.md"
+vault_index_apply "$SU" "$SUIDX" >/dev/null 2>&1
+rm "$SU/two.md"                          # its link stays (append-only), state drops it
+printf 'three\n' > "$SU/three.md"        # new note, tracked below
+vault_index_apply "$SU" "$SUIDX" >/dev/null 2>&1
+grep -vF -- '- [[S/three]]' "$SUIDX" | grep -vF -- '- [[three]]' > "$SUIDX.tmp" && mv "$SUIDX.tmp" "$SUIDX"
+if UNLINKED="$(vault_index_coverage_check "$SU" "$SUIDX" 2>/dev/null)"; then
+  fail "surplus stale link paid for a missing one; INDEX:"$'\n'"$(cat "$SUIDX")"
+fi
+grep -qF 'three.md' <<<"$UNLINKED" \
+  || fail "coverage check did not name the unlinked note, got: $UNLINKED"
 
 printf 'ok   vault-index-links.sh (recursion + collisions + vault-relative targets + move re-key)\n'
