@@ -29,7 +29,16 @@ _kb_scripts() {
 }
 
 # Single source of truth for the namespace label: install-watcher.sh owns it.
-keeper_label() { bash "$(_kb_scripts)/install-watcher.sh" label 2>/dev/null; }
+# Deliberately does NOT swallow the installer's stderr — that text is the only
+# thing separating a syntax error from a missing dependency, and every caller
+# either wants it (keeper_ensure_active quotes it) or never triggers it. The
+# unchecked `$(_kb_scripts)` it used to interpolate turned a lost scripts dir
+# into `bash /install-watcher.sh`; fail instead of calling the wrong path.
+keeper_label() {
+  local scripts
+  scripts="$(_kb_scripts)" || return 1
+  bash "$scripts/install-watcher.sh" label
+}
 
 keeper_scheduler_installed() {
   local os="${KEEPER_OS:-$(uname -s)}" label
@@ -80,9 +89,21 @@ keeper_ensure_active() {
 
   # A missing/empty label means the installer is broken — that's an error to
   # report, not a "not installed" signal to barrel past into a doomed install.
-  local label; label="$(keeper_label)"
+  # Capture the installer's own stderr so the refusal quotes the actual fault
+  # instead of guessing; a failed mktemp costs only the quote, not the refusal.
+  local label lblerr lbltmp
+  lbltmp="$(mktemp "${TMPDIR:-/tmp}/kblbl-XXXXXX" 2>/dev/null)" || lbltmp=""
+  if [ -n "$lbltmp" ]; then
+    label="$(keeper_label 2>"$lbltmp")"
+    lblerr="$(tr '\n' ' ' < "$lbltmp")"
+    rm -f "$lbltmp"
+  else
+    label="$(keeper_label 2>/dev/null)"
+    lblerr=""
+  fi
   if [ -z "$label" ]; then
-    printf 'vaultkeeper: cannot resolve scheduler label (install-watcher.sh broken?); skipping activation\n' >&2
+    printf 'vaultkeeper: %s/install-watcher.sh did not report the scheduler label%s; skipping activation\n' \
+      "$scripts" "${lblerr:+ — it said: ${lblerr% }}" >&2
     return 0
   fi
 

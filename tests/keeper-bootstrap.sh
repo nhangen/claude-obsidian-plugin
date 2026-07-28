@@ -178,4 +178,26 @@ grep -q 'cannot find the scripts dir' <<<"$OERR" \
 grep -q 'install-watcher.sh broken' <<<"$OERR" \
   && fail "self-location failure blamed install-watcher.sh: [$OERR]"
 
+# --- a broken installer is reported in its own words (#40) ---
+# _kb_scripts succeeds here — install-watcher.sh is present beside the lib — so
+# this is the case #34 left behind: the installer itself is broken. Its stderr is
+# the only thing separating a syntax error from a missing dependency, and
+# `2>/dev/null` threw it away, leaving the refusal to guess "broken?".
+BRK="$WORK/broken/scripts"; mkdir -p "$BRK/lib"
+cp "${ROOT_DIR}/scripts/lib/keeper-bootstrap.sh" "$BRK/lib/"
+cat > "$BRK/install-watcher.sh" <<'EOF'
+#!/usr/bin/env bash
+echo "BOOM-INSTALLER-DIAGNOSTIC" >&2
+exit 3
+EOF
+BERR="$(KEEPER_OS="Darwin" bash -c ". '$BRK/lib/keeper-bootstrap.sh'; keeper_ensure_active '$CFG' '$VAULT' 900" 2>&1 >/dev/null)" \
+  || fail "ensure_active must return 0 when the installer is broken (never abort the hook)"
+grep -q 'BOOM-INSTALLER-DIAGNOSTIC' <<<"$BERR" \
+  || fail "installer stderr was discarded; refusal said only: [$BERR]"
+# Compare against the pwd-normalized path: _kb_lib_dir resolves through
+# `cd && pwd`, so a TMPDIR with a trailing slash collapses "T//kb-x" to "T/kb-x".
+BRKREAL="$(cd "$BRK" && pwd)"
+grep -qF "$BRKREAL/install-watcher.sh" <<<"$BERR" \
+  || fail "refusal did not name the installer it actually called: [$BERR]"
+
 echo "PASS: keeper-bootstrap"
