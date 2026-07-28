@@ -43,10 +43,12 @@ allowlist_list() {
 
 allowlist_validate() {
   local target="$1" cfg="${2:-}" entry ntarget nentry best="" bestd=9999 d top list
-  # Read the allow-list once. An empty list means the taxonomy could not be read
-  # at all — a different failure from "the target is not on the list", and
-  # reporting it as the latter (with a blank closest match) sent readers looking
-  # for a typo in a target that was fine (#27).
+  # An empty list means no valid taxonomy rows parsed — a missing heading, or a
+  # table with only a header. Distinct from "the target is not on the list", which
+  # offers a closest match; reporting the former as the latter points the reader at
+  # a typo in a target that was fine. A config that is present but unreadable does
+  # not arrive here: awk fails, allowlist_list propagates, and the `|| return 1`
+  # below short-circuits.
   list="$(allowlist_list "$cfg")" || return 1
   if [ -z "$list" ]; then
     printf 'Refusing to write to %s — the config has no readable ## Project Taxonomy allow-list. Run /obsidian:setup or add the table.\n' "$target" >&2

@@ -53,7 +53,8 @@ native here.
 
        . "${CLAUDE_PLUGIN_ROOT}/scripts/lib/allowlist-validate.sh"
        if ! allowlist_validate "<resolved-target>"; then
-         # refusal + closest match already printed to stderr; surface it and stop.
+         # allowlist_validate already printed the refusal to stderr; surface it and stop.
+         # A refusal naming /obsidian:setup is a config fault — do not ask for a folder.
          exit 0
        fi
 
