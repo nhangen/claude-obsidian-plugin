@@ -22,17 +22,54 @@ state_hash_for() {
 # True when INDEX.md already points at this note. Fixed-string matching: note
 # titles routinely contain regex metacharacters (dates, parens, brackets, +).
 #
-# `title` may be a folder-relative path (sub/dir/note) for a note below the
-# root. A hand-written or path-form INDEX links the same note as
-# [[Vault/sub/dir/note]] while an apply-written one uses [[note]], so match on
-# the trailing segment and accept any path prefix. Matching only one form
-# re-appends a link that is already there — observed appending duplicate
-# [[TODO]] lines to an INDEX that already had [[Altamira/TODO]].
+# `rel` is the note's folder-relative path stem (`note`, or `sub/dir/note`
+# below the root). Match the WHOLE relative path, optionally behind a longer
+# prefix, so a hand-written [[Vault/sub/dir/note]] counts as the same link an
+# apply would write.
+#
+# `dup_leaves` (newline-separated, from vault_index_dup_leaves) lists basenames
+# held by more than one note in this folder. For a basename NOT in that set, a
+# bare [[note]] link is also accepted: it is unambiguous, Obsidian resolves it
+# vault-wide, and an older INDEX (or one written before a note moved into a
+# subfolder) links that form. For a basename that IS duplicated, only the full
+# path counts — matching the leaf let the first link satisfy every namesake, so
+# the rest were dropped while state still claimed them: 1001 links for 1061
+# notes under Projects/Development, and permanent, since a hashed note never
+# replans as an ADD.
 vault_index_has_link() {
-  local idx="$1" title="$2" leaf="${2##*/}"
+  local idx="$1" rel="$2" dups="${3-}" leaf="${2##*/}"
   [ -f "$idx" ] || return 1
-  grep -qF -e "[[${leaf}]]" -e "[[${leaf}|" -e "[[${leaf}#" \
-           -e "/${leaf}]]" -e "/${leaf}|" -e "/${leaf}#" -- "$idx"
+  grep -qF -e "[[${rel}]]" -e "[[${rel}|" -e "[[${rel}#" \
+           -e "/${rel}]]" -e "/${rel}|" -e "/${rel}#" -- "$idx" && return 0
+  [ "$leaf" = "$rel" ] && return 1                       # already tried as a leaf
+  grep -qxF -- "$leaf" <<<"$dups" && return 1            # ambiguous: path form required
+  grep -qF -e "[[${leaf}]]" -e "[[${leaf}|" -e "[[${leaf}#" -- "$idx"
+}
+
+# Basenames held by more than one note in the folder — the set for which a bare
+# [[leaf]] link is ambiguous and must not be treated as a match.
+vault_index_dup_leaves() {
+  find "$1" -type f -name '*.md' -exec basename {} .md \; | LC_ALL=C sort | uniq -d
+}
+
+# Link target to write for a note: vault-root-relative, because Obsidian
+# resolves a slashed target against the vault root. A folder-relative
+# `sub/dir/note` would not resolve from an INDEX below the root, and a bare
+# basename is ambiguous the moment two subfolders share one. The vault root is
+# the nearest ancestor holding `.obsidian/`; with none (tests, a bare folder)
+# fall back to the folder-relative path, which is at least unambiguous.
+vault_link_target() {
+  local folder="$1" rel="$2" abs dir
+  abs="$(cd "$folder" 2>/dev/null && pwd -P)" || { printf '%s\n' "$rel"; return; }
+  dir="$abs"
+  while [ "$dir" != "/" ]; do
+    if [ -d "$dir/.obsidian" ]; then
+      [ "$dir" = "$abs" ] && printf '%s\n' "$rel" || printf '%s/%s\n' "${abs#"$dir"/}" "$rel"
+      return
+    fi
+    dir="$(dirname "$dir")"
+  done
+  printf '%s\n' "$rel"
 }
 
 # Coverage assertion: state must never claim more notes than INDEX.md links.
@@ -55,10 +92,11 @@ vault_index_coverage_check() {
 
 vault_index_plan() {
   local folder="$1" idx="$2"
-  local state last f base stored mt cur idxbase
+  local state last f base stored mt cur idxbase dups
   state="$(index_state_file "$idx")"
   last="$(state_last_reconciled "$state")"
   idxbase="$(basename "$idx")"
+  dups="$(vault_index_dup_leaves "$folder")"
 
   # DROP: state entries whose note no longer exists at that key. A note moved
   # into a subfolder drops its stale basename key and is re-added under its
@@ -91,7 +129,7 @@ vault_index_plan() {
       printf 'ADD\t%s\n' "$base"          # coverage gap — name-only, no content read
       continue
     fi
-    if ! vault_index_has_link "$idx" "${base%.md}"; then
+    if ! vault_index_has_link "$idx" "${base%.md}" "$dups"; then
       printf 'ADD\t%s\n' "$base"          # hashed but unlinked — state drifted ahead of INDEX
       continue
     fi
@@ -163,15 +201,12 @@ vault_index_apply() {
     if [ ! -f "$idx" ]; then
       printf '# %s Index\n' "$(basename "$folder")" > "$idx"
     fi
-    local leaf
+    local rel dups
+    dups="$(vault_index_dup_leaves "$folder")"
     for fn in "${added[@]}"; do
-      # Link text is the basename, never the folder-relative path: Obsidian
-      # resolves a slashed target against the VAULT root, so [[sub/dir/note]]
-      # would not resolve from a folder INDEX. A bare basename resolves
-      # vault-wide. has_link still matches either form, so a hand-written
-      # path-form link already present is respected.
-      leaf="${fn##*/}"
-      vault_index_has_link "$idx" "${leaf%.md}" || printf -- '- [[%s]]\n' "${leaf%.md}" >> "$idx"
+      rel="${fn%.md}"
+      vault_index_has_link "$idx" "$rel" "$dups" \
+        || printf -- '- [[%s]]\n' "$(vault_link_target "$folder" "$rel")" >> "$idx"
     done
   fi
 
