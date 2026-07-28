@@ -154,13 +154,18 @@ grep -qF "CLUSTER"$'\t'"Projects"$'\t'"weekly" <<<"$HOSTILE" \
   || fail "canonical tokenizer produced no clusters after overriding the caller's: [$HOSTILE]"
 
 # A missing dedup-scan.sh must be named at source time, not surface later as a
-# clean-looking empty scan.
+# clean-looking empty scan. Asserted under `set -euo pipefail`, because that is
+# what the only production sourcer (vaultkeeper-tick.sh) runs — and it is the
+# context a `. file || handler` guard silently fails to cover, since `.` is a
+# special builtin and errexit exits before the handler.
 VSORPH="$TMP/vs-orphan"; mkdir -p "$VSORPH"
 cp "$ROOT_DIR/scripts/lib/vault-scan.sh" "$VSORPH/"
-if bash -c ". '$ROOT_DIR/scripts/lib/frontmatter.sh'; . '$VSORPH/vault-scan.sh'" 2>"$TMP/vserr"; then
-  fail "sourcing vault-scan.sh without dedup-scan.sh beside it must fail"
-fi
-grep -q 'cannot source dedup-scan.sh' "$TMP/vserr" \
-  || fail "missing tokenizer was not named; got: $(cat "$TMP/vserr")"
+for _flags in '' 'set -euo pipefail;'; do
+  if bash -c "$_flags . '$ROOT_DIR/scripts/lib/frontmatter.sh'; . '$VSORPH/vault-scan.sh'" 2>"$TMP/vserr"; then
+    fail "sourcing vault-scan.sh without dedup-scan.sh beside it must fail [flags: ${_flags:-none}]"
+  fi
+  grep -q 'cannot read dedup-scan.sh' "$TMP/vserr" \
+    || fail "missing tokenizer was not named [flags: ${_flags:-none}]; got: $(cat "$TMP/vserr")"
+done
 
 echo "PASS: vault-scan"

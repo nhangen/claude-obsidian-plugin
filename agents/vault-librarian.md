@@ -78,6 +78,10 @@ deduped.)
    - The refusal says **the top-level folder is not in the allow-list** (and offers a
      closest match) → the *target* is the problem. Surface it and ask the user where
      to file, or correct the target to the suggested match.
+   - The refusal says **the install is broken** (it could not find `resolve-config.sh`
+     beside itself) → neither the config nor the target. Surface it and stop; setup
+     will not fix a lib that lost its own path. Same rule as the config case: do not
+     ask where to file.
 
    If routing confidence is low, do **not** commit silently — append an
    `[ask:where should this go?]` entry to `$VAULT_PATH/Pending.md` and ask the user once.

@@ -18,10 +18,15 @@
 # Directory captured at source time; see the note in allowlist-validate.sh for
 # why BASH_SOURCE alone is not enough (zsh).
 _vs_lib_dir="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd)"
-. "${_vs_lib_dir}/dedup-scan.sh" 2>/dev/null || {
-  printf 'vault-scan: cannot source dedup-scan.sh from "%s" — clustering has no tokenizer\n' "$_vs_lib_dir" >&2
+# Pre-test, not `. file || handler`: `.` is a POSIX special builtin, so under a
+# `set -e` caller — which vaultkeeper-tick.sh is, and it is the only production
+# sourcer — the shell exits at the failed source and the handler never runs. Same
+# shape as the sibling check in allowlist-validate.sh.
+if [ ! -r "${_vs_lib_dir}/dedup-scan.sh" ]; then
+  printf 'vault-scan: cannot read dedup-scan.sh beside this lib (looked in "%s") — clustering has no tokenizer\n' "$_vs_lib_dir" >&2
   return 1 2>/dev/null || exit 1
-}
+fi
+. "${_vs_lib_dir}/dedup-scan.sh"
 
 _scan_find_md() {
   find "$1" -type f -name '*.md' \
