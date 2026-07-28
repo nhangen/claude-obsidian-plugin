@@ -116,4 +116,15 @@ SAVE="${ROOT_DIR}/scripts/session-save.sh"
 grep -q 'keeper-bootstrap.sh' "$SAVE" || fail "session-save.sh does not source keeper-bootstrap.sh"
 grep -q 'keeper_ensure_active' "$SAVE" || fail "session-save.sh never calls keeper_ensure_active"
 
+# --- self-location is shell- and cwd-independent ---
+# The Stop hook sources this lib, and the librarian/keeper runtime is zsh, which
+# has no BASH_SOURCE. Resolving the scripts dir from "." meant the lib only found
+# its siblings when the caller happened to be standing in scripts/lib.
+EXPECT="${ROOT_DIR}/scripts"
+for sh in bash zsh; do
+  command -v "$sh" >/dev/null 2>&1 || continue
+  GOT="$("$sh" -c "cd / && . '${ROOT_DIR}/scripts/lib/keeper-bootstrap.sh'; _kb_scripts" 2>/dev/null)"
+  [ "$GOT" = "$EXPECT" ] || fail "$sh + foreign cwd: _kb_scripts gave [$GOT], want [$EXPECT]"
+done
+
 echo "PASS: keeper-bootstrap"

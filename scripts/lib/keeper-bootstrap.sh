@@ -13,7 +13,11 @@
 # crontab line, so each host installs its own scheduler the first time normal
 # workflow runs on it. Opt out with `keeper_autostart: false` in the config.
 
-_kb_scripts() { cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd; }
+# Captured at source time — see the note in allowlist-validate.sh: zsh has no
+# BASH_SOURCE, and its `$0` only names the sourced file while it is being read.
+_kb_lib_dir="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd)"
+
+_kb_scripts() { printf '%s\n' "${_kb_lib_dir%/*}"; }
 
 # Single source of truth for the namespace label: install-watcher.sh owns it.
 keeper_label() { bash "$(_kb_scripts)/install-watcher.sh" label 2>/dev/null; }
