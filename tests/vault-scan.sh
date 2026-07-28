@@ -77,6 +77,17 @@ ARC=0; ( set -e; scan_open_asks "$V" >/dev/null ) || ARC=$?
 [ "$ARC" = "0" ] || fail "scan_open_asks returned $ARC"
 rm -rf "$V/ZZlast"
 
+# The GRC arm above cannot fail on this fixture: $V always contains a gap file, so
+# the loop's last body command succeeds and the natural status is already 0. The
+# status only leaks when NO file has a gap — then the body ends on a false
+# `[ -n "$miss" ] &&` and the while returns 1. Needs its own vault.
+VC="$TMP/vault-complete"; mkdir -p "$VC"
+printf -- '---\ntags: [x]\ntype: a\n---\n\nall fields present\n' > "$VC/complete-one.md"
+printf -- '---\ntags: [y]\ntype: b\n---\n\nall fields present\n' > "$VC/complete-two.md"
+[ -z "$(scan_frontmatter_gaps "$VC" "tags type")" ] || fail "complete vault should report no gaps"
+GRC2=0; ( set -e; scan_frontmatter_gaps "$VC" "tags type" >/dev/null ) || GRC2=$?
+[ "$GRC2" = "0" ] || fail "scan_frontmatter_gaps returned $GRC2 on a gap-free vault"
+
 # Self-location: this lib resolves dedup-scan.sh next to itself at source time, so a
 # cwd-relative capture leaves tokenize_slug undefined and clustering silently empty.
 # It is the only one of the three captures whose failure also kills the caller —
