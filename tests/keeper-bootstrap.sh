@@ -117,6 +117,20 @@ grep -q 'keeper_autostart' <<<"$RERR" \
 grep -q 'keeper_interval_secs' <<<"$RERR" \
   || fail "failed keeper_interval_secs write was silent: [$RERR]"
 
+# --- _kb_cfg_ensure cleans up its temp file when the swap fails (#40) ---
+# awk succeeds, `mv` fails, and the rendered config sits in TMPDIR forever. The
+# Stop hook runs this on every session, so the leak accumulates one file per
+# session for as long as the config stays unwritable. Subshell so the temporary
+# TMPDIR cannot outlive the call.
+LEAK="$WORK/leaktmp"; mkdir -p "$LEAK"
+chmod a-w "$ROD"
+if ( TMPDIR="$LEAK"; _kb_cfg_ensure leak_probe 1 "$RCFG" ); then
+  chmod u+w "$ROD"; fail "_kb_cfg_ensure reported success when mv could not write the config"
+fi
+chmod u+w "$ROD"
+LEFT="$(find "$LEAK" -name 'kbcfg-*' -type f | wc -l | tr -d ' ')"
+[ "$LEFT" = "0" ] || fail "_kb_cfg_ensure leaked $LEFT temp file(s) into $LEAK"
+
 # --- opt-out: keeper_autostart: false skips install entirely ---
 CFG2="$WORK/optout.local.md"; VAULT2="$WORK/vault2"
 printf -- '---\nvault_path: %s\nkeeper_autostart: false\n---\n' "$VAULT2" > "$CFG2"

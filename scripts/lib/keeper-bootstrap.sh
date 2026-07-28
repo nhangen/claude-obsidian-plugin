@@ -57,7 +57,7 @@ _kb_cfg_ensure() {
     NR==1 && $0=="---" { print; print line; inserted=1; next }
     { print }
     END { if (!inserted) print line }
-  ' "$cfg" > "$tmp" && mv "$tmp" "$cfg"
+  ' "$cfg" > "$tmp" && mv "$tmp" "$cfg" || { rm -f "$tmp"; return 1; }
 }
 
 # keeper_ensure_active <config_file> <vault_path> [interval_secs]
