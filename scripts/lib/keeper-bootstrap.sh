@@ -30,10 +30,11 @@ _kb_scripts() {
 
 # Single source of truth for the namespace label: install-watcher.sh owns it.
 # Deliberately does NOT swallow the installer's stderr — that text is the only
-# thing separating a syntax error from a missing dependency, and every caller
-# either wants it (keeper_ensure_active quotes it) or never triggers it. The
-# unchecked `$(_kb_scripts)` it used to interpolate turned a lost scripts dir
-# into `bash /install-watcher.sh`; fail instead of calling the wrong path.
+# thing separating a syntax error from a missing dependency. Redirecting is each
+# caller's decision: keeper_ensure_active captures it to quote in its refusal,
+# keeper_scheduler_installed drops it because a predicate has no channel to
+# report on. The unchecked `$(_kb_scripts)` it used to interpolate turned a lost
+# scripts dir into `bash /install-watcher.sh`; fail instead of the wrong path.
 keeper_label() {
   local scripts
   scripts="$(_kb_scripts)" || return 1
@@ -42,7 +43,12 @@ keeper_label() {
 
 keeper_scheduler_installed() {
   local os="${KEEPER_OS:-$(uname -s)}" label
-  label="$(keeper_label)"
+  # A predicate has no channel to explain a fault on, so it must not leak the
+  # installer's exit status — that status became this assignment's, and an errexit
+  # caller died here, before the handler on the next line could turn it into a
+  # plain "not installed". Nor its stderr, which would land unprefixed on whoever
+  # asked. keeper_ensure_active is the caller that quotes the installer.
+  label="$(keeper_label 2>/dev/null)" || label=""
   [ -n "$label" ] || return 1
   # Check LIVE state, not an on-disk artifact: install-watcher writes the plist
   # before `launchctl load`, so a failed load can leave a plist that was never

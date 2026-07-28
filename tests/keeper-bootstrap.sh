@@ -209,4 +209,19 @@ BRKREAL="$(cd "$BRK" && pwd)"
 grep -qF "$BRKREAL/install-watcher.sh" <<<"$BERR" \
   || fail "refusal did not name the installer it actually called: [$BERR]"
 
+# --- the predicate answers; it never leaks the installer's status or stderr ---
+# keeper_scheduler_installed is public (the launchctl arms above call it bare) and
+# its `label="$(keeper_label)"` carried the installer's exit 3 as the assignment's
+# status: an errexit caller died on that line and never reached the
+# `[ -n "$label" ] || return 1` below it. In production the `&&` at the call site
+# hid that positionally. A predicate also has no channel to explain a fault on, so
+# the installer's stderr must not surface here unprefixed — keeper_ensure_active
+# is the caller that quotes it.
+PRC=0
+PERR="$(KEEPER_OS="Darwin" bash -c "set -euo pipefail; . '$BRK/lib/keeper-bootstrap.sh'; keeper_scheduler_installed" 2>&1 >/dev/null)" || PRC=$?
+[ "$PRC" = 1 ] \
+  || fail "keeper_scheduler_installed returned the installer's status ($PRC), so the handler under the assignment was never reached"
+[ -z "$PERR" ] \
+  || fail "the predicate leaked the installer's stderr to its caller: [$PERR]"
+
 echo "PASS: keeper-bootstrap"
