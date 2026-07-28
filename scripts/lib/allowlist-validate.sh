@@ -2,12 +2,19 @@
 # allowlist-validate.sh — Project Taxonomy allow-list parsing + target validation.
 # The taxonomy table in the config is the single source of valid top-level folders.
 
+# Captured at source time, not inside a function: `BASH_SOURCE` is a bashism that
+# zsh leaves unset, and zsh's `$0` is the sourced file only while it is being
+# read — inside a function it is the function name. Getting this wrong made
+# every self-relative lookup cwd-relative under zsh (the librarian and keeper
+# runtime), so config resolution failed and validation refused every write (#27).
+_av_lib_dir="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd)"
+
 _allowlist_config() {
   local cfg="${1:-}"
   if [ -z "$cfg" ]; then
-    cfg="$(bash "$(dirname "${BASH_SOURCE[0]}")/resolve-config.sh" 2>/dev/null || true)"
+    cfg="$(bash "${_av_lib_dir}/resolve-config.sh" 2>/dev/null || true)"
   fi
-  [ -n "$cfg" ] && [ -f "$cfg" ] || { printf 'allowlist: no config resolved\n' >&2; return 1; }
+  [ -n "$cfg" ] && [ -f "$cfg" ] || { printf 'allowlist: no config resolved — run /obsidian:setup\n' >&2; return 1; }
   printf '%s\n' "$cfg"
 }
 
@@ -25,7 +32,17 @@ allowlist_list() {
 }
 
 allowlist_validate() {
-  local target="$1" cfg="${2:-}" entry ntarget nentry best="" bestd=9999 d top
+  local target="$1" cfg="${2:-}" entry ntarget nentry best="" bestd=9999 d top list
+  # Read the allow-list once. An empty list means the taxonomy could not be read
+  # at all — a different failure from "the target is not on the list", and
+  # reporting it as the latter (with a blank closest match) sent readers looking
+  # for a typo in a target that was fine (#27).
+  list="$(allowlist_list "$cfg")" || return 1
+  if [ -z "$list" ]; then
+    printf 'Refusing to write to %s — the config has no readable ## Project Taxonomy allow-list. Run /obsidian:setup or add the table.\n' "$target" >&2
+    return 1
+  fi
+
   ntarget="$(printf '%s' "$target" | tr 'A-Z' 'a-z')"; ntarget="${ntarget%/}"
   while IFS= read -r entry; do
     [ -z "$entry" ] && continue
@@ -33,14 +50,18 @@ allowlist_validate() {
     case "$ntarget/" in
       "$nentry"/*) return 0 ;;
     esac
-  done < <(allowlist_list "$cfg")
+  done <<EOF
+$list
+EOF
 
   top="${target%%/*}"
   while IFS= read -r entry; do
     [ -z "$entry" ] && continue
     d="$(_lev "$(printf '%s' "$top" | tr 'A-Z' 'a-z')" "$(printf '%s' "${entry%%/*}" | tr 'A-Z' 'a-z')")"
     if [ "$d" -lt "$bestd" ]; then bestd="$d"; best="$entry"; fi
-  done < <(allowlist_list "$cfg")
+  done <<EOF
+$list
+EOF
 
   printf 'Refusing to write to %s — top-level folder is not in the allow-list. Closest match: %s. Add it to ## Project Taxonomy or correct the target.\n' "$target" "$best" >&2
   return 1

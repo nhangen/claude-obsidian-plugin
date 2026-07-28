@@ -36,5 +36,28 @@ if allowlist_validate "Dailyish/x.md" "$CFG" 2>/dev/null; then fail "Dailyish mu
 
 if command -v zsh >/dev/null 2>&1; then
   zsh -c ". '$ROOT_DIR/scripts/lib/allowlist-validate.sh'; allowlist_list '$CFG'" >/dev/null 2>"$TMP/zerr" || { cat "$TMP/zerr" >&2; fail "allowlist-validate broke under zsh"; }
+
+  # The arm above passes $CFG explicitly, so it never exercises self-resolution —
+  # which is how the real failure hid. The lib locates resolve-config.sh via
+  # BASH_SOURCE; zsh leaves that unset, so dirname "" -> "." and the lookup
+  # silently became cwd-dependent. Under zsh from any other cwd, config
+  # resolution failed and strict validation refused every target.
+  OBSIDIAN_LOCAL_MD="$CFG" zsh -c "cd / && . '$ROOT_DIR/scripts/lib/allowlist-validate.sh'; allowlist_validate 'Daily/2026-06-29.md'" 2>"$TMP/zerr2" \
+    || { cat "$TMP/zerr2" >&2; fail "zsh + foreign cwd: lib could not locate its own resolve-config.sh"; }
+  # Same shape under bash, for symmetry — a cwd-independent lib must not care.
+  OBSIDIAN_LOCAL_MD="$CFG" bash -c "cd / && . '$ROOT_DIR/scripts/lib/allowlist-validate.sh'; allowlist_validate 'Daily/2026-06-29.md'" 2>"$TMP/berr" \
+    || { cat "$TMP/berr" >&2; fail "bash + foreign cwd: lib could not locate its own resolve-config.sh"; }
 fi
+
+# No config anywhere: the refusal must name the actual problem. Reporting a
+# blank "Closest match:" makes a missing config look like a bad target.
+EMPTY="$TMP/empty-xdg"; mkdir -p "$EMPTY"
+if env -u OBSIDIAN_LOCAL_MD -u CLAUDE_PLUGIN_ROOT XDG_CONFIG_HOME="$EMPTY" \
+     bash -c ". '$ROOT_DIR/scripts/lib/allowlist-validate.sh'; allowlist_validate 'Daily/x.md'" 2>"$TMP/noerr"; then
+  fail "validation must fail closed when no config resolves"
+fi
+grep -q 'obsidian:setup' "$TMP/noerr" \
+  || fail "no-config refusal should point at /obsidian:setup, got: $(cat "$TMP/noerr")"
+grep -q 'Closest match:[[:space:]]*$' "$TMP/noerr" \
+  && fail "no-config refusal printed a blank closest match: $(cat "$TMP/noerr")"
 echo "PASS: allowlist-validate"
