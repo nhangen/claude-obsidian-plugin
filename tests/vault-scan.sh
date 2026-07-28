@@ -60,11 +60,15 @@ mkdir -p "$V/Casing"
 CCLUST="$(scan_clusters "$V" 3)"
 has "CLUSTER"$'\t'"Casing"$'\t'"alpha"$'\t'"3" "$CCLUST"
 grep -qF 'ALPHA' <<<"$CCLUST" && fail "cluster tokens must be case-folded, got:"$'\n'"$CCLUST"
-# scan_* report through stdout, so their exit status must be success even when
-# they find nothing. scan_clusters used to return the status of its last
-# threshold test: one trailing folder with no above-threshold token made it
-# return 1, which aborts any `set -e` caller — and vaultkeeper-tick.sh runs
-# `set -euo pipefail` and assigns from it.
+# scan_* report on stdout; their exit status carries no "found something" signal.
+# scan_clusters used to leak the status of its last threshold test, so one trailing
+# folder with no above-threshold token made it return 1 after writing correct
+# output — which aborts `X="$(scan_clusters …)"` under `set -e`.
+#
+# vaultkeeper-tick.sh happens to survive that, despite `set -euo pipefail`: its
+# brace group ends with an `if` that returns 0 either way, so the scan's status
+# never becomes the group's. Positional luck, not protection — move that `if` and
+# the tick aborts. Verified both ways before writing this.
 mkdir -p "$V/ZZlast"
 : > "$V/ZZlast/solitary-note.md"
 CRC=0; ( set -e; scan_clusters "$V" 3 >/dev/null ) || CRC=$?
