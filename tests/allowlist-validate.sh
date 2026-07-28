@@ -34,7 +34,85 @@ grep -q 'Projects/Development' "$TMP/err" || fail "closest match not surfaced: $
 # a folder that only shares a prefix substring but not a path segment is refused
 if allowlist_validate "Dailyish/x.md" "$CFG" 2>/dev/null; then fail "Dailyish must not match Daily"; fi
 
+# Every arm above passes $CFG explicitly, so none of them exercises self-resolution
+# — which is how the real failure hid. The lib *used to* locate resolve-config.sh
+# with `dirname "${BASH_SOURCE[0]}"`; zsh leaves BASH_SOURCE unset, so that was
+# `dirname ""` -> "." and the lookup became cwd-dependent. From any cwd other than
+# scripts/lib, config resolution failed and strict validation refused every target.
+# This arm runs unconditionally: a cwd-independent lib must not care which shell
+# it is, so bash catches a broken capture (`_av_lib_dir="."`) just as well.
+OBSIDIAN_LOCAL_MD="$CFG" bash -c "cd / && . '$ROOT_DIR/scripts/lib/allowlist-validate.sh'; allowlist_validate 'Daily/2026-06-29.md'" 2>"$TMP/berr" \
+  || { cat "$TMP/berr" >&2; fail "bash + foreign cwd: lib could not locate its own resolve-config.sh"; }
+
 if command -v zsh >/dev/null 2>&1; then
   zsh -c ". '$ROOT_DIR/scripts/lib/allowlist-validate.sh'; allowlist_list '$CFG'" >/dev/null 2>"$TMP/zerr" || { cat "$TMP/zerr" >&2; fail "allowlist-validate broke under zsh"; }
+  # zsh is the shell that actually regressed, so this is the load-bearing arm.
+  OBSIDIAN_LOCAL_MD="$CFG" zsh -c "cd / && . '$ROOT_DIR/scripts/lib/allowlist-validate.sh'; allowlist_validate 'Daily/2026-06-29.md'" 2>"$TMP/zerr2" \
+    || { cat "$TMP/zerr2" >&2; fail "zsh + foreign cwd: lib could not locate its own resolve-config.sh"; }
+else
+  # Say so out loud. A silent skip reports `ok` for a shell-portability fix whose
+  # only tripwire never ran.
+  printf 'SKIP: zsh absent — zsh self-location coverage did not run on this host\n' >&2
 fi
+
+# No config anywhere: the refusal must name the actual problem. Reporting a
+# blank "Closest match:" makes a missing config look like a bad target.
+EMPTY="$TMP/empty-xdg"; mkdir -p "$EMPTY"
+if env -u OBSIDIAN_LOCAL_MD -u CLAUDE_PLUGIN_ROOT XDG_CONFIG_HOME="$EMPTY" \
+     bash -c ". '$ROOT_DIR/scripts/lib/allowlist-validate.sh'; allowlist_validate 'Daily/x.md'" 2>"$TMP/noerr"; then
+  fail "validation must fail closed when no config resolves"
+fi
+grep -q 'obsidian:setup' "$TMP/noerr" \
+  || fail "no-config refusal should point at /obsidian:setup, got: $(cat "$TMP/noerr")"
+# The symptom was the missing config being reported as an un-allow-listed target.
+# Assert the absence of that claim, not the blank match it left behind: the old
+# `Closest match:[[:space:]]*$` anchor could never fire, because the message
+# continues past the match ("Closest match: %s. Add it to ...").
+grep -q 'not in the allow-list' "$TMP/noerr" \
+  && fail "no-config refusal blamed the target instead of the config: $(cat "$TMP/noerr")"
+
+# A config that resolves but yields no allow-list rows is its own failure, and it
+# reaches a different branch than the no-config case above (there, allowlist_list
+# fails and short-circuits before the list is ever inspected). Both routes in:
+NOTAX="$TMP/no-taxonomy.md"
+cat > "$NOTAX" <<'EOF'
+---
+vault_path: /tmp/nowhere
+---
+
+## Routing Rules
+
+Nothing here declares a taxonomy.
+EOF
+EMPTYTAX="$TMP/empty-taxonomy.md"
+cat > "$EMPTYTAX" <<'EOF'
+## Project Taxonomy
+
+| Domain | Vault path | Precedence | Notes |
+|--------|-----------|------------|-------|
+
+## Routing Rules
+EOF
+for _cfg in "$NOTAX" "$EMPTYTAX"; do
+  if allowlist_validate "Daily/x.md" "$_cfg" 2>"$TMP/taxerr"; then
+    fail "validation must fail closed when the taxonomy has no rows ($_cfg)"
+  fi
+  grep -q 'no readable ## Project Taxonomy allow-list' "$TMP/taxerr" \
+    || fail "empty-taxonomy refusal should name the taxonomy ($_cfg), got: $(cat "$TMP/taxerr")"
+  grep -q 'Closest match' "$TMP/taxerr" \
+    && fail "empty-taxonomy refusal must not offer a closest match ($_cfg): $(cat "$TMP/taxerr")"
+done
+# A lib that landed away from its siblings must name the install, not the config.
+# Reporting this as "no config resolved — run /obsidian:setup" is the #27
+# misdirection one layer up: setup cannot fix a lib that lost its own path.
+ORPHAN="$TMP/orphan"; mkdir -p "$ORPHAN"
+cp "$ROOT_DIR/scripts/lib/allowlist-validate.sh" "$ORPHAN/"
+if bash -c ". '$ORPHAN/allowlist-validate.sh'; allowlist_validate 'Daily/x.md'" 2>"$TMP/orpherr"; then
+  fail "validation must fail closed when the lib cannot find resolve-config.sh"
+fi
+grep -q 'the install is broken, not the config' "$TMP/orpherr" \
+  || fail "orphaned lib should name the install; got: $(cat "$TMP/orpherr")"
+grep -q 'no config resolved' "$TMP/orpherr" \
+  && fail "orphaned lib blamed the config: $(cat "$TMP/orpherr")"
+
 echo "PASS: allowlist-validate"

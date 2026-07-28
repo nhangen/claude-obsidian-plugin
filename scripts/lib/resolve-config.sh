@@ -45,7 +45,14 @@ resolve_obsidian_config() {
 # canonical stable path regardless of existence (used by the setup wizard to
 # decide where to write). Skills can call:
 #   CONFIG="$(bash "${CLAUDE_PLUGIN_ROOT}/scripts/lib/resolve-config.sh")"
-if [ "${BASH_SOURCE[0]}" = "${0}" ]; then
+# This one stays a bare BASH_SOURCE comparison, unlike the source-time captures in
+# allowlist-validate.sh / keeper-bootstrap.sh / vault-scan.sh. Do NOT "fix" it to
+# `${BASH_SOURCE[0]:-$0}`: under zsh that compares $0 to itself, the branch fires
+# while merely being sourced, and the `exit` below kills the sourcing shell — which
+# is session-save.sh, the Stop hook. Six bash scripts source this file. The `:-`
+# below is only for `set -u` safety; it leaves the comparison false under zsh,
+# which is correct in both directions there.
+if [ "${BASH_SOURCE[0]:-}" = "${0}" ]; then
   if [ "${1:-}" = "--stable" ]; then
     obsidian_config_stable_path
     exit 0

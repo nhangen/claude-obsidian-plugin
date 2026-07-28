@@ -49,6 +49,74 @@ has "CLUSTER"$'\t'"Projects"$'\t'"weekly"$'\t'"3" "$CLUSTERS"
 lacks "CLUSTER"$'\t'"Projects"$'\t'"review" "$CLUSTERS"
 grep -q '\.base' <<<"$CLUSTERS" && fail ".base leaked into clusters"
 
+# Clustering routes through the shared tokenize_slug, so it agrees with dedup and
+# MOC promotion instead of carrying a third inline tokenizer. The visible effect
+# is case folding: these three belong to one cluster, and an uppercased token is
+# not its own separate one.
+mkdir -p "$V/Casing"
+: > "$V/Casing/Alpha-first.md"
+: > "$V/Casing/alpha-second.md"
+: > "$V/Casing/ALPHA-third.md"
+CCLUST="$(scan_clusters "$V" 3)"
+has "CLUSTER"$'\t'"Casing"$'\t'"alpha"$'\t'"3" "$CCLUST"
+grep -qF 'ALPHA' <<<"$CCLUST" && fail "cluster tokens must be case-folded, got:"$'\n'"$CCLUST"
+# scan_* report on stdout; their exit status carries no "found something" signal.
+# scan_clusters used to leak the status of its last threshold test, so one trailing
+# folder with no above-threshold token made it return 1 after writing correct
+# output — which aborts `X="$(scan_clusters …)"` under `set -e`.
+#
+# vaultkeeper-tick.sh happens to survive that, despite `set -euo pipefail`: its
+# brace group ends with an `if` that returns 0 either way, so the scan's status
+# never becomes the group's. Positional luck, not protection — move that `if` and
+# the tick aborts. Verified both ways before writing this.
+mkdir -p "$V/ZZlast"
+: > "$V/ZZlast/solitary-note.md"
+CRC=0; ( set -e; scan_clusters "$V" 3 >/dev/null ) || CRC=$?
+[ "$CRC" = "0" ] || fail "scan_clusters returned $CRC with a below-threshold trailing folder"
+GRC=0; ( set -e; scan_frontmatter_gaps "$V" "tags type" >/dev/null ) || GRC=$?
+[ "$GRC" = "0" ] || fail "scan_frontmatter_gaps returned $GRC"
+URC=0; ( set -e; scan_unfiled "$V" >/dev/null ) || URC=$?
+[ "$URC" = "0" ] || fail "scan_unfiled returned $URC"
+ARC=0; ( set -e; scan_open_asks "$V" >/dev/null ) || ARC=$?
+[ "$ARC" = "0" ] || fail "scan_open_asks returned $ARC"
+rm -rf "$V/ZZlast"
+
+# The GRC arm above cannot fail on this fixture: $V always contains a gap file, so
+# the loop's last body command succeeds and the natural status is already 0. The
+# status only leaks when NO file has a gap — then the body ends on a false
+# `[ -n "$miss" ] &&` and the while returns 1. Needs its own vault.
+VC="$TMP/vault-complete"; mkdir -p "$VC"
+printf -- '---\ntags: [x]\ntype: a\n---\n\nall fields present\n' > "$VC/complete-one.md"
+printf -- '---\ntags: [y]\ntype: b\n---\n\nall fields present\n' > "$VC/complete-two.md"
+[ -z "$(scan_frontmatter_gaps "$VC" "tags type")" ] || fail "complete vault should report no gaps"
+GRC2=0; ( set -e; scan_frontmatter_gaps "$VC" "tags type" >/dev/null ) || GRC2=$?
+[ "$GRC2" = "0" ] || fail "scan_frontmatter_gaps returned $GRC2 on a gap-free vault"
+
+# Self-location: this lib resolves dedup-scan.sh next to itself at source time, so a
+# cwd-relative capture leaves tokenize_slug undefined and clustering silently empty.
+# It is the only one of the three captures whose failure also kills the caller —
+# vaultkeeper-tick.sh runs `set -euo pipefail`, and a failed `.` aborts it at source
+# time. Run from a foreign cwd under both shells; zsh is the one that regressed.
+for _sh in bash zsh; do
+  command -v "$_sh" >/dev/null 2>&1 || {
+    printf 'SKIP: %s absent — self-location coverage did not run on this host\n' "$_sh" >&2
+    continue
+  }
+  _out="$("$_sh" -c "cd / && set -u; . '$ROOT_DIR/scripts/lib/frontmatter.sh'; . '$ROOT_DIR/scripts/lib/vault-scan.sh'; scan_clusters '$V' 3" 2>"$TMP/selferr")" \
+    || { cat "$TMP/selferr" >&2; fail "$_sh + foreign cwd: vault-scan could not locate its own dedup-scan.sh"; }
+  grep -qF "CLUSTER"$'\t'"Projects"$'\t'"weekly" <<<"$_out" \
+    || fail "$_sh + foreign cwd: clustering produced no tokens (tokenize_slug undefined?): [$_out]"
+  [ -s "$TMP/selferr" ] && { cat "$TMP/selferr" >&2; fail "$_sh + foreign cwd: vault-scan wrote to stderr"; }
+done
+
+# Spaces still split into tokens (a filename with spaces is common in this vault).
+mkdir -p "$V/Spaced"
+: > "$V/Spaced/beta note one.md"
+: > "$V/Spaced/beta note two.md"
+: > "$V/Spaced/beta-note-three.md"
+SCLUST="$(scan_clusters "$V" 3)"
+has "CLUSTER"$'\t'"Spaced"$'\t'"beta"$'\t'"3" "$SCLUST"
+
 # keeper-owned files must not appear in any scan output
 for _scan_out in "$GAPS" "$ASKS" "$CLUSTERS"; do
   grep -qF 'Librarian.md' <<<"$_scan_out" && fail "Librarian.md leaked into scan output"
@@ -76,5 +144,28 @@ has "CLUSTER"$'\t'"SpaceTest"$'\t'"review" "$SPACE_CLUSTERS"
 if printf '%s\n' "$SPACE_CLUSTERS" | grep "SpaceTest" | awk -F'\t' '{print $4}' | grep -q '^1$'; then
   fail "space-filename produced a spurious count-1 cluster token"
 fi
+
+# The canonical tokenizer wins over whatever the caller already had in scope. The
+# old `command -v tokenize_slug ||` guard adopted the caller's definition instead,
+# which is the drift the shared tokenizer exists to prevent.
+HOSTILE="$(bash -c "tokenize_slug() { printf 'HOSTILE\n'; }; . '$ROOT_DIR/scripts/lib/frontmatter.sh'; . '$ROOT_DIR/scripts/lib/vault-scan.sh'; scan_clusters '$V' 3")"
+grep -qF 'HOSTILE' <<<"$HOSTILE" && fail "a caller-defined tokenize_slug won over the canonical one: [$HOSTILE]"
+grep -qF "CLUSTER"$'\t'"Projects"$'\t'"weekly" <<<"$HOSTILE" \
+  || fail "canonical tokenizer produced no clusters after overriding the caller's: [$HOSTILE]"
+
+# A missing dedup-scan.sh must be named at source time, not surface later as a
+# clean-looking empty scan. Asserted under `set -euo pipefail`, because that is
+# what the only production sourcer (vaultkeeper-tick.sh) runs — and it is the
+# context a `. file || handler` guard silently fails to cover, since `.` is a
+# special builtin and errexit exits before the handler.
+VSORPH="$TMP/vs-orphan"; mkdir -p "$VSORPH"
+cp "$ROOT_DIR/scripts/lib/vault-scan.sh" "$VSORPH/"
+for _flags in '' 'set -euo pipefail;'; do
+  if bash -c "$_flags . '$ROOT_DIR/scripts/lib/frontmatter.sh'; . '$VSORPH/vault-scan.sh'" 2>"$TMP/vserr"; then
+    fail "sourcing vault-scan.sh without dedup-scan.sh beside it must fail [flags: ${_flags:-none}]"
+  fi
+  grep -q 'cannot read dedup-scan.sh' "$TMP/vserr" \
+    || fail "missing tokenizer was not named [flags: ${_flags:-none}]; got: $(cat "$TMP/vserr")"
+done
 
 echo "PASS: vault-scan"

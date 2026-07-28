@@ -68,10 +68,23 @@ and `create-note` pass `folder_hint` today and must keep getting routed +
 deduped.)
 
 1. Route the content to a target folder. **Always state the chosen folder.** Call
-   `allowlist_validate "<target>"` — if it fails, do not write; surface the error
-   and ask the user where to file. If routing confidence is low, do **not** commit
-   silently — append an `[ask:where should this go?]` entry to `$VAULT_PATH/Pending.md`
-   and ask the user once.
+   `allowlist_validate "<target>"` — if it fails, do not write. It refuses for two
+   different reasons, and only one of them is a question for the user:
+   - The refusal mentions **`/obsidian:setup`** → the *config* is the problem (none
+     resolved, or its taxonomy table has no rows). Surface it, tell the user to run
+     `/obsidian:setup`, and stop. Do **not** ask where to file: no folder answer
+     fixes a missing taxonomy, and treating a named folder as authorization writes
+     outside the allow-list the gate just enforced.
+   - The refusal says **the top-level folder is not in the allow-list** (and offers a
+     closest match) → the *target* is the problem. Surface it and ask the user where
+     to file, or correct the target to the suggested match.
+   - The refusal says **the install is broken** (it could not find `resolve-config.sh`
+     beside itself) → neither the config nor the target. Surface it and stop; setup
+     will not fix a lib that lost its own path. Same rule as the config case: do not
+     ask where to file.
+
+   If routing confidence is low, do **not** commit silently — append an
+   `[ask:where should this go?]` entry to `$VAULT_PATH/Pending.md` and ask the user once.
 2. **Dedup:** call the shared scanner — `dedup_same_day "<vault>/<folder>" "$(date +%Y-%m-%d)" "<slug>"`. If it echoes a `path<TAB>score`, surface that note and ask whether to append rather than file a duplicate — never silently merge.
 3. Write the note using the matching template in `$VAULT_PATH/Templates/`. Its
    INDEX link is written by step 5 (`vault_index_apply`), not by hand. Link

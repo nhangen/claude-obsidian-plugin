@@ -167,11 +167,12 @@ Source the shared validator and call it — do not re-implement the parse/normal
 
     . "${CLAUDE_PLUGIN_ROOT}/scripts/lib/allowlist-validate.sh"
     if ! allowlist_validate "<target>"; then
-      # allowlist_validate printed the refusal + closest match to stderr; surface it and stop.
+      # allowlist_validate printed the refusal to stderr; surface it and stop. A refusal
+      # naming /obsidian:setup is a config fault, not a bad target — do not ask for a folder.
       exit 0
     fi
 
-`allowlist_validate` reads the `## Project Taxonomy` table as the canonical allow-list, normalizes case, matches the target's top-level prefix (dated subfolders and per-repo namespacing under a root are valid), and on failure prints the closest match. Do not create unrecognized top-level folders.
+`allowlist_validate` reads the `## Project Taxonomy` table as the canonical allow-list, normalizes case, matches the target's top-level prefix (dated subfolders and per-repo namespacing under a root are valid), and on failure prints a refusal. Two shapes: a target that is not allow-listed comes with a closest match; a config that resolves to no taxonomy rows names `/obsidian:setup` instead and has no match to offer. Do not create unrecognized top-level folders, and do not treat a config fault as a routing question.
 
 If `strict_domains: false`, skip this validation.
 
@@ -238,7 +239,7 @@ source: claude-code
 6. **Generate title** — create descriptive kebab-case title from topic, e.g. `2026-02-19-obsidian-vault-consolidation`
 7. **Build content** — format conversation as structured markdown per template above (or use `Templates/session.md` from vault if it exists)
 8. **Determine full path** — `<vault_path>/<target-folder>/<YYYY-MM-DD-title>.md`
-9. **Validate allow-list** — `strict_domains` defaults to `true` when absent; only an explicit `false` skips validation. See "Allow-list Validation (strict_domains)" above. If the top-level folder is not allow-listed, refuse and surface the closest match. Do not create the folder. If routing landed in `Inbox/` because no clear domain matched, prompt for confirmation ("No clear domain match — routing to `Inbox/`. Confirm or supply a topic hint") rather than writing silently.
+9. **Validate allow-list** — `strict_domains` defaults to `true` when absent; only an explicit `false` skips validation. See "Allow-list Validation (strict_domains)" above. If the top-level folder is not allow-listed, refuse and surface the closest match. If the refusal names `/obsidian:setup` instead, the config is the problem — surface it and stop rather than asking where to file. Do not create the folder. If routing landed in `Inbox/` because no clear domain matched, prompt for confirmation ("No clear domain match — routing to `Inbox/`. Confirm or supply a topic hint") rather than writing silently.
 10. **Same-day dedup check** — see "Same-Day Dedup Check" below. Before writing, scan the **confirmed** target folder (after any Inbox redirect or topic-hint correction from step 7) for same-day notes and offer append vs new-file when an existing match scores above the threshold.
 11. **Write through the keeper.** The keeper creates parent dirs, applies the
     template, writes the file, and links the INDEX — this skill does not `mkdir`
