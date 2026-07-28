@@ -205,16 +205,25 @@ grep -qxF -- '- [[Proj/flat]]'     "$VIDX" || fail "vault-relative: root target 
 # end-state instead passes with that call deleted, because plan's unlinked->ADD
 # branch closes the gap either way. A read-only INDEX is a gap apply cannot
 # close, so its own report is the only thing that can surface it.
-RO="$TMP/ReadOnly"; mkdir -p "$RO"
-ROIDX="$RO/INDEX.md"; printf '# RO Index\n' > "$ROIDX"
-printf 'ro\n' > "$RO/ro.md"
-chmod 444 "$ROIDX"
-ROERR="$(vault_index_apply "$RO" "$ROIDX" 2>&1 >/dev/null || true)"
-chmod 644 "$ROIDX"
-case "$ROERR" in
-  *"coverage defect"*) : ;;
-  *) fail "apply did not report the gap it could not close; got:"$'\n'"$ROERR" ;;
-esac
+if [ "$(id -u)" = "0" ]; then
+  printf 'skip: read-only INDEX assertion (running as root ignores 0444)\n' >&2
+else
+  RO="$TMP/ReadOnly"; mkdir -p "$RO"
+  ROIDX="$RO/INDEX.md"; printf '# RO Index\n' > "$ROIDX"
+  printf 'ro\n' > "$RO/ro.md"
+  chmod 444 "$ROIDX"
+  ROERR="$(vault_index_apply "$RO" "$ROIDX" 2>&1 >/dev/null || true)"
+  ROOUT="$(vault_index_apply "$RO" "$ROIDX" 2>/dev/null || true)"
+  chmod 644 "$ROIDX"
+  case "$ROERR" in
+    *"coverage defect"*) : ;;
+    *) fail "apply did not report the gap it could not close; got:"$'\n'"$ROERR" ;;
+  esac
+  # stdout stays the ADD set: callers parse it (ADDED="$(vault_index_apply …)").
+  # A diagnostic leaking onto stdout puts a non-filename line in that list.
+  [ "$ROOUT" = "ro.md" ] \
+    || fail "apply's stdout must be the ADD set alone, got:"$'\n'"$ROOUT"
+fi
 
 # --- per-note assertion: a surplus link cannot pay for a missing one ---------
 # The count-based version reported this healthy — 2 links, 2 tracked, one of

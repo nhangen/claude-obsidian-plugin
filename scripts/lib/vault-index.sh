@@ -76,10 +76,10 @@ vault_link_target() {
 # Returns 1 and reports on stderr when it does — that is a defect, not a normal
 # state, and it means queries are reading a narrower slice than they believe.
 vault_index_coverage_check() {
-  local folder="$1" idx="$2" state dups fn unlinked=0
+  local folder="$1" idx="$2" dups="${3-}" state fn unlinked=0
   state="$(index_state_file "$idx")"
   [ -f "$state" ] || return 0
-  dups="$(vault_index_dup_leaves "$folder")"
+  [ -n "$dups" ] || dups="$(vault_index_dup_leaves "$folder")"
   # Asserted per note, against the same predicate the writer dedups on. Counting
   # links instead let any surplus line — a duplicate, a link to a DROPped note,
   # a `*` bullet the count pattern missed — pay for a note that has none.
@@ -202,19 +202,30 @@ vault_index_apply() {
   # Leaving this to prose is what let state run 203 notes ahead of a 12-link
   # INDEX (#30): once state claims coverage, the note never replans as an ADD.
   # Append-only — never rewrite or reorder an existing INDEX.
+  local rel dups missed=0
   if (( ${#added[@]} )); then
     if [ ! -f "$idx" ]; then
       printf '# %s Index\n' "$(basename "$folder")" > "$idx"
     fi
-    local rel dups
     dups="$(vault_index_dup_leaves "$folder")"
     for fn in "${added[@]}"; do
       rel="${fn%.md}"
       vault_index_has_link "$idx" "$rel" "$dups" \
         || printf -- '- [[%s]]\n' "$(vault_link_target "$folder" "$rel")" >> "$idx"
     done
+    # Verify what this run was supposed to write. A full-folder sweep here would
+    # re-ask plan's question about every note — 1073 greps and a third
+    # dup_leaves pass on a large folder, all of it already answered — so scope
+    # it to the set this run touched. vault_index_coverage_check is the
+    # standalone full-folder assertion for a sweep.
+    for fn in "${added[@]}"; do
+      vault_index_has_link "$idx" "${fn%.md}" "$dups" || missed=$(( missed + 1 ))
+    done
+    if [ "$missed" -gt 0 ]; then
+      printf 'vault_index_apply: coverage defect in %s — %s link(s) could not be written\n' \
+        "$idx" "$missed" >&2
+    fi
   fi
 
-  vault_index_coverage_check "$folder" "$idx" || true
   (( ${#added[@]} )) && printf '%s\n' "${added[@]}" || true
 }

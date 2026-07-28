@@ -36,12 +36,15 @@ slice is one or two domain folders, never the whole vault.
 
 1. Route the question to its slice (folder + INDEX).
 2. Refresh the slice: ``ADDED="$(vault_index_apply "$FOLDER" "$FOLDER/INDEX.md")"``.
-   `vault_index_apply` writes the ``- [[<title>]]`` links itself (append-only) —
-   do **not** append them by hand, that is a second implementation that drifts.
-   The `ADD` set it returns is the **coverage** result: these notes existed but
-   were not indexed. It also runs `vault_index_coverage_check`; if that reports a
-   defect on stderr, report it — state claiming more notes than `INDEX.md` links
-   means queries have been reading a narrower slice than they believed.
+   `vault_index_apply` writes the links itself (append-only), as
+   ``- [[<path/from/vault/root>]]`` — a bare basename is ambiguous once two notes
+   in different subfolders share one. Do **not** append them by hand; that is a
+   second implementation that drifts. The `ADD` set it returns on stdout is the
+   **coverage** result: these notes existed but were not indexed. If apply
+   reports `coverage defect` on stderr, links it meant to write did not land —
+   say so rather than treating the slice as complete. To assess a whole folder
+   rather than one run, call ``vault_index_coverage_check "$FOLDER"
+   "$FOLDER/INDEX.md"``; it prints every tracked note that has no link.
 3. Read only the notes the INDEX points at for the topic.
 4. **Coverage invariant:** if the slice had `ADD`/gaps you could not fully
    summarize, or the INDEX is otherwise known-incomplete, say so and lower your

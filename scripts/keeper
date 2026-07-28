@@ -151,7 +151,11 @@ cmd_insert() {
     # Link the note by its vault-relative path so it resolves from Daily/, with
     # the human title as an alias. Dedup on the path: two different notes can
     # share a title, and keying on title text dropped the second one's link.
-    local ltarget="${target%.md}" link
+    local ltarget link
+    # Same target derivation as the folder INDEX (vault root = nearest .obsidian
+    # ancestor), so the two links can't disagree about where the root is when
+    # --vault points below it.
+    ltarget="$(vault_link_target "$folder" "$(basename "$target" .md)")"
     link="- [[$ltarget]]"
     [ "$title" = "$(basename "$target" .md)" ] || link="- [[$ltarget|$title]]"
     if ! grep -qF -- "[[$ltarget]]" "$daily" && ! grep -qF -- "[[$ltarget|" "$daily"; then
