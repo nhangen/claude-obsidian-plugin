@@ -19,6 +19,32 @@ state_hash_for() {
   awk -F '\t' -v f="$2" '$1==f {print $2; exit}' "$1"
 }
 
+# True when INDEX.md already points at this note. Fixed-string matching: note
+# titles routinely contain regex metacharacters (dates, parens, brackets, +).
+vault_index_has_link() {
+  local idx="$1" title="$2"
+  [ -f "$idx" ] || return 1
+  grep -qF -e "[[${title}]]" -e "[[${title}|" -e "[[${title}#" -- "$idx"
+}
+
+# Coverage assertion: state must never claim more notes than INDEX.md links.
+# Returns 1 and reports on stderr when it does — that is a defect, not a normal
+# state, and it means queries are reading a narrower slice than they believe.
+vault_index_coverage_check() {
+  local idx="$2" state tracked linked
+  state="$(index_state_file "$idx")"
+  # Plain `[ -f x ] && y=...` would abort a `set -e` caller on an absent file.
+  tracked=0; linked=0
+  if [ -f "$state" ]; then tracked="$(grep -cv '^#' "$state" || true)"; fi
+  if [ -f "$idx" ];   then linked="$(grep -cF -- '- [[' "$idx" || true)"; fi
+  if [ "$linked" -lt "$tracked" ]; then
+    printf 'vault_index_coverage_check: coverage defect in %s — %s links for %s tracked notes\n' \
+      "$idx" "$linked" "$tracked" >&2
+    return 1
+  fi
+  return 0
+}
+
 vault_index_plan() {
   local folder="$1" idx="$2"
   local state last f base stored mt cur idxbase
@@ -48,6 +74,10 @@ vault_index_plan() {
     stored="$(state_hash_for "$state" "$base")"
     if [ -z "$stored" ]; then
       printf 'ADD\t%s\n' "$base"          # coverage gap — name-only, no content read
+      continue
+    fi
+    if ! vault_index_has_link "$idx" "${base%.md}"; then
+      printf 'ADD\t%s\n' "$base"          # hashed but unlinked — state drifted ahead of INDEX
       continue
     fi
     if ! note_hash_valid "$stored"; then
@@ -107,5 +137,20 @@ vault_index_apply() {
   { printf '# last_reconciled:%s\n' "$(now_epoch)"; sort "$tmp"; } > "$tmp2"
   mv "$tmp2" "$state"
   rm -f "$tmp" "$tmp2"
+
+  # Write the links here rather than returning them for a caller to remember.
+  # Leaving this to prose is what let state run 203 notes ahead of a 12-link
+  # INDEX (#30): once state claims coverage, the note never replans as an ADD.
+  # Append-only — never rewrite or reorder an existing INDEX.
+  if (( ${#added[@]} )); then
+    if [ ! -f "$idx" ]; then
+      printf '# %s Index\n' "$(basename "$folder")" > "$idx"
+    fi
+    for fn in "${added[@]}"; do
+      vault_index_has_link "$idx" "${fn%.md}" || printf -- '- [[%s]]\n' "${fn%.md}" >> "$idx"
+    done
+  fi
+
+  vault_index_coverage_check "$folder" "$idx" || true
   (( ${#added[@]} )) && printf '%s\n' "${added[@]}" || true
 }

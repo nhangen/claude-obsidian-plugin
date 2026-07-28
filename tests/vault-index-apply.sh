@@ -21,8 +21,10 @@ grep -qxF "b.md" <<<"$ADDED" || fail "expected b.md in ADD output"
 grep -q '^# last_reconciled:[0-9]\+$' "$STATE" || fail "no last_reconciled stamp"
 note_hash_valid "$(state_hash_for "$STATE" "a.md")" || fail "a.md hash not stored validly"
 
-# INDEX.md must be untouched by apply (append-only is the subagent's job).
-[ "$(cat "$IDX")" = "$IDX_BEFORE" ] || fail "apply must not modify INDEX.md"
+# apply owns the link write (#30) but must only ever append: the prior content
+# stays byte-identical at the top of the file. See tests/vault-index-links.sh
+# for the link/coverage contract itself.
+[ "$(head -c ${#IDX_BEFORE} "$IDX")" = "$IDX_BEFORE" ] || fail "apply must not rewrite existing INDEX.md content"
 
 # Idempotent: second apply with no changes -> empty plan, no new ADD.
 # Use explicit timestamps instead of sleep to avoid wall-clock dependency.
