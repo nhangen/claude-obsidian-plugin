@@ -77,6 +77,23 @@ ARC=0; ( set -e; scan_open_asks "$V" >/dev/null ) || ARC=$?
 [ "$ARC" = "0" ] || fail "scan_open_asks returned $ARC"
 rm -rf "$V/ZZlast"
 
+# Self-location: this lib resolves dedup-scan.sh next to itself at source time, so a
+# cwd-relative capture leaves tokenize_slug undefined and clustering silently empty.
+# It is the only one of the three captures whose failure also kills the caller —
+# vaultkeeper-tick.sh runs `set -euo pipefail`, and a failed `.` aborts it at source
+# time. Run from a foreign cwd under both shells; zsh is the one that regressed.
+for _sh in bash zsh; do
+  command -v "$_sh" >/dev/null 2>&1 || {
+    printf 'SKIP: %s absent — self-location coverage did not run on this host\n' "$_sh" >&2
+    continue
+  }
+  _out="$("$_sh" -c "cd / && set -u; . '$ROOT_DIR/scripts/lib/frontmatter.sh'; . '$ROOT_DIR/scripts/lib/vault-scan.sh'; scan_clusters '$V' 3" 2>"$TMP/selferr")" \
+    || { cat "$TMP/selferr" >&2; fail "$_sh + foreign cwd: vault-scan could not locate its own dedup-scan.sh"; }
+  grep -qF "CLUSTER"$'\t'"Projects"$'\t'"weekly" <<<"$_out" \
+    || fail "$_sh + foreign cwd: clustering produced no tokens (tokenize_slug undefined?): [$_out]"
+  [ -s "$TMP/selferr" ] && { cat "$TMP/selferr" >&2; fail "$_sh + foreign cwd: vault-scan wrote to stderr"; }
+done
+
 # Spaces still split into tokens (a filename with spaces is common in this vault).
 mkdir -p "$V/Spaced"
 : > "$V/Spaced/beta note one.md"

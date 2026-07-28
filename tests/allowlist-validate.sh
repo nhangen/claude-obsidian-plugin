@@ -34,19 +34,25 @@ grep -q 'Projects/Development' "$TMP/err" || fail "closest match not surfaced: $
 # a folder that only shares a prefix substring but not a path segment is refused
 if allowlist_validate "Dailyish/x.md" "$CFG" 2>/dev/null; then fail "Dailyish must not match Daily"; fi
 
+# Every arm above passes $CFG explicitly, so none of them exercises self-resolution
+# — which is how the real failure hid. The lib *used to* locate resolve-config.sh
+# with `dirname "${BASH_SOURCE[0]}"`; zsh leaves BASH_SOURCE unset, so that was
+# `dirname ""` -> "." and the lookup became cwd-dependent. From any cwd other than
+# scripts/lib, config resolution failed and strict validation refused every target.
+# This arm runs unconditionally: a cwd-independent lib must not care which shell
+# it is, so bash catches a broken capture (`_av_lib_dir="."`) just as well.
+OBSIDIAN_LOCAL_MD="$CFG" bash -c "cd / && . '$ROOT_DIR/scripts/lib/allowlist-validate.sh'; allowlist_validate 'Daily/2026-06-29.md'" 2>"$TMP/berr" \
+  || { cat "$TMP/berr" >&2; fail "bash + foreign cwd: lib could not locate its own resolve-config.sh"; }
+
 if command -v zsh >/dev/null 2>&1; then
   zsh -c ". '$ROOT_DIR/scripts/lib/allowlist-validate.sh'; allowlist_list '$CFG'" >/dev/null 2>"$TMP/zerr" || { cat "$TMP/zerr" >&2; fail "allowlist-validate broke under zsh"; }
-
-  # The arm above passes $CFG explicitly, so it never exercises self-resolution —
-  # which is how the real failure hid. The lib locates resolve-config.sh via
-  # BASH_SOURCE; zsh leaves that unset, so dirname "" -> "." and the lookup
-  # silently became cwd-dependent. Under zsh from any other cwd, config
-  # resolution failed and strict validation refused every target.
+  # zsh is the shell that actually regressed, so this is the load-bearing arm.
   OBSIDIAN_LOCAL_MD="$CFG" zsh -c "cd / && . '$ROOT_DIR/scripts/lib/allowlist-validate.sh'; allowlist_validate 'Daily/2026-06-29.md'" 2>"$TMP/zerr2" \
     || { cat "$TMP/zerr2" >&2; fail "zsh + foreign cwd: lib could not locate its own resolve-config.sh"; }
-  # Same shape under bash, for symmetry — a cwd-independent lib must not care.
-  OBSIDIAN_LOCAL_MD="$CFG" bash -c "cd / && . '$ROOT_DIR/scripts/lib/allowlist-validate.sh'; allowlist_validate 'Daily/2026-06-29.md'" 2>"$TMP/berr" \
-    || { cat "$TMP/berr" >&2; fail "bash + foreign cwd: lib could not locate its own resolve-config.sh"; }
+else
+  # Say so out loud. A silent skip reports `ok` for a shell-portability fix whose
+  # only tripwire never ran.
+  printf 'SKIP: zsh absent — zsh self-location coverage did not run on this host\n' >&2
 fi
 
 # No config anywhere: the refusal must name the actual problem. Reporting a
