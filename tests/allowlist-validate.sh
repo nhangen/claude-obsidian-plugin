@@ -58,6 +58,42 @@ if env -u OBSIDIAN_LOCAL_MD -u CLAUDE_PLUGIN_ROOT XDG_CONFIG_HOME="$EMPTY" \
 fi
 grep -q 'obsidian:setup' "$TMP/noerr" \
   || fail "no-config refusal should point at /obsidian:setup, got: $(cat "$TMP/noerr")"
-grep -q 'Closest match:[[:space:]]*$' "$TMP/noerr" \
-  && fail "no-config refusal printed a blank closest match: $(cat "$TMP/noerr")"
+# The symptom was the missing config being reported as an un-allow-listed target.
+# Assert the absence of that claim, not the blank match it left behind: the old
+# `Closest match:[[:space:]]*$` anchor could never fire, because the message
+# continues past the match ("Closest match: %s. Add it to ...").
+grep -q 'not in the allow-list' "$TMP/noerr" \
+  && fail "no-config refusal blamed the target instead of the config: $(cat "$TMP/noerr")"
+
+# A config that resolves but yields no allow-list rows is its own failure, and it
+# reaches a different branch than the no-config case above (there, allowlist_list
+# fails and short-circuits before the list is ever inspected). Both routes in:
+NOTAX="$TMP/no-taxonomy.md"
+cat > "$NOTAX" <<'EOF'
+---
+vault_path: /tmp/nowhere
+---
+
+## Routing Rules
+
+Nothing here declares a taxonomy.
+EOF
+EMPTYTAX="$TMP/empty-taxonomy.md"
+cat > "$EMPTYTAX" <<'EOF'
+## Project Taxonomy
+
+| Domain | Vault path | Precedence | Notes |
+|--------|-----------|------------|-------|
+
+## Routing Rules
+EOF
+for _cfg in "$NOTAX" "$EMPTYTAX"; do
+  if allowlist_validate "Daily/x.md" "$_cfg" 2>"$TMP/taxerr"; then
+    fail "validation must fail closed when the taxonomy has no rows ($_cfg)"
+  fi
+  grep -q 'no readable ## Project Taxonomy allow-list' "$TMP/taxerr" \
+    || fail "empty-taxonomy refusal should name the taxonomy ($_cfg), got: $(cat "$TMP/taxerr")"
+  grep -q 'Closest match' "$TMP/taxerr" \
+    && fail "empty-taxonomy refusal must not offer a closest match ($_cfg): $(cat "$TMP/taxerr")"
+done
 echo "PASS: allowlist-validate"
