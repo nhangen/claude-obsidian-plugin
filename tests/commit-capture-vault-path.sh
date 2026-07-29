@@ -21,6 +21,7 @@ make_git_stub() {
   cat > "${GIT_BIN_DIR}/git" <<'STUB'
 #!/usr/bin/env bash
 case "$*" in
+  "log -1 --format=%ct") date +%s ;;
   "rev-parse --short HEAD") echo abc1234 ;;
   "log -1 --pretty=format:%s") echo "test commit" ;;
   "rev-parse --abbrev-ref HEAD") echo nh/feat/test ;;

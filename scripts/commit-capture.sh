@@ -29,13 +29,22 @@ case "$INPUT" in
     ;;
 esac
 
-case "$INPUT" in
-  *'['*'] '*)
-    ;;
-  *)
-    exit 0
-    ;;
-esac
+# Confirm a commit actually landed. The old gate required the "[branch hash]"
+# summary line in the tool output, which `git commit -q` does not print — so
+# every quiet commit was silently skipped and its capture lost. Ask git instead:
+# if HEAD's commit timestamp is within the window, this call created it. A
+# `git commit` that failed for some other reason leaves an older HEAD and is
+# correctly ignored, and `--amend` refreshes the committer date so amends still
+# capture.
+COMMIT_RECENT_WINDOW="${OBSIDIAN_COMMIT_RECENT_WINDOW:-120}"
+HEAD_CT=$(git log -1 --format=%ct 2>/dev/null) || exit 0
+[ -n "$HEAD_CT" ] || exit 0
+NOW_CT=$(date +%s 2>/dev/null) || exit 0
+AGE=$(( NOW_CT - HEAD_CT ))
+[ "$AGE" -ge 0 ] || AGE=0
+if [ "$AGE" -gt "$COMMIT_RECENT_WINDOW" ]; then
+  exit 0
+fi
 
 # --- Extract git metadata ---
 
@@ -53,19 +62,29 @@ NOW=$(date '+%H:%M')
 
 # --- Derive org/repo from remote URL ---
 
+# Host-agnostic. The old version matched SSH and github.com only, so an HTTPS
+# GitLab remote fell through to local/<repo> — which is how the same repo got
+# captured under three different org_repo values (altamira2/mtf-builder,
+# local/mtf-builder, altamira2_mtf-builder) and its notes ended up spread across
+# three folders. Any scheme://host/path and any host:path now resolve to the
+# path, so nested GitLab subgroups survive too.
 ORG_REPO=""
 case "$REMOTE" in
   *@*:*/*)
     ORG_REPO="${REMOTE#*:}"
-    ORG_REPO="${ORG_REPO%.git}"
     ;;
-  *github.com/*/*)
-    ORG_REPO="${REMOTE#*github.com/}"
-    ORG_REPO="${ORG_REPO%.git}"
+  *://*/*/*)
+    ORG_REPO="${REMOTE#*://}"      # host[:port]/org/repo, maybe user@host
+    ORG_REPO="${ORG_REPO#*/}"      # strip host, keep org/repo
     ;;
   *)
     ORG_REPO="local/$REPO_NAME"
     ;;
+esac
+ORG_REPO="${ORG_REPO%/}"
+ORG_REPO="${ORG_REPO%.git}"
+case "$ORG_REPO" in
+  ''|*/) ORG_REPO="local/$REPO_NAME" ;;
 esac
 
 # --- Extract ticket number from branch ---
