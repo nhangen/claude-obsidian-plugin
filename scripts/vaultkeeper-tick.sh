@@ -42,7 +42,20 @@ CONFLICTS="$(keeper_quarantine_conflicts "$VAULT" || true)"
 # maintainer's host, each one logging `Too many open files` immediately above
 # `scan complete`. A scan whose scanners complained is not a scan we can
 # describe as done; see the SCAN_ERR gate below keeper_record_scan.
+SCAN_FAULT=""
 SCAN_ERR="$(mktemp "${TMPDIR:-/tmp}/kbscan-XXXXXX" 2>/dev/null)" || SCAN_ERR=""
+if [ -n "$SCAN_ERR" ]; then
+  # trap, not a bare rm below: a tick killed for overrunning its launchd window
+  # otherwise leaks one buffer every 15 minutes, and the fault goes with it.
+  trap 'rm -f "$SCAN_ERR"' EXIT
+else
+  # Fail closed. With no buffer the fault check can never fire, and failing open
+  # here restored the exact bug this gate removes — a partial scan recorded as
+  # complete, silently. mktemp is also among the first casualties of the fd and
+  # disk exhaustion the gate is watching for, so this is a correlated failure, not
+  # an independent one.
+  SCAN_FAULT="cannot create the scan-fault buffer (mktemp failed); scan not verifiable"
+fi
 CAND="$( {
   scan_frontmatter_gaps "$VAULT" "$REQUIRED"
   scan_unfiled "$VAULT"
@@ -50,13 +63,11 @@ CAND="$( {
   scan_clusters "$VAULT" 3
   if [ -n "$CONFLICTS" ]; then printf '%s\n' "$CONFLICTS"; fi
 } 2>"${SCAN_ERR:-/dev/stderr}" | sed '/^$/d' )"
-SCAN_FAULT=""
 if [ -n "$SCAN_ERR" ] && [ -s "$SCAN_ERR" ]; then
   SCAN_FAULT="$(tr -c '[:print:]' ' ' < "$SCAN_ERR")" || SCAN_FAULT="unreadable"
   SCAN_FAULT="${SCAN_FAULT:0:300}"
   printf '%s\n' "$SCAN_FAULT" >&2
 fi
-[ -n "$SCAN_ERR" ] && rm -f "$SCAN_ERR"
 
 # The order of these three is the whole point. Both survive a partial candidate set:
 # base_view_write takes only a path, and the digest is a full overwrite, so a

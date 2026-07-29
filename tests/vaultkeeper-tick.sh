@@ -109,4 +109,31 @@ if [ -f "$CV/Pending.md" ]; then
     || fail "fault/heal cycles duplicated $_dups Pending.md item(s): $(grep '^- \[ \]' "$CV/Pending.md" | sort | uniq -d | head -3)"
 fi
 
+# --- a gate that cannot arm must not wave the tick through (#42, panel) ---
+# `SCAN_ERR="$(mktemp …)" || SCAN_ERR=""` failed open: with no buffer the fault
+# check could never fire, so the tick recorded a partial scan as complete — the
+# exact behavior this gate exists to remove. And mktemp is among the first things
+# to fail under the fd/disk exhaustion the gate is watching for, so the guard went
+# missing precisely when it was needed.
+MV="$TMP/mktempvault"; mkdir -p "$MV/Inbox"
+printf -- '---\ntags: [x]\n---\nbody\n' > "$MV/n.md"
+MCFG="$TMP/mktemp.local.md"; sed "s|^vault_path: .*|vault_path: $MV|" "$CFG" > "$MCFG"
+mkdir -p "$TMP/mbin"
+cat > "$TMP/mbin/mktemp" <<'EOF'
+#!/usr/bin/env bash
+case "$*" in *kbscan*) exit 1 ;; esac
+exec /usr/bin/mktemp "$@"
+EOF
+chmod +x "$TMP/mbin/mktemp"
+MOUT="$TMP/mktemp.out"
+PATH="$TMP/mbin:$PATH" OBSIDIAN_LOCAL_MD="$MCFG" VAULTKEEPER_HOST="ml-1" \
+  bash "${ROOT_DIR}/scripts/vaultkeeper-tick.sh" >"$MOUT" 2>&1 \
+  || fail "a failed mktemp must not abort the tick; got: $(cat "$MOUT")"
+grep -q 'scan INCOMPLETE' "$MOUT" \
+  || fail "gate could not arm and the tick did not say so; got: $(cat "$MOUT")"
+grep -q 'scan complete' "$MOUT" \
+  && fail "a tick with no fault buffer reported itself complete: $(cat "$MOUT")"
+[ -f "$(keeper_last_scan_file "$MV")" ] \
+  && fail "a tick with no fault buffer recorded last_scan"
+
 echo "PASS: vaultkeeper-tick"
