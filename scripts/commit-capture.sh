@@ -19,32 +19,25 @@ esac
 # command short at its first quoted argument, silently dropping
 # `cd "<worktree>" && git commit` — this project's own documented workflow — and
 # `git add "a b.txt" && git commit`. Decode the string instead of slicing it.
+# Walking the string a character at a time cost ~11s on a 4 KB command, which is
+# not something a PostToolUse hook may spend. Substitute the two escapes that can
+# be confused with the closing quote for placeholders, cut at the first quote
+# that is now genuinely unescaped, then restore — all bulk expansions.
+# \uXXXX is left as written: it can never be a delimiter or a shell separator.
 json_value() {
-  local s="$1" key="$2" out="" ch
+  local s="$1" key="$2"
   s="${s#*"$key"}"
   [ "$s" != "$1" ] || { printf '%s' ''; return 0; }
   s="${s#*\"}"
-  while [ -n "$s" ]; do
-    ch="${s%"${s#?}"}"
-    s="${s#?}"
-    case "$ch" in
-      '"') break ;;
-      '\')
-        ch="${s%"${s#?}"}"
-        s="${s#?}"
-        case "$ch" in
-          n) out="${out}"$'\n' ;;
-          t) out="${out}"$'\t' ;;
-          r) out="${out}"$'\r' ;;
-          b|f) out="${out} " ;;
-          u) s="${s#????}"; out="${out}?" ;;
-          *) out="${out}${ch}" ;;
-        esac
-        ;;
-      *) out="${out}${ch}" ;;
-    esac
-  done
-  printf '%s' "$out"
+  s="${s//\\\\/$'\001'}"
+  s="${s//\\\"/$'\002'}"
+  s="${s%%\"*}"
+  s="${s//\\n/$'\n'}"
+  s="${s//\\t/$'\t'}"
+  s="${s//\\r/$'\r'}"
+  s="${s//$'\002'/\"}"
+  s="${s//$'\001'/\\}"
+  printf '%s' "$s"
 }
 
 COMMAND_LINE="$(json_value "$INPUT" '"command"')"
@@ -80,10 +73,43 @@ take_token() {
 # with the `commit` subcommand. A newline is a separator too: it arrives decoded
 # by now, and `git add -A` on one line with `git commit` on the next is the most
 # common shape there is.
+#
+# Heredoc bodies are not commands. This only became reachable once newlines were
+# decoded: `cat <<EOF` / `git commit -q` / `EOF` used to survive as one segment and
+# be rejected, and now the body line would match the gate on its own. The opening
+# line is kept, because `git commit -F - <<EOF` is a real invocation.
+strip_heredoc_bodies() {
+  local s="$1" out="" line trimmed delim="" tag
+  while IFS= read -r line; do
+    if [ -n "$delim" ]; then
+      trimmed="${line#"${line%%[![:space:]]*}"}"
+      [ "$trimmed" = "$delim" ] && delim=""
+      continue
+    fi
+    out="${out}${line}"$'\n'
+    case "$line" in
+      *'<<<'*) ;;                                   # herestring: no body follows
+      *'<<'*)
+        tag="${line#*<<}"
+        tag="${tag#-}"
+        tag="${tag#"${tag%%[![:space:]]*}"}"
+        tag="${tag%%[[:space:]]*}"
+        tag="${tag%%[;&|)]*}"
+        tag="${tag//\"/}"
+        tag="${tag//\'/}"
+        [ -n "$tag" ] && delim="$tag"
+        ;;
+    esac
+  done <<EOF
+$s
+EOF
+  printf '%s' "$out"
+}
+
 INVOKES_COMMIT=0
 GIT_C_DIR=""
 CD_TARGET=""
-SEGMENTS="$COMMAND_LINE"
+SEGMENTS="$(strip_heredoc_bodies "$COMMAND_LINE")"
 SEGMENTS="${SEGMENTS//&&/$'\n'}"
 SEGMENTS="${SEGMENTS//||/$'\n'}"
 SEGMENTS="${SEGMENTS//;/$'\n'}"
@@ -165,7 +191,29 @@ $SEGMENTS
 EOF
 [ "$INVOKES_COMMIT" -eq 1 ] || exit 0
 
-case "$COMMAND_LINE" in
+# --dry-run is a flag, so look for it outside quoted text: a commit whose message
+# mentions the flag (`-m "add --dry-run flag"`) is still a real commit.
+strip_quoted() {
+  local s="$1" q="$2" out="" pre
+  while :; do
+    case "$s" in
+      *"$q"*)
+        pre="${s%%"$q"*}"
+        s="${s#*"$q"}"
+        case "$s" in
+          *"$q"*) s="${s#*"$q"}" ;;
+          *) s="" ;;                    # unbalanced: treat the tail as quoted
+        esac
+        out="${out}${pre} "
+        ;;
+      *) out="${out}${s}"; break ;;
+    esac
+  done
+  printf '%s' "$out"
+}
+UNQUOTED="$(strip_quoted "$COMMAND_LINE" '"')"
+UNQUOTED="$(strip_quoted "$UNQUOTED" "'")"
+case "$UNQUOTED" in
   *--dry-run*)
     exit 0
     ;;

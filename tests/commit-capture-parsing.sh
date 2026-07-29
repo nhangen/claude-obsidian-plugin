@@ -106,6 +106,40 @@ for cmd in \
   esac
 done
 
+# --- 2b. things that only MENTION a commit must stay silent ------------------
+# Decoding the payload made newlines real separators, which is what fixed the
+# multi-line case above — and it also exposed heredoc bodies to the gate for the
+# first time. `cat <<EOF` / `git commit -q` / `EOF` is a document, not a command.
+for cmd in \
+  'git log --grep=commit' \
+  'echo commit' \
+  'grep -rn commit .' \
+  'npm run commit' \
+  "cat <<EOF"$'\n'"git commit -q -m x"$'\n'"EOF" \
+  "cat <<-'END'"$'\n'"  git commit -q"$'\n'"  END" ; do
+  OUT="$(run_from "$REAL" "$(payload "$cmd" "$REAL")")"
+  [ -z "$OUT" ] || fail "a mention of a commit was captured: $cmd"$'\n'"got: $OUT"
+done
+# …but a heredoc used to SUPPLY the message is a real commit.
+OUT="$(run_from "$REAL" "$(payload "git commit -q -F - <<EOF"$'\n'"subject line"$'\n'"EOF" "$REAL")")"
+case "$OUT" in
+  *hash=*) : ;;
+  *) fail "a commit reading its message from a heredoc was dropped"$'\n'"got: ${OUT:-<empty>}" ;;
+esac
+
+# --- 2c. a large command must not stall the hook -----------------------------
+# The first cut of the JSON decoder walked the value one character at a time and
+# took ~11 seconds on a 4 KB command. This hook runs after every Bash call.
+BIG="echo $(awk 'BEGIN{while(i++<4000)printf "a"}') && git commit -q -m x"
+START=$(date +%s)
+OUT="$(run_from "$REAL" "$(payload "$BIG" "$REAL")")"
+ELAPSED=$(( $(date +%s) - START ))
+case "$OUT" in
+  *hash=*) : ;;
+  *) fail "a 4KB command was not captured"$'\n'"got: ${OUT:-<empty>}" ;;
+esac
+[ "$ELAPSED" -le 3 ] || fail "hook took ${ELAPSED}s on a 4KB command; payload parsing is not linear enough for a PostToolUse hook"
+
 # --- 3. the failure guard must read the response, not the message ------------
 # The guard matched the entire payload, so a commit whose subject contained
 # `fatal:` or `error:` was discarded as a failure.
@@ -116,6 +150,23 @@ case "$OUT" in
   *hash=*) : ;;
   *) fail "a commit whose subject contains 'fatal:' was dropped"$'\n'"got: ${OUT:-<empty>}" ;;
 esac
+
+# The guard word has to appear in the COMMAND for this to pin the guard's scope.
+# A subject supplied via `-F -` never reaches the payload at all, so asserting on
+# one proves nothing about whether the guard reads the whole payload.
+for cmd in \
+  'git commit -q -m "fix: error: handling"' \
+  'git commit -q -m "guard fatal: paths"' \
+  'git commit -q -m "stop Aborting early"' \
+  'git commit -q -m "explain nothing to commit"' \
+  'git commit -q -m "add --dry-run flag"' \
+  "git commit -q -m 'add --dry-run flag'" ; do
+  OUT="$(run_from "$REAL" "$(payload "$cmd" "$REAL")")"
+  case "$OUT" in
+    *hash=*) : ;;
+    *) fail "guard matched the command text instead of the response: $cmd"$'\n'"got: ${OUT:-<empty>}" ;;
+  esac
+done
 
 for subj in 'fix: handle error: prefix' 'feat: add --dry-run flag' 'docs: the Aborting path'; do
   D="$WORK/subj-$RANDOM"
