@@ -42,10 +42,24 @@ cleanup_git_stub() {
   GIT_BIN_DIR=""
 }
 
-# Each case gets a fresh XDG_STATE_HOME: the hook records the captured sha to
-# suppress duplicates, and all 9 cases share one stubbed sha, so a shared state
-# dir would make every case after the first return empty. It also keeps the
-# suite from writing to the host's real state dir.
+# Each case gets a fresh XDG_STATE_HOME holding one PreToolUse HEAD snapshot: the
+# hook captures only when the snapshot shows HEAD moved, and it consumes the
+# snapshot, so a shared state dir would make every case after the first return
+# empty. It also keeps the suite from writing to the host's real state dir.
+# `sha=` is a value the stubbed HEAD cannot equal and `root=` is left empty so it
+# is not compared — these cases are about the vault_path parse, not the gate.
+new_state_home() {
+  local dir key
+  dir="$(mktemp -d)"
+  key="$(
+    . "${ROOT_DIR}/scripts/lib/commit-capture-parse.sh"
+    cc_snapshot_key "$1"
+  )"
+  mkdir -p "${dir}/claude-obsidian/pre-commit-head"
+  printf 'sha=1111111111111111111111111111111111111111\nroot=\n' \
+    > "${dir}/claude-obsidian/pre-commit-head/${key}"
+  printf '%s' "$dir"
+}
 # Run the script with a given config file and capture the printf output.
 # Returns the captured vault_path field value via stdout. Empty string if the
 # field is empty or the script took the silent-skip path.
@@ -55,9 +69,9 @@ run_case() {
   local input='{"tool_input":{"command":"git commit -m foo"},"tool_response":{"stdout":"[main abc1234] foo\n"}}'
   local out
   if [ -n "$plugin_root" ]; then
-    out=$(CLAUDE_PLUGIN_ROOT="$plugin_root" XDG_STATE_HOME="$(mktemp -d)" PATH="${GIT_BIN_DIR}:$PATH" bash "$SCRIPT" <<< "$input")
+    out=$(CLAUDE_PLUGIN_ROOT="$plugin_root" XDG_STATE_HOME="$(new_state_home "$input")" PATH="${GIT_BIN_DIR}:$PATH" bash "$SCRIPT" <<< "$input")
   else
-    out=$(env -u CLAUDE_PLUGIN_ROOT XDG_STATE_HOME="$(mktemp -d)" PATH="${GIT_BIN_DIR}:$PATH" bash "$SCRIPT" <<< "$input")
+    out=$(env -u CLAUDE_PLUGIN_ROOT XDG_STATE_HOME="$(new_state_home "$input")" PATH="${GIT_BIN_DIR}:$PATH" bash "$SCRIPT" <<< "$input")
   fi
   # Extract vault_path=<value>. It is no longer the last field — msg moved to the
   # end so a commit subject cannot inject a field ahead of a real one — so stop
@@ -71,9 +85,9 @@ run_case_raw() {
   local plugin_root="${2:-}"
   local input='{"tool_input":{"command":"git commit -m foo"},"tool_response":{"stdout":"[main abc1234] foo\n"}}'
   if [ -n "$plugin_root" ]; then
-    CLAUDE_PLUGIN_ROOT="$plugin_root" XDG_STATE_HOME="$(mktemp -d)" PATH="${GIT_BIN_DIR}:$PATH" bash "$SCRIPT" <<< "$input"
+    CLAUDE_PLUGIN_ROOT="$plugin_root" XDG_STATE_HOME="$(new_state_home "$input")" PATH="${GIT_BIN_DIR}:$PATH" bash "$SCRIPT" <<< "$input"
   else
-    env -u CLAUDE_PLUGIN_ROOT XDG_STATE_HOME="$(mktemp -d)" PATH="${GIT_BIN_DIR}:$PATH" bash "$SCRIPT" <<< "$input"
+    env -u CLAUDE_PLUGIN_ROOT XDG_STATE_HOME="$(new_state_home "$input")" PATH="${GIT_BIN_DIR}:$PATH" bash "$SCRIPT" <<< "$input"
   fi
 }
 
