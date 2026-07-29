@@ -20,7 +20,10 @@ make_git_stub() {
   GIT_BIN_DIR="$(mktemp -d "${TMPDIR:-/tmp}/cc-vp-git-XXXXXX")"
   cat > "${GIT_BIN_DIR}/git" <<'STUB'
 #!/usr/bin/env bash
+if [ "$1" = "-C" ]; then shift 2; fi
 case "$*" in
+  "log -1 --format=%ct") date +%s ;;
+  "rev-parse HEAD") echo 0123456789abcdef0123456789abcdef01234567 ;;
   "rev-parse --short HEAD") echo abc1234 ;;
   "log -1 --pretty=format:%s") echo "test commit" ;;
   "rev-parse --abbrev-ref HEAD") echo nh/feat/test ;;
@@ -39,6 +42,10 @@ cleanup_git_stub() {
   GIT_BIN_DIR=""
 }
 
+# Each case gets a fresh XDG_STATE_HOME: the hook records the captured sha to
+# suppress duplicates, and all 9 cases share one stubbed sha, so a shared state
+# dir would make every case after the first return empty. It also keeps the
+# suite from writing to the host's real state dir.
 # Run the script with a given config file and capture the printf output.
 # Returns the captured vault_path field value via stdout. Empty string if the
 # field is empty or the script took the silent-skip path.
@@ -48,12 +55,14 @@ run_case() {
   local input='{"tool_input":{"command":"git commit -m foo"},"tool_response":{"stdout":"[main abc1234] foo\n"}}'
   local out
   if [ -n "$plugin_root" ]; then
-    out=$(CLAUDE_PLUGIN_ROOT="$plugin_root" PATH="${GIT_BIN_DIR}:$PATH" bash "$SCRIPT" <<< "$input")
+    out=$(CLAUDE_PLUGIN_ROOT="$plugin_root" XDG_STATE_HOME="$(mktemp -d)" PATH="${GIT_BIN_DIR}:$PATH" bash "$SCRIPT" <<< "$input")
   else
-    out=$(env -u CLAUDE_PLUGIN_ROOT PATH="${GIT_BIN_DIR}:$PATH" bash "$SCRIPT" <<< "$input")
+    out=$(env -u CLAUDE_PLUGIN_ROOT XDG_STATE_HOME="$(mktemp -d)" PATH="${GIT_BIN_DIR}:$PATH" bash "$SCRIPT" <<< "$input")
   fi
-  # Extract vault_path=<value> field.
-  printf '%s' "$out" | sed -n 's/.* | vault_path=\(.*\)$/\1/p'
+  # Extract vault_path=<value>. It is no longer the last field — msg moved to the
+  # end so a commit subject cannot inject a field ahead of a real one — so stop
+  # at the next delimiter rather than running to end of line.
+  printf '%s' "$out" | sed -n 's/.* | vault_path=\(.*\) | msg=.*$/\1/p'
 }
 
 # Run and capture the raw output line (for asserting fields beyond vault_path).
@@ -62,9 +71,9 @@ run_case_raw() {
   local plugin_root="${2:-}"
   local input='{"tool_input":{"command":"git commit -m foo"},"tool_response":{"stdout":"[main abc1234] foo\n"}}'
   if [ -n "$plugin_root" ]; then
-    CLAUDE_PLUGIN_ROOT="$plugin_root" PATH="${GIT_BIN_DIR}:$PATH" bash "$SCRIPT" <<< "$input"
+    CLAUDE_PLUGIN_ROOT="$plugin_root" XDG_STATE_HOME="$(mktemp -d)" PATH="${GIT_BIN_DIR}:$PATH" bash "$SCRIPT" <<< "$input"
   else
-    env -u CLAUDE_PLUGIN_ROOT PATH="${GIT_BIN_DIR}:$PATH" bash "$SCRIPT" <<< "$input"
+    env -u CLAUDE_PLUGIN_ROOT XDG_STATE_HOME="$(mktemp -d)" PATH="${GIT_BIN_DIR}:$PATH" bash "$SCRIPT" <<< "$input"
   fi
 }
 
@@ -140,7 +149,7 @@ CASE_DIR="$(mktemp -d "${TMPDIR:-/tmp}/cc-vp-XXXXXX")"
 printf -- '---\nvault_path: /Users/test/v\n---\n' > "${CASE_DIR}/obsidian.local.md"
 OUT=$(run_case_raw "${CASE_DIR}/obsidian.local.md" "$CASE_DIR")
 case "$OUT" in
-  'obsidian-commit-capture: hash='*' | msg='*' | branch='*' | files='*' | org_repo='*' | repo_name='*' | ticket='*' | date='*' | time='*' | vault_path=/Users/test/v') ;;
+  'obsidian-commit-capture: hash='*' | branch='*' | files='*' | org_repo='*' | repo_name='*' | ticket='*' | date='*' | time='*' | vault_path=/Users/test/v | msg='*) ;;
   *) fail "case9 (schema): got '$OUT'" ;;
 esac
 PASS_COUNT=$((PASS_COUNT + 1))
