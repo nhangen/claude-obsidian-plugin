@@ -35,6 +35,13 @@ if ! keeper_is_owner "$LEASE" "$HOST" "$PRIORITY" "$MAXAGE"; then
   exit 0
 fi
 
+# Record the attempt below the ownership gate, so only the host that actually scans
+# claims one. staleness_banner needs it to read a missing last_scan correctly: with
+# no attempt it means nothing has tried yet (fresh install, or a host deferring to
+# the owner) and silence is right; with an attempt it means every try faulted, which
+# is the state the gate below withholds last_scan to signal.
+keeper_record_attempt "$VAULT"
+
 CONFLICTS="$(keeper_quarantine_conflicts "$VAULT" || true)"
 # Capture the scanners' stderr instead of letting it fly past. Every scanner
 # returns 0 unconditionally, so a truncated scan was indistinguishable from a
@@ -87,9 +94,10 @@ if [ -n "$SCAN_FAULT" ]; then
   # this check sat below it, in a file the user hand-edits and Syncthing replicates.
   # keeper_record_scan is withheld for the ordinary reason: last_scan's consumer is
   # staleness_banner (scripts/ask-staleness.sh), and a partial scan recorded as
-  # complete tells it the vault was fully examined. Note the banner only fires once a
-  # PREVIOUS last_scan ages out — a host that has never recorded one stays silent, so
-  # a latched fault here is invisible rather than loud. That gap is filed separately.
+  # complete tells it the vault was fully examined. Withholding it now actually
+  # reaches that consumer: the attempt recorded above the scan lets the banner tell a
+  # host whose every tick faulted from one that has never tried, so a fault latched
+  # from the first tick reads as "never completed a scan" instead of as silence.
   printf 'vaultkeeper: scan INCOMPLETE on %s — snapshot and Pending.md left untouched; scanners said: %s\n' \
     "$HOST" "$SCAN_FAULT" >&2
   exit 0

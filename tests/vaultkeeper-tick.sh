@@ -74,6 +74,16 @@ grep -q 'scan complete' "$FOUT" \
   && fail "a faulted scan reported itself complete; got: $(cat "$FOUT")"
 [ -f "$(keeper_last_scan_file "$SV")" ] \
   && fail "a faulted scan recorded last_scan, so the staleness banner will lie"
+# ...and withholding last_scan has to actually reach the consumer (#52). Before the
+# attempt file existed, this host — faulting from its very first tick, so with no
+# prior last_scan to age out — got silence from staleness_banner, identical to a
+# vault scanned a second ago. The gate was honest and the reader never heard it.
+[ -f "$(keeper_last_attempt_file "$SV")" ] \
+  || fail "a faulted tick recorded no attempt, so the banner cannot tell it from a fresh install"
+FBANNER="$(staleness_banner "$SV" 900)"
+[ -n "$FBANNER" ] \
+  || fail "a host whose only scans faulted still looks healthy to the banner"
+case "$FBANNER" in *"never completed"*) : ;; *) fail "banner did not name the real state: $FBANNER" ;; esac
 
 # --- a faulted tick must not touch the snapshot or Pending.md (#42, panel) ---
 # The first cut of the scan-fault gate sat BELOW surfacing_pending_transition, so a
