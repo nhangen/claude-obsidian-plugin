@@ -69,31 +69,31 @@ scan_open_asks() {
 # >= threshold distinct files. No associative arrays (bash 3.2 on the macOS
 # keeper host) — count via sort|uniq -c. Tokens are unique-per-file (sort -u),
 # so uniq -c across files = number of distinct files sharing the token.
+# One find over the whole vault, grouped by (dir, token) at the end. The previous
+# shape walked directories and opened a nested process substitution per directory
+# — two live fds per iteration — which exhausted the fd table under launchd and
+# truncated the candidate set while still returning 0. How much it dropped tracked
+# whatever fd headroom happened to exist at runtime: the same frozen 569-directory
+# vault came back with 503 clusters on an idle host and 211 under load, identical
+# through a pipe and through a file redirect, and with nothing on stderr in either
+# case. Emitting flat `dir<TAB>token` pairs through a single pipeline leaves one
+# process substitution for the whole scan, so there is no headroom to run out of.
 scan_clusters() {
-  local vault="$1" threshold="$2" dir base f tok cnt
-  while IFS= read -r dir; do
-    while read -r cnt tok; do
-      [ -z "$cnt" ] && continue
-      [ "$cnt" -ge "$threshold" ] \
-        && printf 'CLUSTER\t%s\t%s\t%s\n' "${dir#"$vault"/}" "$tok" "$cnt"
-    done < <(
-      while IFS= read -r f; do
-        base="$(basename "$f" .md)"
-        # Spaces are folded to the same separator before tokenizing: tokenize_slug
-        # splits on `-` only, and this vault has filenames with spaces. `sort -u`
-        # keeps the count "distinct files containing the token", not total
-        # occurrences.
-        printf '%s\n' "$base" | tr ' ' '-' | while IFS= read -r slug; do
-          tokenize_slug "$slug"
-        done | sort -u
-      done < <(find "$dir" -maxdepth 1 -type f -name '*.md') \
-        | sort | uniq -c
-    )
-  done < <(find "$vault" -type d \
-            ! -path '*/.obsidian' ! -path '*/.obsidian/*' \
-            ! -path '*/.trash'    ! -path '*/.trash/*' \
-            ! -path '*/.git'      ! -path '*/.git/*' \
-            ! -path '*/.vaultkeeper-quarantine' ! -path '*/.vaultkeeper-quarantine/*' \
-            ! -path '*/.vaultkeeper'            ! -path '*/.vaultkeeper/*')
+  local vault="$1" threshold="$2" f dir base slug rel
+  while IFS= read -r f; do
+    dir="${f%/*}"
+    base="${f##*/}"; base="${base%.md}"
+    # Spaces are folded to the same separator before tokenizing: tokenize_slug
+    # splits on `-` only, and this vault has filenames with spaces. `sort -u`
+    # keeps the count "distinct files containing the token", not total occurrences.
+    slug="${base// /-}"
+    rel="${dir#"$vault"/}"
+    tokenize_slug "$slug" | sort -u | while IFS= read -r tok; do
+      [ -n "$tok" ] && printf '%s\t%s\n' "$rel" "$tok"
+    done
+  done < <(_scan_find_md "$vault") \
+  | sort | uniq -c \
+  | sed 's/^ *\([0-9][0-9]*\) /\1'"$(printf '\t')"'/' \
+  | awk -F'\t' -v t="$threshold" '$1+0 >= t+0 { printf "CLUSTER\t%s\t%s\t%s\n", $2, $3, $1 }'
   return 0
 }

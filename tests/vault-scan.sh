@@ -168,4 +168,41 @@ for _flags in '' 'set -euo pipefail;'; do
     || fail "missing tokenizer was not named [flags: ${_flags:-none}]; got: $(cat "$TMP/vserr")"
 done
 
+# --- scan_clusters returns the whole vault under fd pressure (#42) ---
+# The per-directory `done < <(find "$dir" ...)` nested inside `< <(find "$vault"
+# -type d)` opened two process substitutions per directory, so the fd table ran out
+# on a real vault and the candidate set came back short — with rc=0. On the
+# maintainer's host every tick logged `cannot duplicate fd: Too many open files`
+# and then reported `scan complete`.
+#
+# What the loss depends on is available fds at runtime, and nothing else: the SAME
+# frozen 569-directory vault returned 503 clusters on an idle host and 211 under
+# load, identical through a pipe and through a file redirect, 0 bytes on stderr
+# both times. An earlier version of this test also asserted a pipe-vs-redirect
+# difference; there isn't one, and that arm passed against the unfixed code. A
+# forced `ulimit` squeeze is the only way to make the failure deterministic, which
+# is why there is one limit here and not a sweep — 256 and the default limit both
+# passed against the bug, so they pinned nothing and only cost runtime.
+FD="$TMP/fdvault"
+for _i in $(seq 1 120); do
+  # A space in the FOLDER name, not just the filename: the fix splits `uniq -c`
+  # output on a literal tab because this vault has folders like "Awesome Motive",
+  # and awk's default whitespace FS silently splits the folder into two fields.
+  # Without a space-bearing directory here, dropping `-F'\t'` passes the suite.
+  _d="$FD/Awesome Folder $_i"; mkdir -p "$_d"
+  for _j in 1 2 3; do printf -- '---\n---\n' > "$_d/topic$_i note $_j.md"; done
+done
+# 120 dirs x 3 files sharing 2 tokens each (topic<N>, note) = 240 clusters.
+FD_EXPECT=240
+_out="$(bash -c "ulimit -n 64; . '${ROOT_DIR}/scripts/lib/frontmatter.sh'; . '${ROOT_DIR}/scripts/lib/vault-scan.sh'; scan_clusters '$FD' 3" 2>"$TMP/fderr")" \
+  || fail "scan_clusters failed at ulimit 64"
+_n="$(printf '%s\n' "$_out" | grep -c '^CLUSTER' || true)"
+[ "$_n" = "$FD_EXPECT" ] \
+  || fail "ulimit 64: got $_n clusters, want $FD_EXPECT (scan truncated silently)"
+[ -s "$TMP/fderr" ] \
+  && fail "ulimit 64: scan wrote to stderr: $(cat "$TMP/fderr")"
+# The folder name must survive intact — this is what pins the tab-split.
+printf '%s\n' "$_out" | grep -qF "CLUSTER"$'\t'"Awesome Folder 7"$'\t'"note"$'\t'"3" \
+  || fail "space-bearing folder name was mangled: $(printf '%s\n' "$_out" | grep 'Awesome' | head -2)"
+
 echo "PASS: vault-scan"
