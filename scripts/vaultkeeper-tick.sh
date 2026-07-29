@@ -69,10 +69,14 @@ if [ -n "$SCAN_ERR" ] && [ -s "$SCAN_ERR" ]; then
   printf '%s\n' "$SCAN_FAULT" >&2
 fi
 
-# The order of these three is the whole point. Both survive a partial candidate set:
-# base_view_write takes only a path, and the digest is a full overwrite, so a
-# permanently-faulting host still surfaces something — which beats surfacing nothing,
-# the tradeoff that keeps them above the gate. The digest is told to say so.
+# These two stay above the gate because both survive a partial candidate set:
+# base_view_write's content does not depend on CAND, and the digest is a full
+# overwrite that nothing reads back. A permanently-faulting host therefore still
+# surfaces something, which beats surfacing nothing — and the digest is told to say
+# which it is. Caveat: keeper_quarantine_conflicts (line 38) already moved any sync
+# conflict irreversibly and emits its row once, so on a faulted tick that row never
+# reaches Pending.md and no later tick can re-emit it. The file is safely in
+# .vaultkeeper-quarantine either way; the missing checklist line is filed separately.
 base_view_write "$VAULT/_vaultkeeper.base"
 printf '%s\n' "$CAND" | surfacing_digest "$VAULT" "${SCAN_FAULT:+INCOMPLETE}"
 
