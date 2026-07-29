@@ -38,10 +38,10 @@ fi
 CONFLICTS="$(keeper_quarantine_conflicts "$VAULT" || true)"
 # Capture the scanners' stderr instead of letting it fly past. Every scanner
 # returns 0 unconditionally, so a truncated scan was indistinguishable from a
-# complete one and got recorded as complete — for 710 consecutive ticks on the
-# maintainer's host, each one logging `Too many open files` immediately above
-# `scan complete`. A scan whose scanners complained is not a scan we can
-# describe as done; see the SCAN_ERR gate below keeper_record_scan.
+# complete one and got recorded as complete — for every one of 700+ consecutive
+# ticks on the maintainer's host, each logging `Too many open files` immediately
+# above `scan complete`. A scan whose scanners complained is not a scan we can
+# describe as done; the gate below sits between the digest and the snapshot.
 SCAN_FAULT=""
 SCAN_ERR="$(mktemp "${TMPDIR:-/tmp}/kbscan-XXXXXX" 2>/dev/null)" || SCAN_ERR=""
 if [ -n "$SCAN_ERR" ]; then

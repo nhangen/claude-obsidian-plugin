@@ -41,12 +41,13 @@ run_tick "mbp"
 [ ! -f "$V/Librarian.md" ] || fail "non-owner must not write Librarian.md"
 
 # --- a scan whose scanners complained is not recorded as complete (#42) ---
-# 710 consecutive ticks on the maintainer's host logged `Too many open files`
+# 700+ consecutive ticks on the maintainer's host logged `Too many open files`
 # from vault-scan.sh and then `scan complete`, so last_scan advanced on a
-# truncated candidate set. last_scan drives /obsidian:ask's staleness banner and
-# the owner-election window; recording a partial scan tells both the vault was
-# fully examined. The fd bug is fixed in vault-scan.sh, but the gate has to exist
-# independently — any future scanner fault must reach the same conclusion.
+# truncated candidate set. last_scan's only consumer is /obsidian:ask's staleness
+# banner (via scripts/ask-staleness.sh) — NOT owner election, which reads
+# claim-file mtimes and never looks at last_scan. The fd bug is fixed in
+# vault-scan.sh, but the gate has to exist independently — any future scanner
+# fault must reach the same conclusion.
 SV="$TMP/faultvault"; mkdir -p "$SV/Inbox"
 printf -- '---\ntags: [x]\n---\nbody\n' > "$SV/n.md"
 FCFG="$TMP/fault.local.md"

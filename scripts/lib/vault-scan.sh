@@ -72,10 +72,12 @@ scan_open_asks() {
 # One find over the whole vault, grouped by (dir, token) at the end. The previous
 # shape walked directories and opened a nested process substitution per directory
 # — two live fds per iteration — which exhausted the fd table under launchd and
-# truncated the candidate set while still returning 0. It also lost 58% of its
-# output whenever stdout was a plain pipe, with nothing on stderr. Emitting flat
-# `dir<TAB>token` pairs through a single pipeline has one process substitution for
-# the entire scan, so neither failure has anywhere to happen.
+# truncated the candidate set while still returning 0. How much it dropped tracked
+# whatever fd headroom happened to exist at runtime: the same frozen 569-directory
+# vault came back with 503 clusters on an idle host and 211 under load, identical
+# through a pipe and through a file redirect, and with nothing on stderr in either
+# case. Emitting flat `dir<TAB>token` pairs through a single pipeline leaves one
+# process substitution for the whole scan, so there is no headroom to run out of.
 scan_clusters() {
   local vault="$1" threshold="$2" f dir base slug rel
   while IFS= read -r f; do
