@@ -74,4 +74,39 @@ grep -q 'scan complete' "$FOUT" \
 [ -f "$(keeper_last_scan_file "$SV")" ] \
   && fail "a faulted scan recorded last_scan, so the staleness banner will lie"
 
+# --- a faulted tick must not touch the snapshot or Pending.md (#42, panel) ---
+# The first cut of the scan-fault gate sat BELOW surfacing_pending_transition, so a
+# faulted tick overwrote the snapshot with the truncated candidate set and the next
+# healthy tick re-appended everything the short scan had missed. Measured at 3
+# duplicated items over 4 fault/heal cycles — in a file the user hand-edits and
+# Syncthing replicates. The digest still runs on a partial set (a permanently
+# faulting host surfacing nothing is worse than one surfacing a short list), so it
+# has to say so: `scan_status: INCOMPLETE`.
+CV="$TMP/cyclevault"; mkdir -p "$CV/Inbox"
+for _n in 1 2 3; do printf -- '---\ntags: [x]\n---\nbody has [ask:q%s] here\n' "$_n" > "$CV/note$_n.md"; done
+CCFG="$TMP/cycle.local.md"; sed "s|^vault_path: .*|vault_path: $CV|" "$CFG" > "$CCFG"
+# A scanner that faults on stderr and emits nothing — the shape every scanner has.
+FLIB2="$TMP/cyclelib"; mkdir -p "$FLIB2"; cp "${ROOT_DIR}"/scripts/lib/*.sh "$FLIB2/"
+cat >> "$FLIB2/vault-scan.sh" <<'EOF'
+scan_open_asks() { printf 'vault-scan.sh: CYCLE-FAULT\n' >&2; return 0; }
+EOF
+FS2="$TMP/cyclescripts"; mkdir -p "$FS2"; cp "${ROOT_DIR}"/scripts/*.sh "$FS2/" 2>/dev/null || true
+cp -R "$FLIB2" "$FS2/lib"
+HEALTHY="$TMP/healthyscripts"; mkdir -p "$HEALTHY"; cp "${ROOT_DIR}"/scripts/*.sh "$HEALTHY/" 2>/dev/null || true
+cp -R "${ROOT_DIR}/scripts/lib" "$HEALTHY/lib"
+run_cycle() { OBSIDIAN_LOCAL_MD="$CCFG" VAULTKEEPER_HOST="ml-1" bash "$1/vaultkeeper-tick.sh" >"$TMP/cyc.out" 2>&1 || fail "tick aborted: $(cat "$TMP/cyc.out")"; }
+for _c in 1 2 3 4; do
+  run_cycle "$HEALTHY"
+  run_cycle "$FS2"
+done
+[ -f "$CV/Librarian.md" ] \
+  || fail "faulted tick left no Librarian.md — a degraded host must still surface something"
+grep -q 'scan_status: INCOMPLETE' "$CV/Librarian.md" \
+  || fail "digest written from a faulted scan does not say so: $(head -5 "$CV/Librarian.md")"
+if [ -f "$CV/Pending.md" ]; then
+  _dups="$(grep '^- \[ \]' "$CV/Pending.md" | sort | uniq -d | wc -l | tr -d ' ')"
+  [ "$_dups" = "0" ] \
+    || fail "fault/heal cycles duplicated $_dups Pending.md item(s): $(grep '^- \[ \]' "$CV/Pending.md" | sort | uniq -d | head -3)"
+fi
+
 echo "PASS: vaultkeeper-tick"

@@ -58,17 +58,28 @@ if [ -n "$SCAN_ERR" ] && [ -s "$SCAN_ERR" ]; then
 fi
 [ -n "$SCAN_ERR" ] && rm -f "$SCAN_ERR"
 
+# The order of these three is the whole point. Both survive a partial candidate set:
+# base_view_write takes only a path, and the digest is a full overwrite, so a
+# permanently-faulting host still surfaces something — which beats surfacing nothing,
+# the tradeoff that keeps them above the gate. The digest is told to say so.
 base_view_write "$VAULT/_vaultkeeper.base"
-printf '%s\n' "$CAND" | surfacing_digest "$VAULT"
-printf '%s\n' "$CAND" | surfacing_pending_transition "$VAULT"
+printf '%s\n' "$CAND" | surfacing_digest "$VAULT" "${SCAN_FAULT:+INCOMPLETE}"
+
 if [ -n "$SCAN_FAULT" ]; then
-  # Deliberately do NOT record the scan. last_scan drives the staleness banner in
-  # /obsidian:ask and the owner-election window; recording a partial scan tells
-  # both that the vault was fully examined. Leaving it unrecorded makes the
-  # banner report stale, which is the true state, and the next tick retries.
-  printf 'vaultkeeper: scan INCOMPLETE on %s — not recorded as complete (candidates may be short); scanners said: %s\n' \
+  # Stop before the snapshot. surfacing_pending_transition diffs against it and then
+  # overwrites it, so a truncated set makes the next healthy tick re-append
+  # everything this scan missed — 3 duplicated items over 4 fault/heal cycles when
+  # this check sat below it, in a file the user hand-edits and Syncthing replicates.
+  # keeper_record_scan is withheld for the ordinary reason: last_scan's consumer is
+  # staleness_banner (scripts/ask-staleness.sh), and a partial scan recorded as
+  # complete tells it the vault was fully examined. Note the banner only fires once a
+  # PREVIOUS last_scan ages out — a host that has never recorded one stays silent, so
+  # a latched fault here is invisible rather than loud. That gap is filed separately.
+  printf 'vaultkeeper: scan INCOMPLETE on %s — snapshot and Pending.md left untouched; scanners said: %s\n' \
     "$HOST" "$SCAN_FAULT" >&2
   exit 0
 fi
+
+printf '%s\n' "$CAND" | surfacing_pending_transition "$VAULT"
 keeper_record_scan "$VAULT"
 echo "vaultkeeper: scan complete ($HOST)"

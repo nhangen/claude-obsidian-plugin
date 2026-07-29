@@ -3,13 +3,19 @@
 # append only genuinely-new candidates to Pending.md (transition-gated against
 # the prior-scan snapshot). Requires note-hash.sh + keeper-state.sh.
 
+# surfacing_digest <vault> [status]
+# `status` is stamped as `scan_status:` when non-empty. The caller passes INCOMPLETE
+# when the scanners faulted: this file is the human-facing artifact and it was
+# claiming a fresh full scan — timestamp AND section counts — on ticks the keeper
+# itself refused to record as complete.
 surfacing_digest() {
-  local vault="$1" lines tmp target="$1/Librarian.md" kind label
+  local vault="$1" status="${2:-}" lines tmp target="$1/Librarian.md" kind label
   lines="$(cat)"
   tmp="$(mktemp "$vault/.Librarian-XXXXXX")" || return 1
   {
     printf '%s\n' '<!-- MACHINE-OWNED: regenerated each vaultkeeper scan. Edits do not persist. -->'
     printf '# Librarian\n\nlast_scan: %s\n' "$(now_epoch)"
+    [ -n "$status" ] && printf 'scan_status: %s\n' "$status"
     for kind in GAP UNFILED ASK CLUSTER QUARANTINE; do
       if [ "$kind" = "GAP" ]; then label="Frontmatter gaps"
       elif [ "$kind" = "UNFILED" ]; then label="Unfiled (Inbox)"
