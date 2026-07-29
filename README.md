@@ -10,7 +10,7 @@ Long Claude sessions and the commits they produce hold context that's gone the m
 
 - A **Stop hook** runs at session end; if the session is significant, a background `claude --print` summarizer writes a structured note to your vault.
 - Session capture infers `session_intent`, `capture_action`, and `research_state_change` with confidence scores and evidence bullets, so routing can distinguish execution, research, planning, operations, reflection, scratch work, and claim/evidence changes that should land in the Research Substrate.
-- A **PostToolUse hook** on `Bash` detects successful `git commit` calls and appends goal / investigation / decision / loose-ends bullets to a per-repo daily file.
+- A **PreToolUse/PostToolUse hook pair** on `Bash` notices when a `git commit` actually moved `HEAD` and appends goal / investigation / decision / loose-ends bullets to a per-repo daily file.
 - **Slash commands** (skills) cover the manual paths: save, find, recall, daily, new, bookmark, setup.
 - **Routing** is driven by `obsidian.local.md` — a vault path and a keyword-based domain taxonomy you edit directly.
 
@@ -114,9 +114,12 @@ The keeper writes only to the Obsidian vault (`vault_path` from `obsidian.local.
 |---|---|---|
 | `SessionStart` | `scripts/config-doctor.sh` | If the plugin is installed but unconfigured on this host (no `obsidian.local.md`) while a synced vault is detectable, surfaces an advisory so the agent can offer `/obsidian:setup`. Silent once configured, and silent on hosts with no vault. Advisory only — a hook can't prompt. |
 | `Stop` | `scripts/session-save.sh` | Auto-saves significant sessions via background `claude --print` summarizer. Skips trivial sessions. |
-| `PostToolUse` (Bash) | `scripts/commit-capture.sh` | After a successful `git commit`, appends a context block to `<vault>/Projects/Development/<org>_<repo>/<YYYY-MM-DD>.md`. Per-repo overrides supported (e.g. `altamira2/mtf-builder` → flat `<vault>/Altamira/<date>-mtf-builder-commits.md`). |
+| `PreToolUse` (Bash) | `scripts/commit-capture-pre.sh` | For a Bash call that is about to run `git commit`, records the repo's current `HEAD`. Writes nothing else, and always exits 0 — a PreToolUse hook that fails would block the command. |
+| `PostToolUse` (Bash) | `scripts/commit-capture.sh` | If `HEAD` moved during the call, appends a context block to `<vault>/Projects/Development/<org>_<repo>/<YYYY-MM-DD>.md`. Per-repo overrides supported (e.g. `altamira2/mtf-builder` → flat `<vault>/Altamira/<date>-mtf-builder-commits.md`). |
 
-The PostToolUse hook is gated — it inspects the Bash command first and exits silently for non-commit calls, so it doesn't interrupt normal tool flow.
+Both hooks are gated — they inspect the Bash command first and exit silently for non-commit calls, so they don't interrupt normal tool flow.
+
+**The two halves are one mechanism: register both or neither.** Whether a commit landed is decided by comparing `HEAD` before the call against `HEAD` after, which is the only signal that actually distinguishes a commit from a `git commit` that was rejected, aborted, short-circuited by `false &&`, or had nothing to commit. With only the PostToolUse half wired up there is no "before", and the hook says so on stderr rather than guessing from the command text.
 
 ## Examples
 
@@ -188,8 +191,9 @@ Per-repo commit-capture overrides go in the same file under a `## Commit Capture
 .claude-plugin/plugin.json    Plugin manifest
 commands/*.md                 Slash command entry points
 skills/*/SKILL.md             Skill logic (save, find, recall, setup, …)
-hooks/hooks.json              Stop + PostToolUse hook registration
+hooks/hooks.json              Stop + Pre/PostToolUse hook registration
 scripts/                      Hook executables (commit-capture, session-save, …)
+scripts/lib/commit-capture-parse.sh Payload decoding + repo resolution shared by the commit-capture hook pair
 scripts/lib/resolve-config.sh Version-independent config-path resolver
 scripts/lib/allowlist-validate.sh Frontmatter/path allowlist validation shared by writers
 scripts/lib/dedup-scan.sh     Shared dedup-against-existing-notes scan

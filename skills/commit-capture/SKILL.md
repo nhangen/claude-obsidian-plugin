@@ -1,7 +1,7 @@
 ---
 name: commit-capture
 description: Captures conversation context around git commits to Obsidian vault. Fires automatically via PostToolUse hook.
-version: 2.2.0
+version: 2.3.0
 ---
 
 # Commit Capture
@@ -10,7 +10,9 @@ The value here is not commit metadata — git already has that. The value is the
 
 ## Architecture
 
-Detection and metadata extraction are handled by `scripts/commit-capture.sh` (shell script, zero AI cost). This skill is invoked when the hook outputs a line starting with `obsidian-commit-capture:` — all metadata is inline, no file read needed.
+Detection and metadata extraction are handled by two shell hooks (zero AI cost): `scripts/commit-capture-pre.sh` records `HEAD` before a `git commit` runs, and `scripts/commit-capture.sh` captures only if `HEAD` moved. This skill is invoked when the post-hook outputs a line starting with `obsidian-commit-capture:` — all metadata is inline, no file read needed.
+
+A line beginning `obsidian-commit-capture: not captured —` is a diagnostic on stderr, not a record. Do not treat it as metadata and do not write a note for it; surface the reason if the user asks why a commit went uncaptured.
 
 The actual write goes through the **keeper CLI** (`scripts/keeper append`) — the
 keeper's deterministic write primitive. The CLI creates the file on absence,
