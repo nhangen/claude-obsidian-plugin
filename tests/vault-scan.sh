@@ -168,4 +168,38 @@ for _flags in '' 'set -euo pipefail;'; do
     || fail "missing tokenizer was not named [flags: ${_flags:-none}]; got: $(cat "$TMP/vserr")"
 done
 
+# --- scan_clusters survives a low fd limit and a piped stdout (#42) ---
+# The per-directory `done < <(find "$dir" ...)` nested inside `< <(find "$vault"
+# -type d)` opened two process substitutions per directory. Under launchd's fd
+# limit that exhausts the table on a real vault: every tick on the maintainer's
+# host logged `cannot duplicate fd: Too many open files` and still reported
+# `scan complete`. The candidate set was silently 58-82% short.
+#
+# Two independent failure modes, both pinned here:
+#   1. fd pressure  — 88/503 clusters at ulimit 64, 211/503 at 128 and 256.
+#   2. piped stdout — a bare `scan_clusters | cmd` returned 211/503 even with
+#      no fd limit at all and NOTHING on stderr. Deterministic, and invisible.
+FD="$TMP/fdvault"
+for _i in $(seq 1 120); do
+  _d="$FD/Folder$_i"; mkdir -p "$_d"
+  for _j in 1 2 3; do printf -- '---\n---\n' > "$_d/topic$_i note $_j.md"; done
+done
+# 120 dirs x 3 files sharing 2 tokens each (topic<N>, note) = 240 clusters.
+FD_EXPECT=240
+for _lim in 64 256 ''; do
+  _pre=""; [ -n "$_lim" ] && _pre="ulimit -n $_lim;"
+  _out="$(bash -c "${_pre} . '${ROOT_DIR}/scripts/lib/frontmatter.sh'; . '${ROOT_DIR}/scripts/lib/vault-scan.sh'; scan_clusters '$FD' 3" 2>"$TMP/fderr")" \
+    || fail "scan_clusters failed at ulimit ${_lim:-default}"
+  _n="$(printf '%s\n' "$_out" | grep -c '^CLUSTER' || true)"
+  [ "$_n" = "$FD_EXPECT" ] \
+    || fail "ulimit ${_lim:-default}: got $_n clusters, want $FD_EXPECT (scan truncated silently)"
+  [ -s "$TMP/fderr" ] \
+    && fail "ulimit ${_lim:-default}: scan wrote to stderr: $(cat "$TMP/fderr")"
+done
+# Piped stdout must produce the same count as a file redirect. This is the arm
+# that fails with no fd limit and no error output.
+_piped="$(bash -c ". '${ROOT_DIR}/scripts/lib/frontmatter.sh'; . '${ROOT_DIR}/scripts/lib/vault-scan.sh'; scan_clusters '$FD' 3 | grep -c '^CLUSTER'" 2>/dev/null)"
+[ "$_piped" = "$FD_EXPECT" ] \
+  || fail "piped stdout: got $_piped clusters, want $FD_EXPECT (output lost to a pipe)"
+
 echo "PASS: vault-scan"
