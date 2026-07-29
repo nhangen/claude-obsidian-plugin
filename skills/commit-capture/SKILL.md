@@ -28,8 +28,13 @@ Vault path is passed inline by the hook (parsed once from the resolved config �
 ## Steps
 
 1. **Parse inline metadata** from the hook output line:
-   `obsidian-commit-capture: hash=<h> | msg=<m> | branch=<b> | files=<f> | org_repo=<o> | repo_name=<r> | ticket=<t> | date=<d> | time=<ti> | vault_path=<v>`
-   Extract: `hash`, `msg`, `branch`, `files`, `org_repo`, `repo_name`, `ticket`, `date`, `time`, `vault_path`.
+   `obsidian-commit-capture: hash=<h> | branch=<b> | files=<f> | org_repo=<o> | repo_name=<r> | ticket=<t> | date=<d> | time=<ti> | vault_path=<v> | msg=<m>`
+   Extract: `hash`, `branch`, `files`, `org_repo`, `repo_name`, `ticket`, `date`, `time`, `vault_path`, `msg`.
+
+   `msg` is last and everything after `msg=` belongs to it. It is the one
+   free-form field — a commit author writes it — so it cannot precede a field you
+   resolve into a path. Take the **first** match for every other field, and never
+   re-read a field name out of `msg`.
 
 2. **Target** (relative to `vault_path`): `Projects/Development/<org_repo>/<date>.md`.
 

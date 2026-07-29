@@ -59,8 +59,10 @@ run_case() {
   else
     out=$(env -u CLAUDE_PLUGIN_ROOT XDG_STATE_HOME="$(mktemp -d)" PATH="${GIT_BIN_DIR}:$PATH" bash "$SCRIPT" <<< "$input")
   fi
-  # Extract vault_path=<value> field.
-  printf '%s' "$out" | sed -n 's/.* | vault_path=\(.*\)$/\1/p'
+  # Extract vault_path=<value>. It is no longer the last field — msg moved to the
+  # end so a commit subject cannot inject a field ahead of a real one — so stop
+  # at the next delimiter rather than running to end of line.
+  printf '%s' "$out" | sed -n 's/.* | vault_path=\(.*\) | msg=.*$/\1/p'
 }
 
 # Run and capture the raw output line (for asserting fields beyond vault_path).
@@ -147,7 +149,7 @@ CASE_DIR="$(mktemp -d "${TMPDIR:-/tmp}/cc-vp-XXXXXX")"
 printf -- '---\nvault_path: /Users/test/v\n---\n' > "${CASE_DIR}/obsidian.local.md"
 OUT=$(run_case_raw "${CASE_DIR}/obsidian.local.md" "$CASE_DIR")
 case "$OUT" in
-  'obsidian-commit-capture: hash='*' | msg='*' | branch='*' | files='*' | org_repo='*' | repo_name='*' | ticket='*' | date='*' | time='*' | vault_path=/Users/test/v') ;;
+  'obsidian-commit-capture: hash='*' | branch='*' | files='*' | org_repo='*' | repo_name='*' | ticket='*' | date='*' | time='*' | vault_path=/Users/test/v | msg='*) ;;
   *) fail "case9 (schema): got '$OUT'" ;;
 esac
 PASS_COUNT=$((PASS_COUNT + 1))
