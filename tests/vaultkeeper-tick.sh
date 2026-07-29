@@ -40,4 +40,38 @@ rm -f "$V/Librarian.md"
 run_tick "mbp"
 [ ! -f "$V/Librarian.md" ] || fail "non-owner must not write Librarian.md"
 
+# --- a scan whose scanners complained is not recorded as complete (#42) ---
+# 710 consecutive ticks on the maintainer's host logged `Too many open files`
+# from vault-scan.sh and then `scan complete`, so last_scan advanced on a
+# truncated candidate set. last_scan drives /obsidian:ask's staleness banner and
+# the owner-election window; recording a partial scan tells both the vault was
+# fully examined. The fd bug is fixed in vault-scan.sh, but the gate has to exist
+# independently — any future scanner fault must reach the same conclusion.
+SV="$TMP/faultvault"; mkdir -p "$SV/Inbox"
+printf -- '---\ntags: [x]\n---\nbody\n' > "$SV/n.md"
+FCFG="$TMP/fault.local.md"
+sed "s|^vault_path: .*|vault_path: $SV|" "$CFG" > "$FCFG"
+# Shadow one scanner with a version that writes to stderr and still returns 0 —
+# exactly the shape every scanner has today.
+FLIB="$TMP/faultlib"; mkdir -p "$FLIB"
+cp "${ROOT_DIR}"/scripts/lib/*.sh "$FLIB/"
+cat >> "$FLIB/vault-scan.sh" <<'EOF'
+scan_open_asks() { printf 'vault-scan.sh: SIMULATED-SCANNER-FAULT\n' >&2; return 0; }
+EOF
+FSCRIPTS="$TMP/faultscripts"; mkdir -p "$FSCRIPTS"
+cp "${ROOT_DIR}"/scripts/*.sh "$FSCRIPTS/" 2>/dev/null || true
+cp -R "$FLIB" "$FSCRIPTS/lib"
+FOUT="$TMP/fault.out"
+OBSIDIAN_LOCAL_MD="$FCFG" VAULTKEEPER_HOST="ml-1" \
+  bash "$FSCRIPTS/vaultkeeper-tick.sh" >"$FOUT" 2>&1 \
+  || fail "a scanner fault must not abort the tick; got: $(cat "$FOUT")"
+grep -q 'SIMULATED-SCANNER-FAULT' "$FOUT" \
+  || fail "the scanner's own words were dropped; got: $(cat "$FOUT")"
+grep -q 'scan INCOMPLETE' "$FOUT" \
+  || fail "a faulted scan was not named incomplete; got: $(cat "$FOUT")"
+grep -q 'scan complete' "$FOUT" \
+  && fail "a faulted scan reported itself complete; got: $(cat "$FOUT")"
+[ -f "$(keeper_last_scan_file "$SV")" ] \
+  && fail "a faulted scan recorded last_scan, so the staleness banner will lie"
+
 echo "PASS: vaultkeeper-tick"
