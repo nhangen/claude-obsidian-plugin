@@ -46,6 +46,56 @@ grep -qE '^## [0-9]{2}:[0-9]{2} — entry' "$V/Notes/y.md" || fail "default sect
 printf 'stdin body\n' | bash "$KEEPER" append --vault "$V" --target "Notes/s.md" --section '## s — t' >/dev/null
 grep -q '^stdin body' "$V/Notes/s.md" || fail "stdin body not appended"
 
+# --- --skip-if-hash: the append is idempotent per commit sha ---
+#
+# The capture gate this replaces lived in a host-local state dir while the vault
+# is Syncthing-replicated (#62), so it could not see the note it was protecting.
+# The note itself is the shared record, and it is what the guard reads.
+
+# 15. a second append for a sha the target already has a section for is a no-op:
+#     no new section, no duplicated body, and the reason goes to stderr.
+S="$V/Projects/foo/2026-06-29.md"
+BEFORE="$(cat "$S")"
+printf 'a second capture of the same commit\n' > "$TMP/dup.md"
+bash "$KEEPER" append --vault "$V" --target "Projects/foo/2026-06-29.md" \
+  --section '## 16:45 — abc1234' --body-file "$TMP/dup.md" --skip-if-hash abc1234 \
+  >"$TMP/skip.out" 2>"$TMP/skip.err" \
+  || fail "--skip-if-hash on an already-captured sha must exit 0, not fail"
+[ "$(cat "$S")" = "$BEFORE" ] \
+  || fail "--skip-if-hash appended anyway; the target changed:"$'\n'"$(diff <(printf '%s\n' "$BEFORE") "$S" || true)"
+grep -q 'skipped' "$TMP/skip.err" \
+  || fail "the skip was silent — nothing on stderr said why nothing was written:"$'\n'"$(cat "$TMP/skip.err")"
+grep -qF "Projects/foo/2026-06-29.md" "$TMP/skip.out" \
+  || fail "skip did not print the target path on stdout, so a caller cannot tell which note holds it"
+
+# 16. a sha the target does NOT have appends normally — the guard is per sha, not
+#     a blanket "this file already exists" refusal.
+bash "$KEEPER" append --vault "$V" --target "Projects/foo/2026-06-29.md" \
+  --section '## 17:00 — 99f00d5' --body-file "$TMP/dup.md" --skip-if-hash 99f00d5 >/dev/null
+grep -q '^## 17:00 — 99f00d5' "$S" || fail "--skip-if-hash blocked an sha the note did not have"
+
+# 17. the guard reads section headings, not prose. A context bullet is free to
+#     mention another commit's sha; matching anywhere in the file would then
+#     silently drop that commit's own record.
+printf 'reverts deadbee, see also deadbee\n' > "$TMP/prose.md"
+bash "$KEEPER" append --vault "$V" --target "Notes/prose.md" \
+  --section '## 12:00 — 1111111' --body-file "$TMP/prose.md" >/dev/null
+bash "$KEEPER" append --vault "$V" --target "Notes/prose.md" \
+  --section '## 12:05 — deadbee' --body-file "$TMP/b.md" --skip-if-hash deadbee >/dev/null
+grep -q '^## 12:05 — deadbee' "$V/Notes/prose.md" \
+  || fail "a sha mentioned in body prose was read as an existing section, dropping the record"
+
+# 18. a malformed --skip-if-hash fails loudly. Silently treating an unusable
+#     value as "no guard" turns a typo into a duplicate note, which is the
+#     failure this flag exists to prevent.
+bash "$KEEPER" append --vault "$V" --target "Notes/bad.md" --section x \
+  --body-file "$TMP/b.md" --skip-if-hash "not-a-sha" 2>/dev/null \
+  && fail "non-hex --skip-if-hash must fail rather than append unguarded"
+[ -f "$V/Notes/bad.md" ] && fail "a rejected --skip-if-hash still wrote the note"
+bash "$KEEPER" append --vault "$V" --target "Notes/bad.md" --section x \
+  --body-file "$TMP/b.md" --skip-if-hash "" 2>/dev/null \
+  && fail "empty --skip-if-hash must fail rather than append unguarded"
+
 # --- validation guards (each must exit non-zero) ---
 
 # 7. unknown subcommand

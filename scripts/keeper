@@ -44,7 +44,7 @@ keeper_guard_target() {
 
 # append a timestamped section to a dated note, creating it on absence.
 cmd_append() {
-  local vault="" target="" date="" section="" body_file="" init_file=""
+  local vault="" target="" date="" section="" body_file="" init_file="" skip_hash="" skip_given=0
   while [ $# -gt 0 ]; do
     case "$1" in
       --vault)     vault="${2:-}";     shift 2 ;;
@@ -53,6 +53,7 @@ cmd_append() {
       --section)   section="${2:-}";   shift 2 ;;
       --body-file) body_file="${2:-}"; shift 2 ;;
       --init-file) init_file="${2:-}"; shift 2 ;;
+      --skip-if-hash) skip_hash="${2:-}"; skip_given=1; shift 2 ;;
       *) keeper_die "append: unknown arg: $1" ;;
     esac
   done
@@ -68,6 +69,30 @@ cmd_append() {
   local full parent
   full="$vault_abs/$target"
   parent="$(dirname "$full")"
+
+  # Idempotency, read from the vault rather than from a host-local marker (#62).
+  # The old commit-capture gate kept its key under XDG_STATE_HOME, which never
+  # syncs, so it could not see the note it was protecting: two hosts committing
+  # to the same repo each captured, and so did one host re-running after a
+  # Syncthing conflict copy. The note is the shared record; ask it.
+  #
+  # Section headings only. A context bullet legitimately names other commits'
+  # shas ("reverts deadbee"), so matching anywhere in the file would drop that
+  # commit's own record instead of its duplicate.
+  if [ "$skip_given" = 1 ]; then
+    case "$skip_hash" in
+      '') keeper_die "append: --skip-if-hash requires a value" ;;
+      *[!0-9a-fA-F]*) keeper_die "append: --skip-if-hash must be a hex sha: $skip_hash" ;;
+      *)
+        if [ -f "$full" ] && grep -qE "^#{1,6}[[:space:]].*[[:space:]]${skip_hash}[[:space:]]*\$" "$full"; then
+          printf 'keeper: append skipped — %s already has a section for %s\n' "$target" "$skip_hash" >&2
+          printf '%s\n' "$full"
+          return 0
+        fi
+        ;;
+    esac
+  fi
+
   mkdir -p "$parent"
 
   if [ ! -f "$full" ]; then
