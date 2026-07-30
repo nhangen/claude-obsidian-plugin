@@ -174,6 +174,43 @@ KEEPER_OS="Darwin" keeper_ensure_active "$CFG2" "$VAULT2" 900 \
   || fail "ensure_active returned non-zero on opt-out config"
 [ ! -s "$CALLS2" ] || fail "keeper_autostart:false still installed: $(cat "$CALLS2")"
 
+# --- the opt-out survives a broken pipeline stage (#45) ----------------------
+# The single `|| autostart=""` had to absorb grep's exit 1 on a config without the
+# key, but it absorbed a failure in `head` or `sed` too — and an empty autostart
+# means "not false", so a broken stage silently overrode a documented opt-out and
+# installed the scheduler. Break `sed` on PATH and the opt-out must still hold.
+BSED="$WORK/brokensed"; mkdir -p "$BSED"
+printf '#!/usr/bin/env bash\nexit 1\n' > "$BSED/sed"; chmod +x "$BSED/sed"
+printf '#!/usr/bin/env bash\nexit 1\n' > "$BSED/head"; chmod +x "$BSED/head"
+: > "$CALLS2"
+PATH="$BSED:$PATH" KEEPER_OS="Darwin" keeper_ensure_active "$CFG2" "$VAULT2" 900 2>/dev/null \
+  || fail "a broken pipeline stage must not make ensure_active non-zero"
+[ ! -s "$CALLS2" ] \
+  || fail "a broken sed/head overrode keeper_autostart:false and installed anyway: $(cat "$CALLS2")"
+
+# …and the same for a value that is neither true nor false. Guessing "install"
+# there installs a scheduler against something the user typed on purpose.
+CFG3="$WORK/typo.local.md"; VAULT3="$WORK/vault3"
+printf -- '---\nvault_path: %s\nkeeper_autostart: flase\n---\n' "$VAULT3" > "$CFG3"
+mk_vault "$VAULT3"
+: > "$CALLS2"
+TERR="$(KEEPER_OS="Darwin" keeper_ensure_active "$CFG3" "$VAULT3" 900 2>&1 >/dev/null)" \
+  || fail "an unrecognised keeper_autostart made ensure_active non-zero"
+[ ! -s "$CALLS2" ] \
+  || fail "an unrecognised keeper_autostart was treated as consent to install: $(cat "$CALLS2")"
+grep -q 'keeper_autostart' <<<"$TERR" \
+  || fail "an unrecognised keeper_autostart was skipped silently: [$TERR]"
+
+# An explicit true still installs — the refusal above must not swallow the yes.
+CFG4="$WORK/explicit.local.md"; VAULT4="$WORK/vault4"
+printf -- '---\nvault_path: %s\nkeeper_autostart: true\n---\n' "$VAULT4" > "$CFG4"
+mk_vault "$VAULT4"
+: > "$CALLS2"
+KEEPER_OS="Darwin" keeper_ensure_active "$CFG4" "$VAULT4" 900 2>/dev/null \
+  || fail "ensure_active returned non-zero on an explicit keeper_autostart: true"
+[ -s "$CALLS2" ] \
+  || fail "keeper_autostart: true did not install"
+
 # --- wiring: the Stop hook actually invokes the bootstrap ---
 SAVE="${ROOT_DIR}/scripts/session-save.sh"
 grep -q 'keeper-bootstrap.sh' "$SAVE" || fail "session-save.sh does not source keeper-bootstrap.sh"

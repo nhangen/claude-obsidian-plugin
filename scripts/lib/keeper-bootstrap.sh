@@ -88,14 +88,38 @@ keeper_ensure_active() {
   local cfg="$1" vault="$2" interval="${3:-900}"
   [ -f "$cfg" ] && [ -d "$vault" ] || return 0
 
-  # `|| autostart=""` because a config without the key makes grep exit 1, and with
-  # `pipefail` that becomes the assignment's status — errexit would abort the
-  # errexit caller here, on the ordinary first-run config — session-save.sh is not
-# one today (`set -uo pipefail`, and it calls this with `|| true`), so this guards
-# the next sourcer rather than a live bug. Absent means "not false".
-  local autostart
-  autostart="$(grep '^keeper_autostart:' "$cfg" | head -1 | sed 's/^keeper_autostart:[[:space:]]*//')" || autostart=""
-  [ "$autostart" = "false" ] && return 0
+  # The key's presence is tested on its own, not folded into the pipeline that
+  # extracts its value (#45). The old single `|| autostart=""` had to be there for
+  # the ordinary case — a config without the key makes grep exit 1 and `pipefail`
+  # promotes it, which would abort an errexit caller on a first-run config — but it
+  # also absorbed a failure in `head` or `sed`, and an empty autostart means "not
+  # false", so a broken stage silently overrode a documented `keeper_autostart:
+  # false` and installed the scheduler anyway. Neutralizing the pipeline instead
+  # (`{ grep || true; } | head | sed`) was tested and is worse: it aborts the caller
+  # under errexit and still installs.
+  local autostart_line autostart
+  if autostart_line="$(grep '^keeper_autostart:' "$cfg")"; then
+    # Present. From here a parse failure must not read as consent to install.
+    autostart="$(printf '%s\n' "$autostart_line" | head -1 | sed 's/^keeper_autostart:[[:space:]]*//')" \
+      || autostart="__unreadable__"
+    # Trim trailing whitespace and a CRLF config's carriage return.
+    autostart="${autostart%$'\r'}"
+    autostart="${autostart%"${autostart##*[![:space:]]}"}"
+    case "$autostart" in
+      false) return 0 ;;
+      true)  : ;;
+      *)
+        # A value we do not recognise cannot be read as "yes, install" — the user
+        # wrote something here on purpose, and guessing wrong installs a scheduler
+        # against an intended opt-out. Refuse and name it, per
+        # enum-config-typo-fallback.
+        printf 'vaultkeeper: keeper_autostart in %s is "%s", which is neither true nor false; activation skipped (fix the value or remove the line)\n' \
+          "$cfg" "$autostart" >&2
+        return 0
+        ;;
+    esac
+  fi
+  # Absent means "not false" — the documented default for a first-run config.
 
   # Resolve the scripts dir before the label, so a lib that cannot find its own
   # siblings says that, instead of blaming install-watcher.sh for a file that is
