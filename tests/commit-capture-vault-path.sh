@@ -51,7 +51,7 @@ cleanup_git_stub() {
 # the vault_path parse, not the gate.
 new_state_home() {
   local dir key
-  dir="$(mktemp -d)"
+  dir="$(mktemp -d "${SUITE_TMP}/state-XXXXXX")"
   key="$(
     . "${ROOT_DIR}/scripts/lib/commit-capture-parse.sh"
     cc_snapshot_key "$1"
@@ -96,17 +96,20 @@ run_case_raw() {
 # stable XDG path over CLAUDE_PLUGIN_ROOT. Point XDG_CONFIG_HOME at an empty dir
 # and clear the override so these cases deterministically exercise the
 # plugin-root config the test controls, regardless of the host's real config.
-ISOLATED_XDG="$(mktemp -d "${TMPDIR:-/tmp}/cc-vp-xdg-XXXXXX")"
+# One scratch root for the whole suite. Every case used to call `mktemp -d` with no
+# reaper, so a run left nine unremoved directories in $TMPDIR (#66).
+SUITE_TMP="$(mktemp -d "${TMPDIR:-/tmp}/cc-vp-suite-XXXXXX")"
+ISOLATED_XDG="$(mktemp -d "${SUITE_TMP}/xdg-XXXXXX")"
 export XDG_CONFIG_HOME="$ISOLATED_XDG"
 unset OBSIDIAN_LOCAL_MD
 
 make_git_stub
-trap 'cleanup_git_stub; rm -rf "$ISOLATED_XDG"' EXIT
+trap 'cleanup_git_stub; rm -rf "$SUITE_TMP"' EXIT
 
 PASS_COUNT=0
 
 # ----- Case 1: happy path with tilde expansion -----
-CASE_DIR="$(mktemp -d "${TMPDIR:-/tmp}/cc-vp-XXXXXX")"
+CASE_DIR="$(mktemp -d "${SUITE_TMP}/case-XXXXXX")"
 printf -- '---\nvault_path: ~/Documents/Obsidian\n---\n' > "${CASE_DIR}/obsidian.local.md"
 GOT=$(run_case "${CASE_DIR}/obsidian.local.md" "$CASE_DIR")
 EXPECTED="${HOME}/Documents/Obsidian"
@@ -119,41 +122,41 @@ GOT=$(run_case "" "")
 PASS_COUNT=$((PASS_COUNT + 1))
 
 # ----- Case 3: missing config file -> empty vault_path, no error -----
-EMPTY_DIR="$(mktemp -d "${TMPDIR:-/tmp}/cc-vp-empty-XXXXXX")"
+EMPTY_DIR="$(mktemp -d "${SUITE_TMP}/empty-XXXXXX")"
 GOT=$(run_case "" "$EMPTY_DIR")
 [ -z "$GOT" ] || fail "case3 (missing file): got '$GOT' want empty"
 PASS_COUNT=$((PASS_COUNT + 1))
 
 # ----- Case 4: empty vault_path: value -> empty -----
-CASE_DIR="$(mktemp -d "${TMPDIR:-/tmp}/cc-vp-XXXXXX")"
+CASE_DIR="$(mktemp -d "${SUITE_TMP}/case-XXXXXX")"
 printf -- '---\nvault_path:\n---\n' > "${CASE_DIR}/obsidian.local.md"
 GOT=$(run_case "${CASE_DIR}/obsidian.local.md" "$CASE_DIR")
 [ -z "$GOT" ] || fail "case4 (empty value): got '$GOT' want empty"
 PASS_COUNT=$((PASS_COUNT + 1))
 
 # ----- Case 5: CRLF line endings stripped -----
-CASE_DIR="$(mktemp -d "${TMPDIR:-/tmp}/cc-vp-XXXXXX")"
+CASE_DIR="$(mktemp -d "${SUITE_TMP}/case-XXXXXX")"
 printf -- '---\r\nvault_path: /Users/test/vault\r\n---\r\n' > "${CASE_DIR}/obsidian.local.md"
 GOT=$(run_case "${CASE_DIR}/obsidian.local.md" "$CASE_DIR")
 [ "$GOT" = "/Users/test/vault" ] || fail "case5 (CRLF): got '$GOT' want '/Users/test/vault'"
 PASS_COUNT=$((PASS_COUNT + 1))
 
 # ----- Case 6: inline comment stripped -----
-CASE_DIR="$(mktemp -d "${TMPDIR:-/tmp}/cc-vp-XXXXXX")"
+CASE_DIR="$(mktemp -d "${SUITE_TMP}/case-XXXXXX")"
 printf -- '---\nvault_path: /Users/test/vault  # main vault\n---\n' > "${CASE_DIR}/obsidian.local.md"
 GOT=$(run_case "${CASE_DIR}/obsidian.local.md" "$CASE_DIR")
 [ "$GOT" = "/Users/test/vault" ] || fail "case6 (inline comment): got '$GOT' want '/Users/test/vault'"
 PASS_COUNT=$((PASS_COUNT + 1))
 
 # ----- Case 7: double-quoted value -----
-CASE_DIR="$(mktemp -d "${TMPDIR:-/tmp}/cc-vp-XXXXXX")"
+CASE_DIR="$(mktemp -d "${SUITE_TMP}/case-XXXXXX")"
 printf -- '---\nvault_path: "/Users/test/My Vault"\n---\n' > "${CASE_DIR}/obsidian.local.md"
 GOT=$(run_case "${CASE_DIR}/obsidian.local.md" "$CASE_DIR")
 [ "$GOT" = "/Users/test/My Vault" ] || fail "case7 (double-quoted): got '$GOT' want '/Users/test/My Vault'"
 PASS_COUNT=$((PASS_COUNT + 1))
 
 # ----- Case 8: single-quoted value -----
-CASE_DIR="$(mktemp -d "${TMPDIR:-/tmp}/cc-vp-XXXXXX")"
+CASE_DIR="$(mktemp -d "${SUITE_TMP}/case-XXXXXX")"
 printf -- "---\nvault_path: '/Users/test/Vault'\n---\n" > "${CASE_DIR}/obsidian.local.md"
 GOT=$(run_case "${CASE_DIR}/obsidian.local.md" "$CASE_DIR")
 [ "$GOT" = "/Users/test/Vault" ] || fail "case8 (single-quoted): got '$GOT' want '/Users/test/Vault'"
@@ -162,7 +165,7 @@ PASS_COUNT=$((PASS_COUNT + 1))
 # ----- Case 9: the record keeps every field, inside the delivery envelope -----
 # The envelope is asserted here too: a PostToolUse hook only reaches Claude through
 # hookSpecificOutput.additionalContext, so a bare record is a record nobody reads.
-CASE_DIR="$(mktemp -d "${TMPDIR:-/tmp}/cc-vp-XXXXXX")"
+CASE_DIR="$(mktemp -d "${SUITE_TMP}/case-XXXXXX")"
 printf -- '---\nvault_path: /Users/test/v\n---\n' > "${CASE_DIR}/obsidian.local.md"
 OUT=$(run_case_raw "${CASE_DIR}/obsidian.local.md" "$CASE_DIR")
 case "$OUT" in
