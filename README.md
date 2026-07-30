@@ -121,7 +121,7 @@ Both hooks are gated — they inspect the Bash command first and exit silently f
 
 **The two halves are one mechanism: register both or neither.** Whether a commit landed is decided by comparing `HEAD` before the call against `HEAD` after — the only signal that distinguishes a commit from a `git commit` that was rejected, aborted, short-circuited by `false &&`, or had nothing to commit. A tip that moved is necessary but not sufficient, so the post-hook also asks git *what* the move was: the old tip (or its parent, for an amend) has to be reachable from the new one, and the new commit's committer has to be you — a `git pull` that fast-forwards in front of a failed commit leaves someone else's commit at the tip.
 
-With only the PostToolUse half wired up there is no "before". The hook says so, on stdout, alongside every other reason a commit went uncaptured — a hook that exits 0 has its stdout read, and nothing documented reads its stderr, so a diagnostic written there would be indistinguishable from silence. Only a line beginning `obsidian-commit-capture: hash=` is a record.
+With only the PostToolUse half wired up there is no "before". The hook says so, alongside every other reason a commit went uncaptured. Everything it says — the record and every diagnostic — is delivered as `hookSpecificOutput.additionalContext`, which is the only channel a PostToolUse hook has on exit 0: bare stdout goes to the debug log rather than the transcript. Only a line beginning `obsidian-commit-capture: hash=` is a record.
 
 ## Examples
 

@@ -22,12 +22,37 @@ case "$INPUT" in
   *) exit 0 ;;
 esac
 
-# Diagnostics go to stdout, not stderr. A hook that exits 0 has its stdout read
-# (that is how the record below reaches the skill at all); exit-0 stderr has no
-# documented surface, so a "not captured" line written there is indistinguishable
-# from dropping the capture in silence. The skill knows that only a line starting
+# Everything this hook has to say — the record and every "not captured" line —
+# leaves through `hookSpecificOutput.additionalContext`, because that is the only
+# channel a PostToolUse hook has on exit 0. Bare stdout goes to the debug log and
+# not the transcript; the documented exceptions whose plain stdout becomes context
+# are UserPromptSubmit, UserPromptExpansion and SessionStart, and this is none of
+# them. Printing the record as text meant the gate could work perfectly and the
+# skill still never heard about the commit.
+#
+# Messages accumulate and one envelope is emitted from an EXIT trap: the hook has
+# a dozen exit points, two of them (`partial —` plus the record) say two things,
+# and two JSON documents on stdout parse as neither. The skill's contract is
+# unchanged — the text inside is the same, and only a line starting
 # `obsidian-commit-capture: hash=` is a record.
-say() { printf 'obsidian-commit-capture: %s\n' "$1"; }
+CC_OUT=""
+say() { CC_OUT="${CC_OUT}obsidian-commit-capture: $1"$'\n'; }
+cc_deliver() {
+  local s="$CC_OUT"
+  [ -n "$s" ] || return 0
+  # Order matters: double the backslashes before introducing any of our own.
+  s="${s//\\/\\\\}"
+  s="${s//\"/\\\"}"
+  s="${s//$'\t'/\\t}"
+  s="${s//$'\r'/\\r}"
+  s="${s//$'\n'/\\n}"
+  # A raw control byte is not legal in a JSON string, and a commit author picks
+  # the subject. Anything left after the escapes above gets dropped rather than
+  # allowed to make the envelope unparseable.
+  s="$(printf '%s' "$s" | tr -d '\000-\010\013\014\016-\037\177')"
+  printf '{"hookSpecificOutput":{"hookEventName":"PostToolUse","additionalContext":"%s"}}\n' "$s"
+}
+trap cc_deliver EXIT
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 LIB="${SCRIPT_DIR}/lib/commit-capture-parse.sh"
@@ -390,5 +415,5 @@ fi
 # put an attacker-chosen org_repo and vault_path *ahead* of the real ones, and
 # whoever parses the first match resolves a path outside the vault. Last means
 # every parseable field precedes anything a commit author can influence.
-printf 'obsidian-commit-capture: hash=%s | branch=%s | files=%s | org_repo=%s | repo_name=%s | ticket=%s | date=%s | time=%s | vault_path=%s | msg=%s\n' \
-  "$HASH" "$BRANCH" "$FILES" "$ORG_REPO" "$REPO_NAME" "$TICKET" "$TODAY" "$NOW" "$VAULT_PATH" "$MSG"
+say "$(printf 'hash=%s | branch=%s | files=%s | org_repo=%s | repo_name=%s | ticket=%s | date=%s | time=%s | vault_path=%s | msg=%s' \
+  "$HASH" "$BRANCH" "$FILES" "$ORG_REPO" "$REPO_NAME" "$TICKET" "$TODAY" "$NOW" "$VAULT_PATH" "$MSG")"
