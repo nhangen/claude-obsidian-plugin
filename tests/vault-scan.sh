@@ -28,12 +28,37 @@ printf 'a\n' > "$V/Projects/weekly-review-1.md"
 printf 'a\n' > "$V/Projects/weekly-review-2.md"
 printf 'a\n' > "$V/Projects/weekly-sync-3.md"
 
+# The real vault's dominant shapes, which the flat fixture did not reproduce (#39):
+# nested per-repo folders, `YYYY-MM-DD-<slug>` filenames (which drive essentially every
+# real CLUSTER row), a keeper quarantine directory, and a claim file. Without these the
+# `.vaultkeeper*` exclusion arms below were asserted against directories that did not
+# exist — green, but never exercised.
+mkdir -p "$V/Projects/Development/nhangen/claude-obsidian-plugin"
+for _d in 2026-07-28 2026-07-29 2026-07-30; do
+  printf -- '---\ntags: [x]\ntype: session\n---\n\nbody\n' \
+    > "$V/Projects/Development/nhangen/claude-obsidian-plugin/${_d}-keeper-notes.md"
+done
+mkdir -p "$V/.vaultkeeper-quarantine" "$V/.vaultkeeper"
+printf -- '---\ntags: [x]\n---\n\nquarantined body has [ask:merge me?] in it\n' \
+  > "$V/.vaultkeeper-quarantine/Pending.sync-conflict-20260730-000000-ABCDEFG.md"
+printf -- '---\n---\n\nkeeper internals\n' > "$V/.vaultkeeper/notes.md"
+printf 'ml-1\n' > "$V/.keeper-claim-ml-1"
+mkdir -p "$V/Templates"; printf -- '---\n---\n\ntemplate body\n' > "$V/Templates/session.md"
+
 GAPS="$(scan_frontmatter_gaps "$V" "tags type")"
 has  "GAP"$'\t'"Projects/gap.md"$'\t'"type" "$GAPS"
 lacks "GAP"$'\t'"Projects/good.md" "$GAPS"
 lacks ".obsidian" "$GAPS"
 lacks ".trash" "$GAPS"
 lacks ".base" "$GAPS"
+# Now genuinely exercised: these directories exist in the fixture (#39).
+lacks ".vaultkeeper-quarantine" "$GAPS"
+lacks ".vaultkeeper/" "$GAPS"
+lacks ".keeper-claim" "$GAPS"
+# A dated per-repo note is the vault's dominant shape and must be scanned normally.
+# A dated per-repo note carrying tags+type is complete, so it must not be a gap.
+lacks "2026-07-28-keeper-notes.md" "$GAPS"
+
 
 UNFILED="$(scan_unfiled "$V")"
 has "UNFILED"$'\t'"Inbox/unfiled.md" "$UNFILED"
@@ -48,6 +73,23 @@ has "CLUSTER"$'\t'"Projects"$'\t'"weekly"$'\t'"3" "$CLUSTERS"
 # "review" appears in only 2 files (below threshold 3) -> must NOT be emitted.
 lacks "CLUSTER"$'\t'"Projects"$'\t'"review" "$CLUSTERS"
 grep -q '\.base' <<<"$CLUSTERS" && fail ".base leaked into clusters"
+
+# The dominant real filename shape, `YYYY-MM-DD-<slug>`, drives essentially every real
+# CLUSTER row and was untested (#39). Three dated notes in one per-repo folder share
+# `keeper` and `notes`; the date components must not become tokens of their own — they
+# are numeric, and the tokenizer drops numeric tokens.
+DATED="$(scan_clusters "$V" 3)"
+has "CLUSTER"$'\t'"Projects/Development/nhangen/claude-obsidian-plugin"$'\t'"keeper"$'\t'"3" "$DATED"
+has "CLUSTER"$'\t'"Projects/Development/nhangen/claude-obsidian-plugin"$'\t'"notes"$'\t'"3" "$DATED"
+printf '%s\n' "$DATED" | grep -qE $'\t'"(2026|07|28|29|30)"$'\t' \
+  && fail "a date component became a cluster token:"$'\n'"$(printf '%s\n' "$DATED" | grep -E '2026|07')"
+lacks ".vaultkeeper" "$DATED"
+
+# The quarantine directory holds a note with an [ask] marker, so the ASK scanner's
+# exclusion is now exercised rather than asserted against a directory that is absent.
+ASKS2="$(scan_open_asks "$V")"
+lacks ".vaultkeeper-quarantine" "$ASKS2"
+lacks ".keeper-claim" "$ASKS2"
 
 # Clustering routes through the shared tokenize_slug, so it agrees with dedup and
 # MOC promotion instead of carrying a third inline tokenizer. The visible effect
@@ -75,10 +117,10 @@ CRC=0; ( set -e; scan_clusters "$V" 3 >/dev/null ) || CRC=$?
 [ "$CRC" = "0" ] || fail "scan_clusters returned $CRC with a below-threshold trailing folder"
 GRC=0; ( set -e; scan_frontmatter_gaps "$V" "tags type" >/dev/null ) || GRC=$?
 [ "$GRC" = "0" ] || fail "scan_frontmatter_gaps returned $GRC"
-URC=0; ( set -e; scan_unfiled "$V" >/dev/null ) || URC=$?
-[ "$URC" = "0" ] || fail "scan_unfiled returned $URC"
-ARC=0; ( set -e; scan_open_asks "$V" >/dev/null ) || ARC=$?
-[ "$ARC" = "0" ] || fail "scan_open_asks returned $ARC"
+# scan_unfiled and scan_open_asks are NOT checked here on purpose (#39). Neither can
+# return non-zero — one has a bare `printf` body, the other an `if` body — so the
+# assertions that used to sit here could not fail, while reading as four symmetric
+# guards when only the two above are load-bearing.
 rm -rf "$V/ZZlast"
 
 # The GRC arm above cannot fail on this fixture: $V always contains a gap file, so
@@ -139,11 +181,10 @@ has "CLUSTER"$'\t'"SpaceTest"$'\t'"weekly" "$SPACE_CLUSTERS"
 # With the fix, "review" is split from "weekly review.md" via space→hyphen
 # normalization, so it also counts across all 3 files — threshold met, emitted.
 has "CLUSTER"$'\t'"SpaceTest"$'\t'"review" "$SPACE_CLUSTERS"
-# Verify no cluster entry in SpaceTest shows count 1 (threshold is 2; all
-# tokens should meet it — no spurious single-file tokens from word-splitting).
-if printf '%s\n' "$SPACE_CLUSTERS" | grep "SpaceTest" | awk -F'\t' '{print $4}' | grep -q '^1$'; then
-  fail "space-filename produced a spurious count-1 cluster token"
-fi
+# A count-1 row is NOT asserted against here (#39): the printf is gated on
+# `[ cnt -ge threshold ]` and this block passes threshold=2, so no count-1 row can be
+# emitted whatever the tokenizer does. What actually pins the space-folding is the
+# `review` row above — it only appears if "weekly review.md" tokenizes into two words.
 
 # The canonical tokenizer wins over whatever the caller already had in scope. The
 # old `command -v tokenize_slug ||` guard adopted the caller's definition instead,
