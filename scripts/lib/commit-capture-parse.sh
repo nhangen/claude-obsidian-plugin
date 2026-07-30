@@ -305,3 +305,36 @@ cc_snapshot_key() {
   [ -n "$id" ] || id="session:$(cc_json_value "$payload" '"session_id"')"
   cc_digest "$id"
 }
+
+# Where a snapshot lives. The pre-hook writes it and the post-hook reads and
+# deletes it, so the two halves must agree byte for byte on the path — and they
+# each used to assemble it themselves from cc_state_dir + a literal
+# `pre-commit-head` + cc_snapshot_key. Two copies of a layout is a layout that
+# can be half-changed: the pre-hook would keep writing snapshots the post-hook
+# no longer looks for, and the symptom is every commit going uncaptured with
+# both halves reporting success. One accessor, called by both.
+cc_snapshot_dir() {
+  printf '%s/pre-commit-head' "$(cc_state_dir)"
+}
+
+cc_snapshot_file() {
+  printf '%s/%s' "$(cc_snapshot_dir)" "$(cc_snapshot_key "$1")"
+}
+
+# Deliberately NOT keeper-state.sh's shape (#63), and the differences are the
+# reason rather than drift:
+#
+#   - XDG_STATE_HOME, not XDG_CACHE_HOME. A cache is defined as discardable;
+#     losing a snapshot loses a capture, which is the failure the gate exists to
+#     prevent. State is what this is.
+#   - Keyed by invocation, not by a hashed vault id. keeper_vault_id answers
+#     "which vault's index is this" for a durable per-vault snapshot. These
+#     records are per-Bash-call and live for the length of one tool call, so the
+#     tool_use_id is the only key that keeps two concurrent commits apart — a
+#     vault id would collapse them onto one file.
+#   - No keeper_state_init: the pre-hook must mkdir and report failure itself,
+#     because it is the half that can still warn before the commit runs.
+#
+# What it does take from keeper-state.sh is the write discipline — tmp file plus
+# rename, never truncate-in-place — implemented at the pre-hook's write site
+# where the failure can be reported.

@@ -85,7 +85,7 @@ fi
 # any other non-zero surfaces as a hook error on a call that is otherwise fine.
 warn() { cc_deliver_context PreToolUse "obsidian-commit-capture: $1"; }
 
-SNAP_DIR="$(cc_state_dir)/pre-commit-head"
+SNAP_DIR="$(cc_snapshot_dir)"
 if ! mkdir -p "$SNAP_DIR" 2>/dev/null; then
   warn "not captured — cannot create ${SNAP_DIR}; the commit this call makes will not be captured"
   exit 0
@@ -97,8 +97,8 @@ fi
 # is not a per-Bash-call cost.
 find "$SNAP_DIR" -type f -mtime +1 -delete 2>/dev/null || true
 
-KEY="$(cc_snapshot_key "$INPUT")"
-SNAP_FILE="${SNAP_DIR}/${KEY}"
+SNAP_FILE="$(cc_snapshot_file "$INPUT")"
+KEY="${SNAP_FILE##*/}"
 # Written to a temp name and renamed into place. A direct `> file` truncates before
 # it writes, so a full disk or a killed shell mid-write leaves a file holding half a
 # snapshot — and half a snapshot still parses: a `sha=` line with no `root=` reads as

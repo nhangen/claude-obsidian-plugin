@@ -89,7 +89,7 @@ REPO_ROOT=$(GIT rev-parse --show-toplevel 2>/dev/null) || REPO_ROOT=""
 
 # --- Did a commit actually land? ---
 
-SNAP_FILE="$(cc_state_dir)/pre-commit-head/$(cc_snapshot_key "$INPUT")"
+SNAP_FILE="$(cc_snapshot_file "$INPUT")"
 HEAD_BEFORE=""
 SNAP_ROOT=""
 SNAP_INTENT=""
@@ -146,7 +146,7 @@ case "$SNAP_STATE" in
     if [ -n "$HEAD_BEFORE" ]; then
       say "not captured — the PreToolUse snapshot for this call is about ${SNAP_ROOT:-another repository}, not ${REPO_ROOT}"
     else
-      say "not captured — no PreToolUse HEAD snapshot for this call (register scripts/commit-capture-pre.sh as a PreToolUse Bash hook and restart the session; if it is registered, check that ${XDG_STATE_HOME:-$HOME/.local/state}/claude-obsidian is writable)"
+      say "not captured — no PreToolUse HEAD snapshot for this call (register scripts/commit-capture-pre.sh as a PreToolUse Bash hook and restart the session; if it is registered, check that $(cc_state_dir) is writable)"
     fi
     exit 0
     ;;
@@ -429,6 +429,25 @@ case "$ORG_REPO" in
 esac
 case "$ORG_REPO" in
   ''|*/) ORG_REPO="local/$REPO_NAME" ;;
+esac
+# GitLab subgroups nest arbitrarily deep, so `https://gitlab.com/g/sub1/sub2/repo`
+# derived `g/sub1/sub2/repo` and the note landed four levels under
+# Projects/Development/ where every other repo lands two. The prefix-shaped
+# routing overrides in the capture rule do not anticipate that, and neither does
+# anything that globs `Projects/Development/*/*`.
+#
+# org_repo is always exactly two segments now: everything above the repository is
+# folded into the first, joined with `-`. Collapsing to `<top-group>/<repo>`
+# instead — the other option the issue offered — would make `g/team-a/api` and
+# `g/team-b/api` the same folder, so two repos' notes would interleave in one
+# file. Keeping the repository as the leaf also means `repo_name` below, which
+# reads the last segment, needs no special case.
+case "$ORG_REPO" in
+  */*/*)
+    ORG_LEAF="${ORG_REPO##*/}"
+    ORG_GROUPS="${ORG_REPO%/*}"
+    ORG_REPO="$(printf '%s' "$ORG_GROUPS" | tr '/' '-')/${ORG_LEAF}"
+    ;;
 esac
 # Now that the remote has been parsed, it — not any directory — is what names the
 # repository: a clone is free to sit in a directory called anything, and a worktree
