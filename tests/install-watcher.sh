@@ -88,4 +88,21 @@ HOME="$HOMEDIR" PATH="$HOMEDIR/bin:$PATH" bash "$SH" install "$TICK" 900 >/dev/n
   && fail "install overwrote an unparseable plist"
 [ "$(cat "$PL")" = "$BEFORE2" ] || fail "an unparseable plist was overwritten anyway"
 
+# --- `state` answers label + installed program in one spawn (#35) -------------
+# keeper_ensure_active needs both, and an installed host is meant to cost exactly one
+# installer spawn per session.
+ST_HOME="$(mktemp -d "${TMPDIR:-/tmp}/iw-state-XXXXXX")"
+mkdir -p "$ST_HOME/Library/LaunchAgents"
+ST_PL="$ST_HOME/Library/LaunchAgents/com.nhangen.obsidian-vaultkeeper.plist"
+# No entry at all: the label is still first, the program field empty.
+ST_OUT="$(HOME="$ST_HOME" bash "$SH" state)"
+[ "${ST_OUT%%$'	'*}" = "com.nhangen.obsidian-vaultkeeper" ]   || fail "state did not put the label first: [$ST_OUT]"
+[ -z "${ST_OUT#*$'	'}" ]   || fail "state reported a program when nothing is installed: [$ST_OUT]"
+# With an entry, the program is the tick path from ProgramArguments — not /bin/bash.
+bash "$SH" render-launchd "/some/version/scripts/vaultkeeper-tick.sh" 900 > "$ST_PL"
+ST_OUT2="$(HOME="$ST_HOME" bash "$SH" state)"
+[ "${ST_OUT2#*$'	'}" = "/some/version/scripts/vaultkeeper-tick.sh" ]   || fail "state did not report the installed program: [$ST_OUT2]"
+HOME="$ST_HOME" bash "$SH" installed-program | grep -qF '/some/version/scripts/vaultkeeper-tick.sh'   || fail "installed-program disagreed with state"
+rm -rf "$ST_HOME"
+
 echo "PASS: install-watcher"

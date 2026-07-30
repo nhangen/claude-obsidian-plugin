@@ -5,7 +5,7 @@
 set -euo pipefail
 LABEL="com.nhangen.obsidian-vaultkeeper"
 
-usage() { echo "usage: install-watcher.sh {label|render-launchd|render-cron|install} <tick_abs_path> [interval_secs]" >&2; exit 2; }
+usage() { echo "usage: install-watcher.sh {label|installed-program|state|render-launchd|render-cron|install} <tick_abs_path> [interval_secs]" >&2; exit 2; }
 
 # Did WE render what is installed? The discriminator is the program's basename, not
 # its full path (#44).
@@ -78,6 +78,22 @@ render_cron() {
   printf '*/%s * * * * /bin/bash "%s" >/dev/null 2>&1 # %s\n' "$minutes" "$tick" "$LABEL"
 }
 
+installed_program() {
+  local prog=""
+  case "$(uname -s)" in
+    Darwin)
+      prog="$(_program_of "$HOME/Library/LaunchAgents/${LABEL}.plist")"
+      ;;
+    *)
+      # The tick path is the double-quoted field of the rendered cron line.
+      prog="$(crontab -l 2>/dev/null | grep -F "# ${LABEL}" | head -1 \
+        | sed -n 's/.*"\([^"]*\)".*/\1/p')"
+      ;;
+  esac
+  [ -n "$prog" ] || return 1
+  printf '%s\n' "$prog"
+}
+
 install_watcher() {
   local tick="$1" interval="${2:-900}"
   case "$(uname -s)" in
@@ -113,6 +129,15 @@ install_watcher() {
 
 case "${1:-}" in
   label)          printf '%s\n' "$LABEL" ;;
+  # What program is the installed entry actually pointing at? Prints nothing and
+  # exits 1 when there is no entry. Lives here, beside `label`, so plist and cron
+  # layout stay in one file — keeper-bootstrap reads this rather than parsing XML
+  # itself (#35).
+  installed-program) installed_program ;;
+  # label + installed program in ONE invocation. keeper_ensure_active needs both, and
+  # an installed host is meant to cost exactly one installer spawn per session — the
+  # thing the label/predicate split already went to trouble to keep at one.
+  state)          printf '%s\t%s\n' "$LABEL" "$(installed_program || true)" ;;
   render-launchd) [ $# -ge 3 ] || usage; render_launchd "$2" "$3" ;;
   render-cron)    [ $# -ge 3 ] || usage; render_cron "$2" "$3" ;;
   install)        [ $# -ge 2 ] || usage; install_watcher "$2" "${3:-900}" ;;
