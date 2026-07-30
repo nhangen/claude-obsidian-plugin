@@ -764,6 +764,50 @@ if ls -A "$SNAP_DIR" | grep -qv "^$(basename "$KEY_FILE")\$"; then
   fail "a temp file was left in the snapshot dir: $(ls -A "$SNAP_DIR")"
 fi
 
+# --- 24. files= on a root commit and on a merge ------------------------------
+# `HEAD~1..HEAD` failed outright on a root commit, so `files=` went out empty with
+# no indication anything was missing, and on a merge it reported the first-parent
+# diff of whatever the tip happened to be (#65).
+reset_state
+ROOTREPO="$WORK/rootrepo"
+mkdir -p "$ROOTREPO"
+git -C "$ROOTREPO" init -q
+git -C "$ROOTREPO" config core.hooksPath /dev/null
+git -C "$ROOTREPO" config commit.gpgsign false
+git -C "$ROOTREPO" config user.email t@example.com
+git -C "$ROOTREPO" config user.name Tester
+git -C "$ROOTREPO" remote add origin "git@github.com:nhangen/rootrepo.git"
+P="$(payload 'git commit -q -m first' "$ROOTREPO" call-24)"
+run_pre "$P"
+: > "$ROOTREPO/very-first.txt"
+git -C "$ROOTREPO" add very-first.txt
+git -C "$ROOTREPO" commit -q -m "the first commit"
+run_post_verbose "$P"
+case "$POST_OUT" in
+  *'files=very-first.txt'*) : ;;
+  *) fail "a root commit reported no files"$'\n'"got: ${POST_OUT:-<empty>}" ;;
+esac
+
+# A merge commit brought paths in; reporting none of them is not observability.
+reset_state
+git -C "$REPO" checkout -q -b feature-24
+: > "$REPO/from-the-branch.txt"
+git -C "$REPO" add from-the-branch.txt
+git -C "$REPO" commit -q -m "work on the branch"
+git -C "$REPO" checkout -q -
+# The hook only ever fires for a call that invokes `git commit`, so the merge has
+# to be completed by one — which is also how a merge with conflicts or a reviewed
+# merge actually lands.
+P="$(payload 'git merge --no-ff --no-commit feature-24 && git commit -m merged' "$REPO" call-24b)"
+run_pre "$P"
+git -C "$REPO" merge -q --no-ff --no-commit feature-24 >/dev/null 2>&1 || true
+git -C "$REPO" commit -q -m "merge the branch"
+run_post_verbose "$P"
+case "$POST_OUT" in
+  *'from-the-branch.txt'*) : ;;
+  *) fail "a merge commit reported none of the paths it brought in"$'\n'"got: ${POST_OUT:-<empty>}" ;;
+esac
+
 # --- wiring: both halves are registered on Bash ------------------------------
 # The pair is one mechanism. Shipping the post-hook without the pre-hook turns
 # every capture into a stderr diagnostic.

@@ -329,15 +329,15 @@ BRANCH="$(scrub_field "$BRANCH")"
 
 # The subject and the file list are per commit; everything else below (branch,
 # org_repo, vault_path, the clock) is a property of the call and is shared.
+# One invocation that answers for all three shapes (#65). `HEAD~1..HEAD` failed
+# outright on a root commit — silently, so `files=` was simply empty — and reported
+# only the first-parent diff on a merge. `--root` covers the root commit;
+# `-m --first-parent` makes a merge report the paths it brought in rather than
+# nothing, which is what a note about a merge is for. Note that `git show
+# --name-only`, the fix the issue proposed, prints nothing at all for a merge.
 cc_files_for() {
-  local sha="$1" raw=""
-  raw=$(GIT diff --name-only "${sha}~1..${sha}" 2>/dev/null) || raw=""
-  # A root commit has no ~1, and a merge's diff against its first parent is not
-  # what it changed; --root handles the first and prints nothing for the second,
-  # which is honest — a merge introduces no paths of its own.
-  if [ -z "$raw" ]; then
-    raw=$(GIT diff-tree --no-commit-id --name-only -r --root "$sha" 2>/dev/null) || raw=""
-  fi
+  local raw=""
+  raw=$(GIT diff-tree --no-commit-id --name-only -r --root -m --first-parent "$1" 2>/dev/null) || raw=""
   printf '%s' "$raw" | tr '\n' ',' | sed 's/,$//'
 }
 
