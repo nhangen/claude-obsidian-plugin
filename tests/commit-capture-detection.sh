@@ -28,8 +28,21 @@ fail() {
   exit 1
 }
 
-cleanup() { [ -n "$GIT_BIN_DIR" ] && rm -rf "$GIT_BIN_DIR"; [ -n "${STATE_HOME:-}" ] && rm -rf "$STATE_HOME"; }
+cleanup() {
+  [ -n "$GIT_BIN_DIR" ] && rm -rf "$GIT_BIN_DIR"
+  [ -n "${STATE_HOME:-}" ] && rm -rf "$STATE_HOME"
+  [ -n "${TRACE_FILE:-}" ] && rm -f "$TRACE_FILE"
+}
 trap cleanup EXIT
+
+# Every stubbed git call appends one `<-C value>\t<argv after the strip>` line
+# here. Two things depend on it:
+#   - the -C value, which the strip below would otherwise discard. Dropping it
+#     made `git -C <repo>` and bare `git` indistinguishable, so reverting the
+#     repo-resolution fix left this suite green (#67).
+#   - the argv, so a negative case can name the question the hook must have
+#     asked before deciding to skip, instead of accepting any empty stdout.
+TRACE_FILE="$(mktemp "${TMPDIR:-/tmp}/cc-det-trace-XXXXXX")"
 
 # Stub git so we control HEAD's age and the remote URL without a real repo.
 # $1 = HEAD age in seconds (negative = future-dated), $2 = remote URL.
@@ -40,9 +53,13 @@ make_git_stub() {
   GIT_BIN_DIR="${GIT_BIN_DIR:-$(mktemp -d "${TMPDIR:-/tmp}/cc-det-git-XXXXXX")}"
   cat > "${GIT_BIN_DIR}/git" <<STUB
 #!/usr/bin/env bash
-# Real git accepts -C <dir> before the subcommand; strip it like git does so
-# argv patterns below match regardless of how the hook addresses the repo.
-if [ "\$1" = "-C" ]; then shift 2; fi
+# Real git accepts -C <dir> before the subcommand, and strips it before dispatch;
+# do the same so the argv patterns below match either form. The value is recorded
+# first, because "the hook still addresses the repo explicitly" is an assertion
+# this suite makes (case 9) rather than something it may quietly tolerate.
+CDIR=-
+if [ "\$1" = "-C" ]; then CDIR="\$2"; shift 2; fi
+printf '%s\t%s\n' "\$CDIR" "\$*" >> "${TRACE_FILE}"
 case "\$*" in
   "log -1 --format=%ct") echo \$(( \$(date +%s) - (${age}) )) ;;
   "rev-parse --short HEAD") echo abc1234 ;;
@@ -112,6 +129,7 @@ seed_blind_snapshot() {
 run_hook() {
   local payload="$1"
   rm -rf "${STATE_HOME:?}/claude-obsidian"
+  : > "$TRACE_FILE"
   seed_snapshot "$payload"
   printf '%s' "$payload" | PATH="${GIT_BIN_DIR}:$PATH" XDG_STATE_HOME="$STATE_HOME" bash "$SCRIPT" 2>/dev/null || true
 }
@@ -119,8 +137,26 @@ run_hook() {
 run_hook_blind() {
   local payload="$1"
   rm -rf "${STATE_HOME:?}/claude-obsidian"
+  : > "$TRACE_FILE"
   seed_blind_snapshot "$payload"
   printf '%s' "$payload" | PATH="${GIT_BIN_DIR}:$PATH" XDG_STATE_HOME="$STATE_HOME" bash "$SCRIPT" 2>/dev/null || true
+}
+
+# Did the hook ask git this, exactly? Compares the argv column only, so it is
+# indifferent to which directory the call was addressed to.
+asked() { cut -f2- "$TRACE_FILE" | grep -qxF "$1"; }
+
+# A negative case that asserts only "stdout was empty" is satisfied by the very
+# failures it should catch: a hook that died on line one, or a stub that rejected
+# an argv, produces exactly the same silence as a correct skip. So each negative
+# names the last question the hook must have asked to reach its decision, plus one
+# it must NOT have reached — a mutant that stops earlier or runs on past the check
+# then fails the case instead of passing it.
+expect_skip() {
+  local label="$1" out="$2" want="$3" forbid="$4"
+  [ -z "$out" ] || fail "${label}: expected no capture"$'\n'"got: $out"
+  asked "$want" || fail "${label}: the hook never ran \`git ${want}\`, so it stopped before the check this case is about"$'\n'"trace:"$'\n'"$(cat "$TRACE_FILE")"
+  ! asked "$forbid" || fail "${label}: the hook ran \`git ${forbid}\`, so it went past the check this case is about and skipped for some other reason"$'\n'"trace:"$'\n'"$(cat "$TRACE_FILE")"
 }
 
 # Negative cases must be silent AND clean-exit, not silent-because-crashed.
@@ -158,20 +194,26 @@ esac
 # to discard commits whose Bash call simply kept running — see the head-gate suite.)
 make_git_stub 4000 "git@github.com:nhangen/test.git"
 OUT="$(run_hook_blind "$QUIET")"
-[ -z "$OUT" ] || fail "stale HEAD was captured on the blind path; the recency window is not enforced"$'\n'"got: $OUT"
+expect_skip "stale HEAD on the blind path (the recency window is not enforced)" \
+  "$OUT" "log -1 --format=%ct" "rev-parse --short HEAD"
 
 # --- 4. non-commit Bash calls stay silent ------------------------------------
+# The command-word gate decides this one, and it decides it before the hook knows
+# which repository it would be talking about — so the discriminator is that git
+# was never run at all. Asserting only "no output" would also accept a hook that
+# resolved the repo, read HEAD, and then bailed for an unrelated reason.
 make_git_stub 0 "git@github.com:nhangen/test.git"
 OUT="$(run_hook '{"tool_input":{"command":"git status"},"tool_response":{"stdout":"nothing"}}')"
 [ -z "$OUT" ] || fail "non-commit command produced output: $OUT"
+[ ! -s "$TRACE_FILE" ] || fail "a non-commit command still ran git; the command-word gate is not what rejected it"$'\n'"trace:"$'\n'"$(cat "$TRACE_FILE")"
 
 # --- 5. recency boundary (blind path) ----------------------------------------
 make_git_stub 60 "git@github.com:nhangen/test.git"
 OUT="$(printf '%s' "$QUIET" | { rm -rf "${STATE_HOME:?}/claude-obsidian"; seed_blind_snapshot "$QUIET"; PATH="${GIT_BIN_DIR}:$PATH" XDG_STATE_HOME="$STATE_HOME" OBSIDIAN_COMMIT_RECENT_WINDOW=60 bash "$SCRIPT" 2>/dev/null; } || true)"
 case "$OUT" in *hash=*) : ;; *) fail "AGE == window must capture"$'\n'"got: ${OUT:-<empty>}" ;; esac
 make_git_stub 61 "git@github.com:nhangen/test.git"
-OUT="$(printf '%s' "$QUIET" | { rm -rf "${STATE_HOME:?}/claude-obsidian"; seed_blind_snapshot "$QUIET"; PATH="${GIT_BIN_DIR}:$PATH" XDG_STATE_HOME="$STATE_HOME" OBSIDIAN_COMMIT_RECENT_WINDOW=60 bash "$SCRIPT" 2>/dev/null; } || true)"
-[ -z "$OUT" ] || fail "AGE == window+1 must skip"$'\n'"got: $OUT"
+OUT="$(printf '%s' "$QUIET" | { rm -rf "${STATE_HOME:?}/claude-obsidian"; : > "$TRACE_FILE"; seed_blind_snapshot "$QUIET"; PATH="${GIT_BIN_DIR}:$PATH" XDG_STATE_HOME="$STATE_HOME" OBSIDIAN_COMMIT_RECENT_WINDOW=60 bash "$SCRIPT" 2>/dev/null; } || true)"
+expect_skip "AGE == window+1 must skip" "$OUT" "log -1 --format=%ct" "rev-parse --short HEAD"
 
 # A trusted before-image is NOT subject to the clock: the same 4000s-old tip that
 # case 3 rejects is captured here, because the snapshot proves the tip moved during
@@ -183,7 +225,8 @@ case "$OUT" in *hash=*) : ;; *) fail "the clock still vetoes a commit the snapsh
 # --- 6. a FUTURE HEAD is not evidence of a fresh commit ---------------------
 make_git_stub -4000 "git@github.com:nhangen/test.git"
 OUT="$(run_hook "$QUIET")"
-[ -z "$OUT" ] || fail "future-dated HEAD was captured (clock-skew clamp regression)"$'\n'"got: $OUT"
+expect_skip "future-dated HEAD was captured (clock-skew clamp regression)" \
+  "$OUT" "log -1 --format=%ct" "rev-parse --short HEAD"
 
 # --- 7. negative cases exit 0 and write nothing to stderr -------------------
 make_git_stub 0 "git@github.com:nhangen/test.git"
@@ -216,5 +259,20 @@ check_org_repo "https://oauth2:ghp_SECRET@gitlab.com/org/repo.git" "org/repo"
 check_org_repo "https://host:8443/org/repo.git"               "org/repo"
 check_org_repo "file:///srv/git/repo.git"                     "local/mtf-builder"
 check_org_repo "/srv/git/bare-repo"                           "local/mtf-builder"
+
+# --- 9. every git call names the repository it is about ----------------------
+# The hook's own cwd is the wrong repo whenever the command changed directory —
+# `cd <worktree> && git commit` is this project's documented workflow — so each
+# call has to carry `-C <resolved dir>`. Nothing else in this suite can see that:
+# the stub strips -C exactly as git does, which is what let a revert of the
+# repo-resolution fix leave every case above green. The trace keeps the value.
+make_git_stub 0 "git@github.com:nhangen/test.git"
+OUT="$(run_hook "$QUIET")"
+case "$OUT" in *hash=*) : ;; *) fail "case 9 fixture stopped capturing"$'\n'"got: ${OUT:-<empty>}" ;; esac
+[ -s "$TRACE_FILE" ] || fail "no git calls were traced; the trace is not wired up"
+BARE="$(cut -f1 "$TRACE_FILE" | grep -c '^-$' || true)"
+[ "$BARE" -eq 0 ] || fail "${BARE} git call(s) ran with no -C, so they read whatever repo the hook's cwd happens to be"$'\n'"trace:"$'\n'"$(cat "$TRACE_FILE")"
+DIRS="$(cut -f1 "$TRACE_FILE" | sort -u | wc -l | tr -d ' ')"
+[ "$DIRS" -eq 1 ] || fail "git was addressed to ${DIRS} different directories in one capture; the repo was resolved more than once and they disagreed"$'\n'"$(cut -f1 "$TRACE_FILE" | sort -u)"
 
 printf 'ok   commit-capture-detection.sh (quiet commits + host-agnostic org/repo)\n'

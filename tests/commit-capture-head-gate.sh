@@ -808,6 +808,54 @@ case "$POST_OUT" in
   *) fail "a merge commit reported none of the paths it brought in"$'\n'"got: ${POST_OUT:-<empty>}" ;;
 esac
 
+# --- 25. an amend in its own call is captured as its own record --------------
+# The amended commit is a sibling of the tip the snapshot recorded, not a
+# descendant, so it reaches capture through the `HEAD_BEFORE^` branch of the
+# ancestry check. Two things could go wrong there and neither shows up anywhere
+# else in this suite: the walk could start at the wrong base and re-report the
+# history below the amend, or the sibling could be read as an undo and dropped.
+#
+# The behaviour this pins is that one logical commit written twice produces two
+# records — the original, then the amended one. That is deliberate. The daily note
+# is a log of what the session did, the amend is a second thing the session did,
+# and it can change the subject and the paths (`--amend` after a forgotten `git
+# add` is the common case), so the later record is the one that matches the repo.
+# Suppressing it would mean recognising "same logical commit" across a rewritten
+# sha and deciding the earlier record was a lie, which it wasn't.
+reset_state
+P="$(payload 'git commit -q -m original' "$REPO" call-25a)"
+run_pre "$P"
+: > "$REPO/amended.txt"
+git -C "$REPO" add amended.txt
+git -C "$REPO" commit -q -m "original subject"
+run_post_verbose "$P"
+FIRST_HASH="$(printf '%s' "$POST_OUT" | sed -n 's/.*hash=\([0-9a-f]*\).*/\1/p')"
+[ -n "$FIRST_HASH" ] || fail "case 25 setup: the pre-amend commit was not captured"$'\n'"got: ${POST_OUT:-<empty>}"
+
+reset_state
+P="$(payload 'git commit -q --amend -m "amended subject"' "$REPO" call-25b)"
+run_pre "$P"
+git -C "$REPO" commit -q --amend -m "amended subject"
+run_post_verbose "$P"
+case "$POST_OUT" in
+  *hash=*) : ;;
+  *) fail "an amend in its own Bash call was not captured; a sibling tip is being read as an undo"$'\n'"got: ${POST_OUT:-<empty>}"$'\n'"stderr: $POST_ERR" ;;
+esac
+RECORDS="$(printf '%s' "$POST_OUT" | grep -o 'hash=' | wc -l | tr -d ' ')"
+[ "$RECORDS" -eq 1 ] || fail "an amend produced ${RECORDS} records; the walk is not starting at the amended commit's parent"$'\n'"got: $POST_OUT"
+AMEND_HASH="$(printf '%s' "$POST_OUT" | sed -n 's/.*hash=\([0-9a-f]*\).*/\1/p')"
+[ "$AMEND_HASH" = "$(git -C "$REPO" rev-parse --short HEAD)" ] \
+  || fail "the amend record names ${AMEND_HASH}, not the amended tip $(git -C "$REPO" rev-parse --short HEAD)"
+[ "$AMEND_HASH" != "$FIRST_HASH" ] || fail "the amend record repeats the pre-amend sha ${FIRST_HASH}; an amend always rewrites it"
+case "$POST_OUT" in
+  *'msg=amended subject'*) : ;;
+  *) fail "the amend record carries the pre-amend subject; the record is not read from the new tip"$'\n'"got: $POST_OUT" ;;
+esac
+case "$POST_OUT" in
+  *'files=amended.txt'*) : ;;
+  *) fail "the amend record does not name the amended commit's own path"$'\n'"got: $POST_OUT" ;;
+esac
+
 # --- wiring: both halves are registered on Bash ------------------------------
 # The pair is one mechanism. Shipping the post-hook without the pre-hook turns
 # every capture into a stderr diagnostic.
