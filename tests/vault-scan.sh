@@ -205,6 +205,73 @@ _n="$(printf '%s\n' "$_out" | grep -c '^CLUSTER' || true)"
 printf '%s\n' "$_out" | grep -qF "CLUSTER"$'\t'"Awesome Folder 7"$'\t'"note"$'\t'"3" \
   || fail "space-bearing folder name was mangled: $(printf '%s\n' "$_out" | grep 'Awesome' | head -2)"
 
+# --- unreadable is counted; truncated is reported (#51) ----------------------
+# The tick's gate could only see "bytes on stderr", so a permanently-unreadable
+# directory read as a fault and latched: INCOMPLETE forever, last_scan never
+# recorded, no recovery. The walk now classifies instead.
+if [ "$(id -u)" = "0" ]; then
+  echo "note: running as root, skipping the unreadable-path arms" >&2
+else
+  PV="$TMP/permvault"; mkdir -p "$PV/readable" "$PV/locked"
+  printf -- '---\ntags: [x]\n---\nbody\n' > "$PV/readable/seen.md"
+  printf -- '---\ntags: [x]\n---\nbody\n' > "$PV/locked/hidden.md"
+  chmod 000 "$PV/locked"
+  # chmod is undone in the trap's stead — rm -rf on a 000 directory fails otherwise
+  # and the fixture would outlive the suite.
+  restore_perm() { chmod 755 "$PV/locked" 2>/dev/null || true; }
+
+  # 1. Without the collector the benign line still reaches stderr, so a caller that
+  #    has not opted in behaves exactly as before — the tick's fail-open path.
+  P_ERR="$TMP/perm-noopt.err"
+  P_OUT="$(unset KEEPER_SCAN_UNREADABLE_FILE; scan_frontmatter_gaps "$PV" "tags type" 2>"$P_ERR")" \
+    || { restore_perm; fail "scan aborted on an unreadable directory"; }
+  grep -qE 'Permission denied|Operation not permitted' "$P_ERR" \
+    || { restore_perm; fail "with no collector the unreadable path must still be reported somewhere: $(cat "$P_ERR")"; }
+
+  # 2. With the collector, stderr is CLEAN — this is what un-latches the gate — and
+  #    the path is recorded for the caller to count.
+  U_FILE="$TMP/unreadable.list"; : > "$U_FILE"
+  P_ERR2="$TMP/perm-opt.err"
+  KEEPER_SCAN_UNREADABLE_FILE="$U_FILE" scan_frontmatter_gaps "$PV" "tags type" >/dev/null 2>"$P_ERR2" \
+    || { restore_perm; fail "scan aborted with the collector set"; }
+  if [ -s "$P_ERR2" ]; then
+    restore_perm
+    fail "an unreadable path still wrote to stderr, so the tick's gate will keep latching: $(cat "$P_ERR2")"
+  fi
+  [ -s "$U_FILE" ] \
+    || { restore_perm; fail "the unreadable path was suppressed but never recorded — that is silence, not classification"; }
+
+  # 3. Suppressing the noise must not suppress a real fault arriving the same way.
+  #    A too-narrow denylist should over-report, never under-report.
+  : > "$U_FILE"
+  F_ERR="$TMP/perm-fatal.err"
+  KEEPER_SCAN_UNREADABLE_FILE="$U_FILE" bash -c '
+    . "'"${ROOT_DIR}"'/scripts/lib/frontmatter.sh"
+    . "'"${ROOT_DIR}"'/scripts/lib/vault-scan.sh"
+    find() { command find "$@"; printf "find: %s: Too many open files\n" "$1" >&2; return 1; }
+    scan_open_asks "'"$PV"'" >/dev/null
+  ' 2>"$F_ERR" || { restore_perm; fail "the fatal-line probe aborted"; }
+  grep -q 'Too many open files' "$F_ERR" \
+    || { restore_perm; fail "a genuine fault was swallowed along with the benign lines: $(cat "$F_ERR")"; }
+
+  # 4. A walk killed by a signal says the set is truncated. Nothing said so before:
+  #    a scanner killed mid-walk prints nothing at all, so stderr — the only signal
+  #    the gate had — stayed empty and the short candidate set read as complete.
+  K_ERR="$TMP/killed.err"
+  KEEPER_SCAN_UNREADABLE_FILE="$U_FILE" bash -c '
+    . "'"${ROOT_DIR}"'/scripts/lib/frontmatter.sh"
+    . "'"${ROOT_DIR}"'/scripts/lib/vault-scan.sh"
+    # 128+9: exactly what a walk killed by SIGKILL leaves behind, and it writes
+    # nothing to stderr, which is why the old gate could not see it.
+    find() { return 137; }
+    scan_open_asks "'"$PV"'" >/dev/null
+  ' 2>"$K_ERR" || { restore_perm; fail "the killed-walk probe aborted"; }
+  grep -q 'truncated' "$K_ERR" \
+    || { restore_perm; fail "a walk killed by a signal reported nothing, so a short scan reads as complete: ${K_ERR:+$(cat "$K_ERR")}"; }
+
+  restore_perm
+fi
+
 # --- a non-numeric cluster threshold fails loudly (#55) ----------------------
 # awk coerces a non-numeric `t` to 0, so an unusable threshold returned every token
 # in the vault as a cluster — silently, filling Librarian.md with noise. Each of

@@ -110,6 +110,48 @@ if [ -f "$CV/Pending.md" ]; then
     || fail "fault/heal cycles duplicated $_dups Pending.md item(s): $(grep '^- \[ \]' "$CV/Pending.md" | sort | uniq -d | head -3)"
 fi
 
+# --- an unreadable directory must not latch the gate (#51) -------------------
+# One `chmod 000` directory made find print `Permission denied`, and the gate — which
+# could only see bytes on stderr — reported INCOMPLETE on every tick from then on and
+# never recorded last_scan. No tick can fix a permission, so there was no recovery:
+# a vault whose every readable note WAS scanned looked permanently broken. Four
+# agents reproduced it across consecutive ticks.
+if [ "$(id -u)" = "0" ]; then
+  echo "note: running as root, skipping the unreadable-directory tick arm" >&2
+else
+  PTV="$TMP/permtickvault"; mkdir -p "$PTV/Inbox" "$PTV/locked"
+  printf -- '---\ntags: [x]\n---\nbody\n' > "$PTV/n.md"
+  printf -- '---\ntags: [x]\n---\nbody\n' > "$PTV/locked/hidden.md"
+  chmod 000 "$PTV/locked"
+  PTCFG="$TMP/permtick.local.md"; sed "s|^vault_path: .*|vault_path: $PTV|" "$CFG" > "$PTCFG"
+  PTOUT="$TMP/permtick.out"
+  # Twice: the latch only showed up as "and it never recovers", so one tick cannot
+  # tell a latch from a first fault.
+  for _r in 1 2; do
+    OBSIDIAN_LOCAL_MD="$PTCFG" VAULTKEEPER_HOST="ml-1" \
+      bash "${ROOT_DIR}/scripts/vaultkeeper-tick.sh" >"$PTOUT" 2>&1 \
+      || { chmod 755 "$PTV/locked"; fail "an unreadable directory aborted the tick; got: $(cat "$PTOUT")"; }
+  done
+  if grep -q 'scan INCOMPLETE' "$PTOUT"; then
+    chmod 755 "$PTV/locked"
+    fail "an unreadable directory still reports INCOMPLETE, so the gate latches with no recovery path; got: $(cat "$PTOUT")"
+  fi
+  grep -q 'scan complete' "$PTOUT" \
+    || { chmod 755 "$PTV/locked"; fail "the scan of every readable note was not reported complete; got: $(cat "$PTOUT")"; }
+  [ -f "$(keeper_last_scan_file "$PTV")" ] \
+    || { chmod 755 "$PTV/locked"; fail "last_scan was withheld, so the staleness banner will nag forever about a healthy vault"; }
+  # Suppressed is not the same as ignored: the condition has to be visible, by count.
+  grep -q 'unreadable' "$PTOUT" \
+    || { chmod 755 "$PTV/locked"; fail "the unreadable path was never mentioned — that is silence, not classification; got: $(cat "$PTOUT")"; }
+  grep -q '^paths_unreadable: 1' "$PTV/Librarian.md" \
+    || { chmod 755 "$PTV/locked"; fail "the digest does not record the unreadable count: $(head -6 "$PTV/Librarian.md")"; }
+  # …and the count must not carry the absolute host path into the synced digest.
+  case "$(cat "$PTV/Librarian.md")" in
+    *"$PTV/locked"*) chmod 755 "$PTV/locked"; fail "the digest leaked the unreadable path itself" ;;
+  esac
+  chmod 755 "$PTV/locked"
+fi
+
 # --- one repeated benign error must not crowd out a serious one (#54) --------
 # `_scan_find_md` backs three scanners, so a single unreadable directory puts the
 # same `find: … Permission denied` line in the buffer three times. The 300-char

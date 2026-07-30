@@ -45,9 +45,7 @@ CONFLICTS="$(keeper_quarantine_conflicts "$VAULT" || true)"
 SCAN_FAULT=""
 SCAN_ERR="$(mktemp "${TMPDIR:-/tmp}/kbscan-XXXXXX" 2>/dev/null)" || SCAN_ERR=""
 if [ -n "$SCAN_ERR" ]; then
-  # trap, not a bare rm below: a tick killed for overrunning its launchd window
-  # otherwise leaks one buffer every 15 minutes, and the fault goes with it.
-  trap 'rm -f "$SCAN_ERR"' EXIT
+  :
 else
   # Fail closed. With no buffer the fault check can never fire, and failing open
   # here restored the exact bug this gate removes — a partial scan recorded as
@@ -56,6 +54,32 @@ else
   # an independent one.
   SCAN_FAULT="cannot create the scan-fault buffer (mktemp failed); scan not verifiable"
 fi
+# Permanently-unreadable paths are not a fault (#51). One `chmod 000` directory, or
+# an iCloud path macOS TCC refuses, made `find` print `Permission denied` — and the
+# gate, which could only see bytes on stderr, then reported INCOMPLETE on every tick
+# from then on and never recorded last_scan. No tick can fix such a path, so there
+# was no recovery: a vault whose readable notes were all scanned looked permanently
+# broken. vault-scan.sh now separates the two, routing these here to be counted.
+SCAN_UNREADABLE=""
+KEEPER_SCAN_UNREADABLE_FILE="$(mktemp "${TMPDIR:-/tmp}/kbunread-XXXXXX" 2>/dev/null)" \
+  || KEEPER_SCAN_UNREADABLE_FILE=""
+if [ -n "$KEEPER_SCAN_UNREADABLE_FILE" ]; then
+  export KEEPER_SCAN_UNREADABLE_FILE
+else
+  # Unlike the fault buffer, failing open here is the safe direction: with nowhere
+  # to record them, the unreadable lines stay on stderr and land in SCAN_FAULT — the
+  # old over-triggering behaviour, which is loud rather than silent.
+  unset KEEPER_SCAN_UNREADABLE_FILE
+fi
+# One trap for both buffers, set once they are both decided. A tick killed for
+# overrunning its launchd window otherwise leaks a file every 15 minutes — and
+# `rm -f ""` is not a no-op, so each path is guarded rather than interpolated bare.
+cleanup_bufs() {
+  [ -n "${SCAN_ERR:-}" ] && rm -f "$SCAN_ERR" 2>/dev/null
+  [ -n "${KEEPER_SCAN_UNREADABLE_FILE:-}" ] && rm -f "$KEEPER_SCAN_UNREADABLE_FILE" 2>/dev/null
+  return 0
+}
+trap cleanup_bufs EXIT
 CAND="$( {
   scan_frontmatter_gaps "$VAULT" "$REQUIRED"
   scan_unfiled "$VAULT"
@@ -84,6 +108,20 @@ if [ -n "$SCAN_ERR" ] && [ -s "$SCAN_ERR" ]; then
   printf '%s\n' "$SCAN_FAULT" >&2
 fi
 
+# Unreadable paths get reported every tick, and separately from the fault, because
+# they are a standing condition rather than an event: the count says "this many
+# places I am not allowed to look", the scan of everything else is complete, and
+# last_scan is recorded. Reported by count, not by path — the paths are absolute
+# host paths, and the digest is replicated to every host (#56).
+if [ -n "${KEEPER_SCAN_UNREADABLE_FILE:-}" ] && [ -s "$KEEPER_SCAN_UNREADABLE_FILE" ]; then
+  SCAN_UNREADABLE="$(sort -u "$KEEPER_SCAN_UNREADABLE_FILE" | grep -c . | tr -d ' ')"
+  [ "$SCAN_UNREADABLE" = "0" ] && SCAN_UNREADABLE=""
+fi
+if [ -n "$SCAN_UNREADABLE" ]; then
+  printf 'vaultkeeper: %s path(s) unreadable on %s — every readable note was scanned; permissions are not something a tick can fix\n' \
+    "$SCAN_UNREADABLE" "$HOST" >&2
+fi
+
 # These two stay above the gate because both survive a partial candidate set:
 # base_view_write's content does not depend on CAND, and the digest is a full
 # overwrite that nothing reads back. A permanently-faulting host therefore still
@@ -93,7 +131,7 @@ fi
 # reaches Pending.md and no later tick can re-emit it. The file is safely in
 # .vaultkeeper-quarantine either way; the missing checklist line is filed separately.
 base_view_write "$VAULT/_vaultkeeper.base"
-printf '%s\n' "$CAND" | surfacing_digest "$VAULT" "${SCAN_FAULT:+INCOMPLETE}"
+printf '%s\n' "$CAND" | surfacing_digest "$VAULT" "${SCAN_FAULT:+INCOMPLETE}" "$SCAN_UNREADABLE"
 
 if [ -n "$SCAN_FAULT" ]; then
   # Stop before the snapshot. surfacing_pending_transition diffs against it and then

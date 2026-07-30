@@ -3,19 +3,26 @@
 # append only genuinely-new candidates to Pending.md (transition-gated against
 # the prior-scan snapshot). Requires note-hash.sh + keeper-state.sh.
 
-# surfacing_digest <vault> [status]
+# surfacing_digest <vault> [status] [unreadable-count]
 # `status` is stamped as `scan_status:` when non-empty. The caller passes INCOMPLETE
 # when the scanners faulted: this file is the human-facing artifact and it was
 # claiming a fresh full scan — timestamp AND section counts — on ticks the keeper
 # itself refused to record as complete.
+#
+# `unreadable-count` is stamped as `paths_unreadable:`. It is separate from status on
+# purpose (#51): a path the host is not allowed to read is a standing condition, not
+# a fault — every readable note was still scanned — so the scan stays complete and
+# says how much of the vault it could not see. A count and not the paths: they are
+# absolute host paths, and this file is replicated to every host.
 surfacing_digest() {
-  local vault="$1" status="${2:-}" lines tmp target="$1/Librarian.md" kind label
+  local vault="$1" status="${2:-}" unreadable="${3:-}" lines tmp target="$1/Librarian.md" kind label
   lines="$(cat)"
   tmp="$(mktemp "$vault/.Librarian-XXXXXX")" || return 1
   {
     printf '%s\n' '<!-- MACHINE-OWNED: regenerated each vaultkeeper scan. Edits do not persist. -->'
     printf '# Librarian\n\nlast_scan: %s\n' "$(now_epoch)"
     [ -n "$status" ] && printf 'scan_status: %s\n' "$status"
+    [ -n "$unreadable" ] && printf 'paths_unreadable: %s\n' "$unreadable"
     for kind in GAP UNFILED ASK CLUSTER QUARANTINE; do
       if [ "$kind" = "GAP" ]; then label="Frontmatter gaps"
       elif [ "$kind" = "UNFILED" ]; then label="Unfiled (Inbox)"
