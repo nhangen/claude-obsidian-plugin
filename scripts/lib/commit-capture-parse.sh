@@ -211,6 +211,11 @@ cc_resolve_repo_dir() {
 # Running git in the hook's own cwd read the wrong HEAD — dropping the capture
 # when the session repo was idle, or capturing the wrong commit when it wasn't.
 # Prints the repo dir, or returns 1 when no candidate is a git repository.
+#
+# CALL ORDER: `cc_invokes_commit` must run first. It is what sets CC_GIT_C_DIR and
+# CC_CD_TARGET, the two highest-priority candidates read below; calling this alone
+# silently degrades to the payload cwd, which is a different repository whenever the
+# command changed directory.
 cc_find_repo_dir() {
   local payload_cwd="$1" cand resolved
   for cand in "$CC_GIT_C_DIR" "$CC_CD_TARGET" "$payload_cwd" "$PWD"; do
@@ -226,6 +231,21 @@ cc_state_dir() {
   printf '%s' "${XDG_STATE_HOME:-$HOME/.local/state}/claude-obsidian"
 }
 
+# Keyed on a bounded digest rather than a slug of the raw value: slugging split
+# one repo across several keys and, in a deep worktree, exceeded NAME_MAX.
+# The fallback keeps the value's own bytes (filtered to a filename-safe set, then
+# truncated) rather than a constant — a constant would quietly collapse every
+# invocation onto one key, which is the crossing failure the digest prevents.
+cc_digest() {
+  local d
+  d=$(printf '%s' "$1" | cksum 2>/dev/null | tr -cd '0-9') || d=""
+  if [ -z "$d" ]; then
+    d=$(printf '%s' "$1" | tr -cd 'A-Za-z0-9_-')
+    d="nocksum-${d:0:64}"
+  fi
+  printf '%s' "$d"
+}
+
 # Snapshot key. A Bash call carries a tool_use_id, which names *this* invocation
 # and so survives two commits running concurrently in one session. When the
 # payload has no such field, fall back to the session — the pair still lines up
@@ -239,13 +259,4 @@ cc_snapshot_key() {
   id="$(cc_json_value "$payload" '"tool_use_id"')"
   [ -n "$id" ] || id="session:$(cc_json_value "$payload" '"session_id"')"
   cc_digest "$id"
-}
-
-# Keyed on a bounded digest rather than a slug of the raw value: slugging split
-# one repo across several keys and, in a deep worktree, exceeded NAME_MAX.
-cc_digest() {
-  local d
-  d=$(printf '%s' "$1" | cksum 2>/dev/null | tr -cd '0-9') || d=""
-  [ -n "$d" ] || d="unkeyed"
-  printf '%s' "$d"
 }

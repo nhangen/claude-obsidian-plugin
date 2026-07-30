@@ -36,10 +36,28 @@ PAYLOAD_CWD="$(cc_json_value "$INPUT" '"cwd"')"
 
 cc_invokes_commit "$COMMAND_LINE" || exit 0
 
-# The repo may not exist yet — `mkdir x && cd x && git init && git commit` is a
-# real shape. Record that we looked and could not resolve one, which is different
-# from not having run at all: the post-hook has no prior HEAD to compare against
-# and falls back to requiring a freshly-dated tip.
+# The repo the command names may not exist yet — `git worktree add ../wt && cd ../wt
+# && git commit` and `mkdir sub && cd sub && git init && git commit` are both real
+# shapes, and the first is this project's own documented workflow. Record the named
+# directory regardless of whether it resolves *now*: without it, resolution fell
+# through to the surrounding repo, the post-hook resolved the new one, the two roots
+# disagreed, and the real commit was discarded as belonging to another repository.
+INTENT=""
+for cand in "$CC_GIT_C_DIR" "$CC_CD_TARGET"; do
+  [ -n "$cand" ] || continue
+  INTENT="$cand"
+  break
+done
+# Absolutise it so the post-hook does not have to reproduce this hook's cwd, and so
+# a relative `cd` cannot resolve against the wrong directory later.
+case "$INTENT" in
+  '') ;;
+  '~') INTENT="$HOME" ;;
+  '~/'*) INTENT="$HOME/${INTENT#\~/}" ;;
+  /*) ;;
+  *) [ -n "$PAYLOAD_CWD" ] && INTENT="$PAYLOAD_CWD/$INTENT" ;;
+esac
+
 SHA="unresolved"
 ROOT=""
 REPO_DIR="$(cc_find_repo_dir "$PAYLOAD_CWD")" || REPO_DIR=""
@@ -51,6 +69,12 @@ if [ -n "$REPO_DIR" ]; then
   case "$SHA" in
     *[!0-9a-f]*|'') SHA="none" ;;
   esac
+elif [ -z "$INTENT" ]; then
+  # Nothing resolved and the command named nothing, so there is no repository this
+  # snapshot could be *about*. Writing one anyway produced a sha that matches no
+  # HEAD and a root that matches every repo — a wildcard the post-hook could only
+  # resolve with the same recent-tip guess the gate exists to replace.
+  exit 0
 fi
 
 SNAP_DIR="$(cc_state_dir)/pre-commit-head"
@@ -63,7 +87,10 @@ mkdir -p "$SNAP_DIR" 2>/dev/null || exit 0
 find "$SNAP_DIR" -type f -mtime +1 -delete 2>/dev/null || true
 
 KEY="$(cc_snapshot_key "$INPUT")"
-# Newline-free values only: root comes from rev-parse, sha from a hex check.
-{ printf 'sha=%s\nroot=%s\n' "$SHA" "$ROOT" > "${SNAP_DIR}/${KEY}"; } 2>/dev/null || true
+# One `key=value` per line, and every value is newline-free: sha passes a hex check,
+# root comes from rev-parse, and a newline cannot survive the payload decode into a
+# single shell token. The post-hook reads the keys it knows and ignores the rest, so
+# adding a field does not strand an in-flight snapshot from an older version.
+{ printf 'sha=%s\nroot=%s\nintent=%s\n' "$SHA" "$ROOT" "$INTENT" > "${SNAP_DIR}/${KEY}"; } 2>/dev/null || true
 
 exit 0
