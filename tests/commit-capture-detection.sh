@@ -62,6 +62,10 @@ case "\$*" in
   # One record per commit: the hook walks the range, then asks each sha for its
   # short hash, subject and paths. A single-commit range keeps these cases about
   # detection rather than about the walk (head-gate covers the walk on real repos).
+  # Provenance: HEAD's reflog says this repo committed the tip rather than pulling
+  # it. Answer as a local commit — the pulled-commit cases live in head-gate, where
+  # a real pull can actually happen.
+  "reflog show --format=%H %gs") echo "0123456789abcdef0123456789abcdef01234567 commit: test commit" ;;
   "rev-list --reverse "*) echo 0123456789abcdef0123456789abcdef01234567 ;;
   "rev-parse --short "*) echo abc1234 ;;
   "log -1 --pretty=format:%s "*) echo "test commit" ;;
