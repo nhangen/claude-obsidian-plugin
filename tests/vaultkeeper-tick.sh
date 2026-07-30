@@ -110,6 +110,52 @@ if [ -f "$CV/Pending.md" ]; then
     || fail "fault/heal cycles duplicated $_dups Pending.md item(s): $(grep '^- \[ \]' "$CV/Pending.md" | sort | uniq -d | head -3)"
 fi
 
+# --- a faulted tick keeps the quarantine receipt (#58) -----------------------
+# The four scanners re-derive their rows every tick, so withholding them on a fault
+# costs nothing. QUARANTINE is a receipt for an irreversible `mv`, emitted once, and
+# the file it names is excluded from every later walk — so a row withheld here was
+# withheld permanently and the user never learned a sync conflict needed merging.
+RQV="$TMP/receiptvault"; mkdir -p "$RQV/Inbox"
+printf -- '---\ntags: [x]\ntype: a\n---\nbody\n' > "$RQV/n.md"
+printf 'conflicted\n' > "$RQV/Pending.sync-conflict-20260730-120000-RECEIPT.md"
+# A re-derivable row that is NEW on the faulted tick. It must NOT be appended: the
+# exception is for rows that cannot come back, and letting the rest through reopens
+# #49's duplication — the snapshot is deliberately not updated, so the next healthy
+# tick's transition would append the same row a second time.
+printf -- '---\ntags: [x]\n---\nbody\n' > "$RQV/rederivable-gap.md"
+RQCFG="$TMP/receipt.local.md"; sed "s|^vault_path: .*|vault_path: $RQV|" "$CFG" > "$RQCFG"
+# A scanner that faults, so the tick takes the gated path with a real conflict present.
+RQLIB="$TMP/receiptlib"; mkdir -p "$RQLIB"; cp "${ROOT_DIR}"/scripts/lib/*.sh "$RQLIB/"
+cat >> "$RQLIB/vault-scan.sh" <<'EOF'
+scan_open_asks() { printf 'vault-scan.sh: RECEIPT-FAULT\n' >&2; return 0; }
+EOF
+RQS="$TMP/receiptscripts"; mkdir -p "$RQS"; cp "${ROOT_DIR}"/scripts/*.sh "$RQS/" 2>/dev/null || true
+cp -R "$RQLIB" "$RQS/lib"
+RQOUT="$TMP/receipt.out"
+OBSIDIAN_LOCAL_MD="$RQCFG" VAULTKEEPER_HOST="ml-1" \
+  bash "$RQS/vaultkeeper-tick.sh" >"$RQOUT" 2>&1 \
+  || fail "the faulted receipt tick aborted; got: $(cat "$RQOUT")"
+grep -q 'scan INCOMPLETE' "$RQOUT" \
+  || fail "the receipt fixture did not fault, so it proves nothing; got: $(cat "$RQOUT")"
+[ -f "$RQV/Pending.md" ] \
+  || fail "a faulted tick dropped the quarantine receipt entirely — no later tick can re-emit it"
+grep -q 'QUARANTINE: Pending.sync-conflict-20260730-120000-RECEIPT.md' "$RQV/Pending.md" \
+  || fail "Pending.md has no QUARANTINE line for the moved conflict: $(cat "$RQV/Pending.md")"
+# The snapshot must still be untouched — that is what stops a truncated candidate set
+# from making the next healthy tick re-append everything this scan missed.
+keeper_has_snapshot "$RQV" \
+  && fail "the faulted tick wrote the prior-scan snapshot; the transition gate is defeated"
+grep -q 'GAP: rederivable-gap.md' "$RQV/Pending.md" \
+  && fail "the faulted tick appended a re-derivable row too; the snapshot is not updated, so the next healthy tick will append it again: $(cat "$RQV/Pending.md")"
+# And the row must not duplicate: a healthy tick afterwards no longer sees the file
+# (it is inside .vaultkeeper-quarantine), so `comm -23` must not re-add it.
+OBSIDIAN_LOCAL_MD="$RQCFG" VAULTKEEPER_HOST="ml-1" \
+  bash "${ROOT_DIR}/scripts/vaultkeeper-tick.sh" >>"$RQOUT" 2>&1 \
+  || fail "the follow-up healthy tick aborted; got: $(cat "$RQOUT")"
+_rq="$(grep -c 'QUARANTINE: Pending.sync-conflict-20260730-120000-RECEIPT.md' "$RQV/Pending.md" | tr -d ' ')"
+[ "$_rq" = "1" ] \
+  || fail "the quarantine receipt appears $_rq times in Pending.md after a fault/heal cycle"
+
 # --- the whole tick under real fd exhaustion (#57) ---------------------------
 # The scanner fix and the fault gate were each pinned individually, but nothing ran
 # the composition against the condition that produced the incident: the tick's own

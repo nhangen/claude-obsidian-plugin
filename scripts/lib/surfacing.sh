@@ -38,6 +38,36 @@ surfacing_digest() {
   mv "$tmp" "$target"
 }
 
+# surfacing_pending_append <vault>
+# Append rows to Pending.md without touching the prior-scan snapshot. For rows whose
+# side effect already happened and cannot be re-derived (#58).
+#
+# The four scanners re-derive their rows every tick, so withholding them on a faulted
+# tick loses nothing — the next healthy tick emits them again. QUARANTINE is not like
+# that: the row is a receipt for an irreversible `mv`, emitted exactly once, and the
+# file it names is excluded from every later walk, so a row dropped here is dropped
+# permanently. The user loses the `- [ ] QUARANTINE: …` line telling them a sync
+# conflict needs merging. The file is safely in .vaultkeeper-quarantine either way.
+#
+# Append-only is what makes this safe next to the transition gate: the snapshot is
+# left alone, and because the row can never be re-derived, the next healthy tick's
+# `comm -23` cannot see it as new and re-append it.
+surfacing_pending_append() {
+  local vault="$1" pending="$1/Pending.md" line out
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    out="- [ ] $(printf '%s' "$line" | sed 's/'$'\t''/: /')"
+    # Idempotent against what is already there. The move happens once so a repeat is
+    # not reachable today, but Pending.md is hand-edited and Syncthing-replicated —
+    # a duplicated checklist line is exactly the damage #49 went to lengths to avoid.
+    if [ -f "$pending" ] && grep -qxF -- "$out" "$pending"; then
+      continue
+    fi
+    printf '%s\n' "$out" >> "$pending"
+  done
+  return 0
+}
+
 surfacing_pending_transition() {
   local vault="$1" cur snap new pending="$1/Pending.md"
   cur="$(sort -u)"
