@@ -1,7 +1,7 @@
 ---
 name: commit-capture
 description: Captures conversation context around git commits to Obsidian vault. Fires automatically via PostToolUse hook.
-version: 2.4.1
+version: 2.5.0
 ---
 
 # Commit Capture
@@ -10,12 +10,12 @@ The value here is not commit metadata — git already has that. The value is the
 
 ## Architecture
 
-Detection and metadata extraction are handled by two shell hooks (zero AI cost): `scripts/commit-capture-pre.sh` records `HEAD` before a `git commit` runs, and `scripts/commit-capture.sh` captures only if `HEAD` moved. This skill is invoked when the post-hook outputs a line starting with `obsidian-commit-capture:` — all metadata is inline, no file read needed.
+Detection and metadata extraction are handled by two shell hooks (zero AI cost): `scripts/commit-capture-pre.sh` records `HEAD` before a `git commit` runs, and `scripts/commit-capture.sh` captures only if `HEAD` moved. This skill is invoked when the post-hook outputs a line starting with `obsidian-commit-capture:` — all metadata is inline, no file read needed. **One invocation can carry several records**, one per commit the call made, oldest first: write a note for each, in order.
 
 **Only a line beginning `obsidian-commit-capture: hash=` is a record.** Records and diagnostics arrive the same way, wrapped in a system reminder next to the tool result: a hook that exits 0 reaches Claude only through `hookSpecificOutput.additionalContext`, so that is where both go. A `not captured` line can also arrive from the *pre*-hook, before the commit runs, when it could not write its HEAD snapshot — the failure is reported by the half that hit it. Two other prefixes exist:
 
 - `obsidian-commit-capture: not captured — …` — nothing was captured, and the rest of the line says why. Do not write a note. Surface the reason if the user asks why a commit went uncaptured, or if it names a fix (an unregistered hook, an unwritable state dir, a missing `vault_path`).
-- `obsidian-commit-capture: partial — …` — a record follows, but the call made more commits than the one captured, and the line lists the shas that were skipped. Write the note for the record; mention the skipped shas only if the user is reconciling history.
+- `obsidian-commit-capture: partial — …` — more commits were made than the cap allows; the records that follow are the oldest `OBSIDIAN_COMMIT_MAX_RECORDS` (20 by default) and the line lists the shas beyond it. Write a note per record; mention the skipped shas only if the user is reconciling history.
 
 The actual write goes through the **keeper CLI** (`scripts/keeper append`) — the
 keeper's deterministic write primitive. The CLI creates the file on absence,

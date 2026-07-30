@@ -457,21 +457,70 @@ case "$POST_OUT" in
   *'hash='*) fail "a diagnostic was emitted in record form; the skill would file a note for it"$'\n'"got: $POST_OUT" ;;
 esac
 
-# --- 18. a call that made several commits says so ---------------------------
+# --- 18. a call that made several commits emits a record for each ------------
+# It used to record the tip and name the rest in a `partial` line, so the earlier
+# commits reached the vault as a mention inside another commit's note, or not at
+# all (#70). A split-commit sequence is the normal shape here — one commit per
+# review concern, per implementing-review-feedback.
 reset_state
 P="$(payload 'git commit -q -m one && git commit -q -m two' "$REPO" call-18)"
 run_pre "$P"
 commit_in "$REPO" "commit one"
 commit_in "$REPO" "commit two"
 run_post_verbose "$P"
-case "$POST_OUT" in
-  *'partial —'*) : ;;
-  *) fail "two commits in one call captured one and said nothing about the other"$'\n'"got: ${POST_OUT:-<empty>}" ;;
-esac
-case "$POST_OUT" in
-  *'msg=commit two'*) : ;;
-  *) fail "the tip commit was not the one captured"$'\n'"got: $POST_OUT" ;;
-esac
+python3 - "$POST_OUT" <<'EOF' || fail "two commits in one call did not produce two records"$'\n'"got: ${POST_OUT:-<empty>}"
+import json, sys
+ctx = json.loads(sys.argv[1])["hookSpecificOutput"]["additionalContext"]
+recs = [l for l in ctx.splitlines() if l.startswith("obsidian-commit-capture: hash=")]
+assert len(recs) == 2, recs
+# Oldest first, so appending them to a daily note reads in the order they happened.
+assert "msg=commit one" in recs[0], recs
+assert "msg=commit two" in recs[1], recs
+assert recs[0].split(" | ")[0] != recs[1].split(" | ")[0], recs
+assert "partial" not in ctx, ctx
+EOF
+
+# Per-commit `files=`. The old field came from HEAD~1..HEAD of whatever the tip
+# was, so a record for an earlier commit would have claimed the tip's paths.
+reset_state
+P="$(payload 'git commit -q -m a && git commit -q -m b' "$REPO" call-18b)"
+run_pre "$P"
+: > "$REPO/only-in-first.txt"
+git -C "$REPO" add only-in-first.txt
+git -C "$REPO" commit -q -m "first of two"
+: > "$REPO/only-in-second.txt"
+git -C "$REPO" add only-in-second.txt
+git -C "$REPO" commit -q -m "second of two"
+run_post_verbose "$P"
+python3 - "$POST_OUT" <<'EOF' || fail "records did not carry per-commit file lists"$'\n'"got: ${POST_OUT:-<empty>}"
+import json, sys
+ctx = json.loads(sys.argv[1])["hookSpecificOutput"]["additionalContext"]
+recs = [l for l in ctx.splitlines() if l.startswith("obsidian-commit-capture: hash=")]
+assert len(recs) == 2, recs
+assert "files=only-in-first.txt" in recs[0], recs[0]
+assert "files=only-in-second.txt" in recs[1], recs[1]
+EOF
+
+# --- 18c. the cap is announced, never silent --------------------------------
+# One record per commit is unbounded in principle — a scripted loop could make
+# dozens. Capping is fine; capping quietly is not, because a truncated capture
+# reads exactly like a complete one.
+reset_state
+P="$(payload 'git commit -q -m loop' "$REPO" call-18c)"
+run_pre "$P"
+for i in 1 2 3 4; do commit_in "$REPO" "loop commit $i"; done
+export OBSIDIAN_COMMIT_MAX_RECORDS=2
+run_post_verbose "$P"
+unset OBSIDIAN_COMMIT_MAX_RECORDS
+python3 - "$POST_OUT" <<'EOF' || fail "a capped multi-commit capture did not announce what it dropped"$'\n'"got: ${POST_OUT:-<empty>}"
+import json, sys
+ctx = json.loads(sys.argv[1])["hookSpecificOutput"]["additionalContext"]
+recs = [l for l in ctx.splitlines() if l.startswith("obsidian-commit-capture: hash=")]
+assert len(recs) == 2, recs
+partial = [l for l in ctx.splitlines() if "partial" in l]
+assert partial, ctx
+assert "4" in partial[0], partial
+EOF
 
 # --- 19. a path or branch cannot inject a field ahead of a real one ---------
 # `|` is legal in a filename and in a refname, and files=/branch= both precede
