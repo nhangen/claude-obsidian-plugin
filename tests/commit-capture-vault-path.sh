@@ -159,12 +159,14 @@ GOT=$(run_case "${CASE_DIR}/obsidian.local.md" "$CASE_DIR")
 [ "$GOT" = "/Users/test/Vault" ] || fail "case8 (single-quoted): got '$GOT' want '/Users/test/Vault'"
 PASS_COUNT=$((PASS_COUNT + 1))
 
-# ----- Case 9: output preserves all metadata fields with vault_path appended -----
+# ----- Case 9: the record keeps every field, inside the delivery envelope -----
+# The envelope is asserted here too: a PostToolUse hook only reaches Claude through
+# hookSpecificOutput.additionalContext, so a bare record is a record nobody reads.
 CASE_DIR="$(mktemp -d "${TMPDIR:-/tmp}/cc-vp-XXXXXX")"
 printf -- '---\nvault_path: /Users/test/v\n---\n' > "${CASE_DIR}/obsidian.local.md"
 OUT=$(run_case_raw "${CASE_DIR}/obsidian.local.md" "$CASE_DIR")
 case "$OUT" in
-  'obsidian-commit-capture: hash='*' | branch='*' | files='*' | org_repo='*' | repo_name='*' | ticket='*' | date='*' | time='*' | vault_path=/Users/test/v | msg='*) ;;
+  '{"hookSpecificOutput":{"hookEventName":"PostToolUse","additionalContext":"obsidian-commit-capture: hash='*' | branch='*' | files='*' | org_repo='*' | repo_name='*' | ticket='*' | date='*' | time='*' | vault_path=/Users/test/v | msg='*) ;;
   *) fail "case9 (schema): got '$OUT'" ;;
 esac
 PASS_COUNT=$((PASS_COUNT + 1))

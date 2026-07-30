@@ -528,6 +528,56 @@ if [ -n "$(ls -A "${STATE_HOME}/claude-obsidian/pre-commit-head" 2>/dev/null)" ]
   fail "the snapshot survived a capture behind a wrapper"
 fi
 
+# --- 21. the record is delivered on the only channel Claude reads -------------
+# `PostToolUse` plain stdout goes to the debug log, not the transcript: the docs
+# list only UserPromptSubmit, UserPromptExpansion and SessionStart as the events
+# whose bare stdout becomes context. On exit 0 the sole way to reach the model is
+# hookSpecificOutput.additionalContext, which is inserted next to the tool result.
+# Printing the record as bare text meant the gate worked and the skill never heard
+# about it (issue #75).
+reset_state
+P="$(payload 'git commit -q -m x' "$REPO" call-21)"
+run_pre "$P"
+commit_in "$REPO" "delivered work"
+run_post_verbose "$P"
+python3 - "$POST_OUT" <<'EOF' || fail "the record was not delivered as PostToolUse additionalContext"$'\n'"got: ${POST_OUT:-<empty>}"
+import json, sys
+d = json.loads(sys.argv[1])
+h = d["hookSpecificOutput"]
+assert h["hookEventName"] == "PostToolUse", h
+ctx = h["additionalContext"]
+assert "obsidian-commit-capture: hash=" in ctx, ctx
+assert "org_repo=altamira2/mtf-builder" in ctx, ctx
+EOF
+
+# A diagnostic travels the same way — a "not captured" line printed as bare text
+# is as invisible as the record was.
+reset_state
+P="$(payload 'git commit -q -m x' "$REPO" call-21b)"
+commit_in "$REPO" "no snapshot for this one"
+run_post_verbose "$P"
+python3 - "$POST_OUT" <<'EOF' || fail "a diagnostic was not delivered as additionalContext"$'\n'"got: ${POST_OUT:-<empty>}"
+import json, sys
+d = json.loads(sys.argv[1])
+assert "not captured" in d["hookSpecificOutput"]["additionalContext"]
+EOF
+
+# The payload is JSON now, so anything a commit author controls has to be escaped
+# or the envelope is unparseable and the whole record is lost — a quote in a
+# subject is not exotic.
+reset_state
+P="$(payload 'git commit -q -m x' "$REPO" call-21c)"
+run_pre "$P"
+commit_in "$REPO" 'fix "quoted" and \backslash\ and	tab'
+run_post_verbose "$P"
+python3 - "$POST_OUT" <<'EOF' || fail "a quoted/backslashed subject broke the JSON envelope"$'\n'"got: ${POST_OUT:-<empty>}"
+import json, sys
+d = json.loads(sys.argv[1])
+ctx = d["hookSpecificOutput"]["additionalContext"]
+assert 'fix "quoted"' in ctx, ctx
+assert "backslash" in ctx, ctx
+EOF
+
 # --- wiring: both halves are registered on Bash ------------------------------
 # The pair is one mechanism. Shipping the post-hook without the pre-hook turns
 # every capture into a stderr diagnostic.
