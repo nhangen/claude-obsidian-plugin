@@ -28,6 +28,26 @@ if [ ! -r "${_vs_lib_dir}/dedup-scan.sh" ]; then
 fi
 . "${_vs_lib_dir}/dedup-scan.sh"
 
+# A record's path field is vault-relative by contract, and every scanner used to
+# strip with `${p#"$vault"/}` inline. That trailing slash is part of the pattern,
+# so it cannot match when the path *is* the vault — a `.md` file directly in the
+# vault root produced `CLUSTER<TAB>/Users/<name>/Documents/Obsidian<TAB>…`, and
+# that row lands in Librarian.md, which Syncthing replicates to every host. The
+# local username left the machine (#56).
+_scan_rel() {
+  local vault="$1" rel="$2"
+  rel="${rel#"$vault"}"
+  rel="${rel#/}"
+  [ -n "$rel" ] || rel="."
+  # find is rooted at the vault, so a path that did not strip is unreachable. If
+  # it ever happens, the row must still not carry an absolute host path into a
+  # synced file — losing the directory beats leaking the home directory.
+  case "$rel" in
+    /*) rel="${rel##*/}" ;;
+  esac
+  printf '%s' "$rel"
+}
+
 _scan_find_md() {
   find "$1" -type f -name '*.md' \
     ! -path '*/.obsidian/*' ! -path '*/.trash/*' \
@@ -40,7 +60,7 @@ scan_frontmatter_gaps() {
   local vault="$1" required="$2" f miss
   while IFS= read -r f; do
     miss="$(frontmatter_missing "$f" "$required" | sort | paste -sd, -)"
-    [ -n "$miss" ] && printf 'GAP\t%s\t%s\n' "${f#"$vault"/}" "$miss"
+    [ -n "$miss" ] && printf 'GAP\t%s\t%s\n' "$(_scan_rel "$vault" "$f")" "$miss"
   done < <(_scan_find_md "$vault")
   return 0
 }
@@ -49,7 +69,7 @@ scan_unfiled() {
   local vault="$1" f
   [ -d "$vault/Inbox" ] || return 0
   while IFS= read -r f; do
-    printf 'UNFILED\t%s\n' "${f#"$vault"/}"
+    printf 'UNFILED\t%s\n' "$(_scan_rel "$vault" "$f")"
   done < <(find "$vault/Inbox" -type f -name '*.md')
   return 0
 }
@@ -58,7 +78,7 @@ scan_open_asks() {
   local vault="$1" f
   while IFS= read -r f; do
     if grep -qI '\[ask' "$f" 2>/dev/null; then
-      printf 'ASK\t%s\n' "${f#"$vault"/}"
+      printf 'ASK\t%s\n' "$(_scan_rel "$vault" "$f")"
     fi
   done < <(_scan_find_md "$vault")
   return 0
@@ -87,7 +107,7 @@ scan_clusters() {
     # splits on `-` only, and this vault has filenames with spaces. `sort -u`
     # keeps the count "distinct files containing the token", not total occurrences.
     slug="${base// /-}"
-    rel="${dir#"$vault"/}"
+    rel="$(_scan_rel "$vault" "$dir")"
     tokenize_slug "$slug" | sort -u | while IFS= read -r tok; do
       [ -n "$tok" ] && printf '%s\t%s\n' "$rel" "$tok"
     done
