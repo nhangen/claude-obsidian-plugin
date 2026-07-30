@@ -68,8 +68,10 @@ and `create-note` pass `folder_hint` today and must keep getting routed +
 deduped.)
 
 1. Route the content to a target folder. **Always state the chosen folder.** Call
-   `allowlist_validate "<target>"` — if it fails, do not write. It refuses for two
-   different reasons, and only one of them is a question for the user:
+   `allowlist_validate "<target>"` — if it fails, do not write. It refuses for
+   several different reasons, and only one of them is a question for the user. Each
+   also carries a distinct exit code (1 not allow-listed, 2 no config, 3 no taxonomy,
+   4 broken install) if you would rather branch on that than on the wording:
    - The refusal mentions **`/obsidian:setup`** → the *config* is the problem (none
      resolved, or its taxonomy table has no rows). Surface it, tell the user to run
      `/obsidian:setup`, and stop. Do **not** ask where to file: no folder answer
@@ -82,6 +84,12 @@ deduped.)
      beside itself) → neither the config nor the target. Surface it and stop; setup
      will not fix a lib that lost its own path. Same rule as the config case: do not
      ask where to file.
+   - The refusal says the config **exists but cannot be read** → also "the install is
+     broken", not a missing config: the file is there, its permissions are wrong.
+     Surface it verbatim (it names the path) and stop. Do not send the user to
+     `/obsidian:setup` to re-create a config they already have, and do not ask where
+     to file. This state used to escape as a raw `awk: can't open file …` with no
+     refusal line at all, matching none of these branches.
 
    If routing confidence is low, do **not** commit silently — append an
    `[ask:where should this go?]` entry to `$VAULT_PATH/Pending.md` and ask the user once.

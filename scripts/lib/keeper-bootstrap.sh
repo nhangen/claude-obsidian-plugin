@@ -170,8 +170,15 @@ keeper_ensure_active() {
   # `|| label=""` is load-bearing, not defensive: a broken installer exits
   # non-zero, that status becomes the assignment's, and an errexit caller would
   # die right here — before the refusal below could print a word.
-  local label lblerr=""
-  label="$(keeper_label 2>/dev/null)" || label=""
+  # `state` rather than `label`: it answers both questions in one spawn (see the
+  # gate below, which needs the installed program too), and an installed host is
+  # meant to cost exactly one installer spawn per session.
+  local label lblerr="" kstate="" installed_prog=""
+  kstate="$(bash "$scripts/install-watcher.sh" state 2>/dev/null)" || kstate=""
+  label="${kstate%%$'\t'*}"
+  case "$kstate" in
+    *$'\t'*) installed_prog="${kstate#*$'\t'}" ;;
+  esac
   if [ -z "$label" ]; then
     # Only now is the installer's stderr worth a temp file. Capturing it on every
     # call put a mktemp + rm on the session-end path of every working host to
@@ -197,6 +204,8 @@ keeper_ensure_active() {
     return 0
   fi
 
+  # Resolved before the gate below, which compares it against what is installed.
+  local tick="$scripts/vaultkeeper-tick.sh"
   # The seed used to sit BELOW this gate, and it documents itself as one-time, so a
   # seed that produced nothing usable during the single activation session was never
   # retried on that host — the wrong value was permanent (#46). It runs above the gate
@@ -208,9 +217,30 @@ keeper_ensure_active() {
 
   # Pass the label we already resolved: the predicate would otherwise spawn the
   # installer a second time, every session, to ask what we just asked it.
-  keeper_scheduler_installed "$label" && return 0
+  if keeper_scheduler_installed "$label"; then
+    # Installed is not the same as pointing at code that exists (#35). The plist and
+    # the cron line bake in an ABSOLUTE, version-pinned tick path
+    # (…/cache/nhangen/obsidian/<version>/scripts/vaultkeeper-tick.sh), and a plugin
+    # update replaces that directory wholesale. `launchctl list` still shows the
+    # label, so this gate returned forever while the program it names no longer
+    # existed: the keeper stopped ticking after every upgrade, on every host, and
+    # self-activation never repaired it. resolve-config.sh documents exactly this
+    # hazard for the config; nothing did for the scheduler.
+    if [ -z "$installed_prog" ] || [ "$installed_prog" = "$tick" ]; then
+      return 0
+    fi
+    # A program whose basename is not ours is a deliberate wrapper — the delegator
+    # that resolves the newest versioned dir is exactly the right answer to this
+    # problem, and re-pinning over it would undo it (#44). Silent: it is a working
+    # setup, not a fault, and this runs every session.
+    if [ "${installed_prog##*/}" != "vaultkeeper-tick.sh" ]; then
+      return 0
+    fi
+    printf 'vaultkeeper: the installed scheduler still points at %s, but this plugin version ticks from %s — reinstalling\n' \
+      "$installed_prog" "$tick" >&2
+    # Fall through to the install below.
+  fi
 
-  local tick="$scripts/vaultkeeper-tick.sh"
   _kb_seed_schema "$scripts" "$vault" "$cfg"
   # `|| true` here meant a config that never gained keeper_interval_secs ran at
   # the compiled-in default forever with nothing to explain why. Name the key and

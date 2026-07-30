@@ -115,4 +115,45 @@ grep -q 'the install is broken, not the config' "$TMP/orpherr" \
 grep -q 'no config resolved' "$TMP/orpherr" \
   && fail "orphaned lib blamed the config: $(cat "$TMP/orpherr")"
 
+# --- refusals are distinguishable without reading English (#38) ---------------
+# All three refusal kinds returned 1, so a shell caller — the design has `keeper
+# insert` calling this as a guard — could only branch by parsing a sentence. The
+# prose is unchanged for the LLM consumers; the codes are additive.
+AVTMP="$(mktemp -d "${TMPDIR:-/tmp}/av-codes-XXXXXX")"
+avrc() { local rc=0; allowlist_validate "$1" "$2" 2>/dev/null || rc=$?; printf '%s' "$rc"; }
+
+# 1 — a real config, target simply not on the list.
+GOODCFG="$AVTMP/good.md"
+printf '%s\n' '---' 'vault_path: /tmp/v' '---' '' '## Project Taxonomy' '' '| Domain | Vault path | Notes |' '|---|---|---|' '| Dev | Projects/Development/ | code |' > "$GOODCFG"
+[ "$(avrc 'Nope/x.md' "$GOODCFG")" = "1" ] \
+  || fail "a not-allow-listed target should exit 1, got $(avrc 'Nope/x.md' "$GOODCFG")"
+allowlist_validate 'Projects/Development/x.md' "$GOODCFG" \
+  || fail "an allow-listed target was refused"
+
+# 2 — no config at all.
+[ "$(avrc 'Projects/Development/x.md' "$AVTMP/absent.md")" = "2" ] \
+  || fail "a missing config should exit 2, got $(avrc 'Projects/Development/x.md' "$AVTMP/absent.md")"
+
+# 3 — a config with no taxonomy table.
+NOTAX="$AVTMP/notax.md"; printf '%s\n' '---' 'vault_path: /tmp/v' '---' > "$NOTAX"
+[ "$(avrc 'Projects/Development/x.md' "$NOTAX")" = "3" ] \
+  || fail "a config with no taxonomy should exit 3, got $(avrc 'Projects/Development/x.md' "$NOTAX")"
+
+# 4 — present but UNREADABLE. This used to escape as a raw `awk: can't open file …`
+# with no `Refusing to write` line at all, matching none of the librarian's branches.
+if [ "$(id -u)" = "0" ]; then
+  echo "note: running as root, skipping the unreadable-config arm" >&2
+else
+  UNREAD="$AVTMP/unreadable.md"; cp "$GOODCFG" "$UNREAD"; chmod 000 "$UNREAD"
+  URC=0
+  UAERR="$(allowlist_validate 'Projects/Development/x.md' "$UNREAD" 2>&1 >/dev/null)" || URC=$?
+  chmod 644 "$UNREAD"
+  [ "$URC" = "4" ] || fail "an unreadable config should exit 4, got $URC"
+  grep -q 'awk' <<<"$UAERR" \
+    && fail "the raw awk error is still what reaches the consumer: [$UAERR]"
+  grep -qi 'cannot be read' <<<"$UAERR" \
+    || fail "an unreadable config was not named as such: [$UAERR]"
+fi
+rm -rf "$AVTMP"
+
 echo "PASS: allowlist-validate"

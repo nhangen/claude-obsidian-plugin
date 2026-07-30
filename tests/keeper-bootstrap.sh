@@ -270,6 +270,79 @@ grep -q 'SEED-SAID-THIS' <<<"$SERR4" \
 # Leave the shared stub in place for anything after this; just clear its state.
 : > "$STATE"
 
+# --- a plugin upgrade must not orphan the scheduler (#35) ---------------------
+# The plist bakes in an ABSOLUTE, version-pinned tick path
+# (…/cache/nhangen/obsidian/<version>/scripts/vaultkeeper-tick.sh) and a plugin update
+# replaces that directory wholesale. `launchctl list` still shows the label, so the
+# installed-gate returned forever while the program it named no longer existed: the
+# keeper stopped ticking after every upgrade, on every host, and self-activation never
+# repaired it.
+UHOME="$WORK/uphome"; mkdir -p "$UHOME/Library/LaunchAgents"
+UPL="$UHOME/Library/LaunchAgents/${LABEL}.plist"
+UCFG2="$WORK/upgrade.local.md"; UVAULT2="$WORK/vaultupgrade"
+printf -- '---\nvault_path: %s\nfrontmatter_required: tags type\n---\n' "$UVAULT2" > "$UCFG2"
+mk_vault "$UVAULT2"
+printf '%s\n' "$LABEL" > "$STATE"   # launchctl lists the label: "installed"
+UTICK="${ROOT_DIR}/scripts/vaultkeeper-tick.sh"
+
+# 1. Stale pin: the plist points into a version directory that is not this one.
+bash "$INSTALLER" render-launchd "/cache/nhangen/obsidian/1.0.0/scripts/vaultkeeper-tick.sh" 900 > "$UPL"
+: > "$CALLS2"
+UERR2="$(HOME="$UHOME" KEEPER_OS="Darwin" keeper_ensure_active "$UCFG2" "$UVAULT2" 900 2>&1 >/dev/null)" \
+  || fail "ensure_active went non-zero repairing a stale pin"
+[ -s "$CALLS2" ] \
+  || fail "an installed-but-stale scheduler was left alone; the keeper stays dead after every upgrade"
+grep -q '1.0.0' <<<"$UERR2" \
+  || fail "the repair did not name the stale path it found: [$UERR2]"
+
+# 2. Current pin: nothing to do, and no reinstall.
+bash "$INSTALLER" render-launchd "$UTICK" 900 > "$UPL"
+: > "$CALLS2"
+HOME="$UHOME" KEEPER_OS="Darwin" keeper_ensure_active "$UCFG2" "$UVAULT2" 900 2>/dev/null \
+  || fail "ensure_active went non-zero on a correctly pinned host"
+[ ! -s "$CALLS2" ] \
+  || fail "a correctly pinned scheduler was reinstalled anyway: $(cat "$CALLS2")"
+
+# 3. A deliberate wrapper is the right answer to this problem, not a stale pin.
+#    Re-pinning over it would undo the very mitigation (#44), and it must be silent —
+#    this runs every session, and a working setup is not a fault to report.
+cat > "$UPL" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>${LABEL}</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>${UHOME}/.claude/hooks/obsidian-vaultkeeper-tick.sh</string>
+  </array>
+</dict>
+</plist>
+EOF
+: > "$CALLS2"
+WERR="$(HOME="$UHOME" KEEPER_OS="Darwin" keeper_ensure_active "$UCFG2" "$UVAULT2" 900 2>&1 >/dev/null)" \
+  || fail "ensure_active went non-zero on a wrapper host"
+[ ! -s "$CALLS2" ] \
+  || fail "a deliberate delegator was re-pinned over, undoing the #35 mitigation: $(cat "$CALLS2")"
+[ -z "$WERR" ] \
+  || fail "a working wrapper setup was reported as a problem every session: [$WERR]"
+# 4. Listed, but no program is readable — no plist, or one we cannot parse. That is
+#    not evidence of a stale pin, and reinstalling on it would clobber whatever is
+#    actually there on a guess.
+rm -f "$UPL"
+: > "$CALLS2"
+NERR="$(HOME="$UHOME" KEEPER_OS="Darwin" keeper_ensure_active "$UCFG2" "$UVAULT2" 900 2>&1 >/dev/null)" \
+  || fail "ensure_active went non-zero when no plist was readable"
+[ ! -s "$CALLS2" ] \
+  || fail "an unreadable installed program was guessed to be stale and reinstalled: $(cat "$CALLS2")"
+printf 'not a plist\n' > "$UPL"
+: > "$CALLS2"
+HOME="$UHOME" KEEPER_OS="Darwin" keeper_ensure_active "$UCFG2" "$UVAULT2" 900 2>/dev/null \
+  || fail "ensure_active went non-zero on an unparseable plist"
+[ ! -s "$CALLS2" ] \
+  || fail "an unparseable plist was treated as a stale pin: $(cat "$CALLS2")"
+: > "$STATE"
+
 # --- wiring: the Stop hook actually invokes the bootstrap ---
 SAVE="${ROOT_DIR}/scripts/session-save.sh"
 grep -q 'keeper-bootstrap.sh' "$SAVE" || fail "session-save.sh does not source keeper-bootstrap.sh"

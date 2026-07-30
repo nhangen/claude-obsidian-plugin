@@ -2,9 +2,16 @@
 # dedup-scan.sh — slug tokenization + same-day duplicate detection for the vault keeper.
 # Sourced by save-conversation, create-note, vault-librarian (dedup) and MOC-promotion (tokenizer).
 
+# Splits on `-`, ` ` and `_` alike. It used to split on `-` only, and the two callers
+# disagreed as a result: scan_clusters folded spaces to hyphens before calling in, but
+# dedup_same_day passed the raw basename straight through — so `beta note one` and
+# `beta-note-two` scored 0.00 while `beta-note-one` and `beta-note-two` scored 0.50, and
+# any note saved with spaces in its name was invisible to same-day dedup against its
+# hyphenated twin (#36). Folding here makes the tokenizer own its contract instead of
+# each caller pre-normalising, which is what let them drift.
 tokenize_slug() {
   local slug="${1%.md}" tok
-  printf '%s\n' "$slug" | tr 'A-Z' 'a-z' | tr '-' '\n' | while IFS= read -r tok; do
+  printf '%s\n' "$slug" | tr 'A-Z' 'a-z' | tr ' _-' '\n\n\n' | while IFS= read -r tok; do
     [ -z "$tok" ] && continue
     case "$tok" in
       *[!0-9]*) : ;;
