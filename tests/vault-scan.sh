@@ -205,4 +205,31 @@ _n="$(printf '%s\n' "$_out" | grep -c '^CLUSTER' || true)"
 printf '%s\n' "$_out" | grep -qF "CLUSTER"$'\t'"Awesome Folder 7"$'\t'"note"$'\t'"3" \
   || fail "space-bearing folder name was mangled: $(printf '%s\n' "$_out" | grep 'Awesome' | head -2)"
 
+# --- vault-root records carry no host path (#56) -----------------------------
+# Every row's path field is vault-relative by contract. `${p#"$vault"/}` cannot
+# strip when the path IS the vault, so a .md file directly in the root emitted the
+# absolute directory — into Librarian.md, which Syncthing replicates, so the local
+# username left the machine. The username is the reason this is asserted on the
+# whole output and not just the CLUSTER row.
+ROOTV="$TMP/rootvault"; mkdir -p "$ROOTV"
+for _n in 1 2 3; do printf -- '---\ntags: [x]\n---\n\nhas [ask:q?] marker\n' > "$ROOTV/rooted-topic-$_n.md"; done
+R_CLUST="$(scan_clusters "$ROOTV" 3)"
+R_GAPS="$(scan_frontmatter_gaps "$ROOTV" "tags type")"
+R_ASKS="$(scan_open_asks "$ROOTV")"
+for _f in "$R_CLUST" "$R_GAPS" "$R_ASKS"; do
+  case "$_f" in
+    *"$ROOTV"*) fail "a vault-root record leaked the absolute vault path, which syncs to every host:"$'\n'"$_f" ;;
+    */Users/*|*/home/*) fail "a vault-root record leaked a home directory:"$'\n'"$_f" ;;
+  esac
+done
+# The root's own rel form is `.` — the contract needs a value, and an empty field
+# would shift every column after it in a tab-delimited row.
+printf '%s\n' "$R_CLUST" | grep -qF "CLUSTER"$'\t.\t'"rooted"$'\t'"3" \
+  || fail "vault-root cluster is not labelled '.':"$'\n'"$R_CLUST"
+# A root file's own path field is still just its filename, unchanged by the fix.
+printf '%s\n' "$R_GAPS" | grep -qF "GAP"$'\t'"rooted-topic-1.md"$'\t'"type" \
+  || fail "a root file's GAP path is not the bare filename:"$'\n'"$R_GAPS"
+printf '%s\n' "$R_ASKS" | grep -qF "ASK"$'\t'"rooted-topic-1.md" \
+  || fail "a root file's ASK path is not the bare filename:"$'\n'"$R_ASKS"
+
 echo "PASS: vault-scan"
