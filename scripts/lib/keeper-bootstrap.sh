@@ -84,6 +84,41 @@ _kb_cfg_ensure() {
 }
 
 # keeper_ensure_active <config_file> <vault_path> [interval_secs]
+# Does the config still lack a usable frontmatter_required? Absent OR present-but-empty
+# both count: the seed used to write the key empty when nothing cleared its threshold,
+# and readers then fall back to a hardcoded `tags type` while the seed's own presence
+# check short-circuits forever.
+_kb_needs_schema() {
+  local cfg="$1" line
+  line="$(grep '^frontmatter_required:' "$cfg" 2>/dev/null | head -1)" || return 0
+  line="${line#frontmatter_required:}"
+  line="${line%$'\r'}"
+  # Strip surrounding whitespace; what is left is the value.
+  line="${line#"${line%%[![:space:]]*}"}"
+  line="${line%"${line##*[![:space:]]}"}"
+  [ -z "$line" ]
+}
+
+# Run the seed and quote what it said. Its stderr used to go to /dev/null, so a
+# degraded seed printed a fallback notice that never said why (#46) — the one thing a
+# user needs to fix it. Bounded and stripped of control bytes, like the installer's
+# stderr above: this is subprocess text headed for a hook's stderr.
+_kb_seed_schema() {
+  local scripts="$1" vault="$2" cfg="$3" tmp="" err=""
+  tmp="$(mktemp "${TMPDIR:-/tmp}/kbseed-XXXXXX" 2>/dev/null)" || tmp=""
+  if [ -n "$tmp" ]; then
+    bash "$scripts/seed-frontmatter-schema.sh" "$vault" "$cfg" >/dev/null 2>"$tmp" && { rm -f "$tmp"; return 0; }
+    err="$(tr -c '[:print:]' ' ' < "$tmp")" || err=""
+    err="${err:0:300}"
+    rm -f "$tmp"
+  else
+    bash "$scripts/seed-frontmatter-schema.sh" "$vault" "$cfg" >/dev/null 2>&1 && return 0
+  fi
+  printf 'vaultkeeper: frontmatter-schema seed failed; using default (tags type)%s\n' \
+    "${err:+ — it said: ${err%"${err##*[![:space:]]}"}}" >&2
+  return 0
+}
+
 keeper_ensure_active() {
   local cfg="$1" vault="$2" interval="${3:-900}"
   [ -f "$cfg" ] && [ -d "$vault" ] || return 0
@@ -162,14 +197,21 @@ keeper_ensure_active() {
     return 0
   fi
 
+  # The seed used to sit BELOW this gate, and it documents itself as one-time, so a
+  # seed that produced nothing usable during the single activation session was never
+  # retried on that host — the wrong value was permanent (#46). It runs above the gate
+  # now, but only when the config has no usable frontmatter_required: an installed
+  # host pays one grep per session, not a spawn.
+  if _kb_needs_schema "$cfg"; then
+    _kb_seed_schema "$scripts" "$vault" "$cfg"
+  fi
+
   # Pass the label we already resolved: the predicate would otherwise spawn the
   # installer a second time, every session, to ask what we just asked it.
   keeper_scheduler_installed "$label" && return 0
 
   local tick="$scripts/vaultkeeper-tick.sh"
-  if ! bash "$scripts/seed-frontmatter-schema.sh" "$vault" "$cfg" >/dev/null 2>&1; then
-    printf 'vaultkeeper: frontmatter-schema seed failed; using default (tags type)\n' >&2
-  fi
+  _kb_seed_schema "$scripts" "$vault" "$cfg"
   # `|| true` here meant a config that never gained keeper_interval_secs ran at
   # the compiled-in default forever with nothing to explain why. Name the key and
   # the consequence, the way the schema seed above names its fallback. Reachable

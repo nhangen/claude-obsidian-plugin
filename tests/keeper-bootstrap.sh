@@ -211,6 +211,65 @@ KEEPER_OS="Darwin" keeper_ensure_active "$CFG4" "$VAULT4" 900 2>/dev/null \
 [ -s "$CALLS2" ] \
   || fail "keeper_autostart: true did not install"
 
+# --- the seed's reason reaches the user, and it retries (#46) -----------------
+# `>/dev/null 2>&1` meant a degraded seed printed a fallback notice that never said
+# WHY — the one thing needed to fix it. And the seed sat below the installed-gate
+# while documenting itself as one-time, so a seed that produced nothing usable during
+# the single activation session was never retried on that host.
+SDIR="$WORK/seedscripts"; mkdir -p "$SDIR/lib"
+cp "${ROOT_DIR}"/scripts/*.sh "$SDIR/" 2>/dev/null || true
+cp -R "${ROOT_DIR}/scripts/lib/." "$SDIR/lib/"
+cat > "$SDIR/seed-frontmatter-schema.sh" <<'EOF'
+#!/usr/bin/env bash
+printf 'seed-frontmatter-schema: SEED-SAID-THIS\n' >&2
+exit 1
+EOF
+chmod +x "$SDIR/seed-frontmatter-schema.sh"
+SCFG="$WORK/seed.local.md"; SVAULT="$WORK/vaultseed"
+printf -- '---\nvault_path: %s\n---\n' "$SVAULT" > "$SCFG"
+mk_vault "$SVAULT"
+: > "$CALLS2"
+SERR="$(KEEPER_OS="Darwin" bash -c ". '$SDIR/lib/keeper-bootstrap.sh'; keeper_ensure_active '$SCFG' '$SVAULT' 900" 2>&1 >/dev/null)" \
+  || fail "a failing seed must not make ensure_active non-zero"
+grep -q 'SEED-SAID-THIS' <<<"$SERR" \
+  || fail "the seed's own words were discarded, so the notice cannot be acted on: [$SERR]"
+
+# Retry on a host where the scheduler is ALREADY installed: the seed must still run,
+# because that is precisely the host that can never retry otherwise.
+# Drive the suite's existing launchctl stub rather than replacing it: it reads
+# $LAUNCHCTL_STATE, and the predicate matches the label as the LAST field.
+SLABEL="$(bash "${ROOT_DIR}/scripts/install-watcher.sh" label)"
+printf '%s\t%s\t%s\n' 123 0 "$SLABEL" > "$STATE"
+# Clear the install log first: the not-installed call above legitimately installed,
+# and the assertion below is about THIS call.
+: > "$CALLS2"
+SERR2="$(KEEPER_OS="Darwin" bash -c ". '$SDIR/lib/keeper-bootstrap.sh'; keeper_ensure_active '$SCFG' '$SVAULT' 900" 2>&1 >/dev/null)" \
+  || fail "ensure_active went non-zero on an installed host with a failing seed"
+grep -q 'SEED-SAID-THIS' <<<"$SERR2" \
+  || fail "an installed host skipped the seed, so a bad value there is permanent: [$SERR2]"
+# …and it really was the installed path: the gate returned before the installer ran.
+# Without this the arm above passes on a host the gate never recognised as installed,
+# which is not the case #46 is about.
+[ ! -s "$CALLS2" ] \
+  || fail "the launchctl stub did not make this an installed host, so the retry arm proves nothing: $(cat "$CALLS2")"
+
+# …but a config that already HAS a usable value must not spawn the seed at all —
+# that is the per-session cost this ordering has to stay cheap about.
+printf -- '---\nvault_path: %s\nfrontmatter_required: tags type\n---\n' "$SVAULT" > "$SCFG"
+SERR3="$(KEEPER_OS="Darwin" bash -c ". '$SDIR/lib/keeper-bootstrap.sh'; keeper_ensure_active '$SCFG' '$SVAULT' 900" 2>&1 >/dev/null)" \
+  || fail "ensure_active went non-zero on a seeded host"
+grep -q 'SEED-SAID-THIS' <<<"$SERR3" \
+  && fail "a config with a usable frontmatter_required still spawned the seed: [$SERR3]"
+
+# A present-but-empty value is NOT usable, and must retry.
+printf -- '---\nvault_path: %s\nfrontmatter_required:\n---\n' "$SVAULT" > "$SCFG"
+SERR4="$(KEEPER_OS="Darwin" bash -c ". '$SDIR/lib/keeper-bootstrap.sh'; keeper_ensure_active '$SCFG' '$SVAULT' 900" 2>&1 >/dev/null)" \
+  || fail "ensure_active went non-zero on an empty-value host"
+grep -q 'SEED-SAID-THIS' <<<"$SERR4" \
+  || fail "a present-but-empty frontmatter_required was treated as seeded, so the host stays broken: [$SERR4]"
+# Leave the shared stub in place for anything after this; just clear its state.
+: > "$STATE"
+
 # --- wiring: the Stop hook actually invokes the bootstrap ---
 SAVE="${ROOT_DIR}/scripts/session-save.sh"
 grep -q 'keeper-bootstrap.sh' "$SAVE" || fail "session-save.sh does not source keeper-bootstrap.sh"
