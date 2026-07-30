@@ -35,7 +35,6 @@ if ! keeper_is_owner "$LEASE" "$HOST" "$PRIORITY" "$MAXAGE"; then
   exit 0
 fi
 
-CONFLICTS="$(keeper_quarantine_conflicts "$VAULT" || true)"
 # Capture the scanners' stderr instead of letting it fly past. Every scanner
 # returns 0 unconditionally, so a truncated scan was indistinguishable from a
 # complete one and got recorded as complete — for every one of 700+ consecutive
@@ -45,9 +44,7 @@ CONFLICTS="$(keeper_quarantine_conflicts "$VAULT" || true)"
 SCAN_FAULT=""
 SCAN_ERR="$(mktemp "${TMPDIR:-/tmp}/kbscan-XXXXXX" 2>/dev/null)" || SCAN_ERR=""
 if [ -n "$SCAN_ERR" ]; then
-  # trap, not a bare rm below: a tick killed for overrunning its launchd window
-  # otherwise leaks one buffer every 15 minutes, and the fault goes with it.
-  trap 'rm -f "$SCAN_ERR"' EXIT
+  :
 else
   # Fail closed. With no buffer the fault check can never fire, and failing open
   # here restored the exact bug this gate removes — a partial scan recorded as
@@ -56,12 +53,63 @@ else
   # an independent one.
   SCAN_FAULT="cannot create the scan-fault buffer (mktemp failed); scan not verifiable"
 fi
+# Permanently-unreadable paths are not a fault (#51). One `chmod 000` directory, or
+# an iCloud path macOS TCC refuses, made `find` print `Permission denied` — and the
+# gate, which could only see bytes on stderr, then reported INCOMPLETE on every tick
+# from then on and never recorded last_scan. No tick can fix such a path, so there
+# was no recovery: a vault whose readable notes were all scanned looked permanently
+# broken. vault-scan.sh now separates the two, routing these here to be counted.
+SCAN_UNREADABLE=""
+KEEPER_SCAN_UNREADABLE_FILE="$(mktemp "${TMPDIR:-/tmp}/kbunread-XXXXXX" 2>/dev/null)" \
+  || KEEPER_SCAN_UNREADABLE_FILE=""
+if [ -n "$KEEPER_SCAN_UNREADABLE_FILE" ]; then
+  export KEEPER_SCAN_UNREADABLE_FILE
+else
+  # Unlike the fault buffer, failing open here is the safe direction: with nowhere
+  # to record them, the unreadable lines stay on stderr and land in SCAN_FAULT — the
+  # old over-triggering behaviour, which is loud rather than silent.
+  unset KEEPER_SCAN_UNREADABLE_FILE
+fi
+# One trap for both buffers, set once they are both decided. A tick killed for
+# overrunning its launchd window otherwise leaks a file every 15 minutes — and
+# `rm -f ""` is not a no-op, so each path is guarded rather than interpolated bare.
+cleanup_bufs() {
+  [ -n "${SCAN_ERR:-}" ] && rm -f "$SCAN_ERR" 2>/dev/null
+  [ -n "${KEEPER_SCAN_UNREADABLE_FILE:-}" ] && rm -f "$KEEPER_SCAN_UNREADABLE_FILE" 2>/dev/null
+  return 0
+}
+trap cleanup_bufs EXIT
+# Quarantine runs here, INSIDE the fault capture, and its status is kept (#53). It
+# used to run above — before the buffer even existed — with `|| true`, so a failed
+# `mv` printed `failed to quarantine …` straight past the gate and the non-zero exit
+# was discarded: the QUARANTINE list came back short and the tick recorded the scan
+# as complete. Same invariant as the scanners, one function over.
+#
+# It stays above the digest so its rows appear in Librarian.md. That its rows cannot
+# reach Pending.md on a faulted tick is a separate, filed problem (#58) — the move is
+# irreversible and no later tick re-derives the row.
 CAND="$( {
+  # First inside the group, not before it (#53). Before it, `CONFLICTS="$(… || true)"`
+  # ran while the buffer did not exist yet — and even appending to the buffer would
+  # not have worked, because the group's own `2>"$SCAN_ERR"` truncates the file when
+  # it opens. So a failed `mv` printed `failed to quarantine …` past the gate and
+  # `|| true` discarded the status: the QUARANTINE list came back short and the tick
+  # recorded the scan as complete. Inside, its stderr is the scanners' stderr.
+  #
+  # First and not last, because the scanners must not see the files it moves — run
+  # after them, a conflict file that was quarantined successfully still shows up as a
+  # frontmatter gap. Its rows go straight into CAND; the separate CONFLICTS variable
+  # existed only to carry them across the group boundary.
+  #
+  # It stays above the digest so its rows reach Librarian.md. That its rows cannot
+  # reach Pending.md on a faulted tick is a separate, filed problem (#58): the move is
+  # irreversible and no later tick re-derives the row.
+  keeper_quarantine_conflicts "$VAULT" \
+    || printf 'keeper_quarantine_conflicts exited non-zero\n' >&2
   scan_frontmatter_gaps "$VAULT" "$REQUIRED"
   scan_unfiled "$VAULT"
   scan_open_asks "$VAULT"
   scan_clusters "$VAULT" 3
-  if [ -n "$CONFLICTS" ]; then printf '%s\n' "$CONFLICTS"; fi
 } 2>"${SCAN_ERR:-/dev/stderr}" | sed '/^$/d' )"
 if [ -n "$SCAN_ERR" ] && [ -s "$SCAN_ERR" ]; then
   # Deduplicate before truncating. `_scan_find_md` backs three scanners, so one
@@ -84,16 +132,29 @@ if [ -n "$SCAN_ERR" ] && [ -s "$SCAN_ERR" ]; then
   printf '%s\n' "$SCAN_FAULT" >&2
 fi
 
+# Unreadable paths get reported every tick, and separately from the fault, because
+# they are a standing condition rather than an event: the count says "this many
+# places I am not allowed to look", the scan of everything else is complete, and
+# last_scan is recorded. Reported by count, not by path — the paths are absolute
+# host paths, and the digest is replicated to every host (#56).
+if [ -n "${KEEPER_SCAN_UNREADABLE_FILE:-}" ] && [ -s "$KEEPER_SCAN_UNREADABLE_FILE" ]; then
+  SCAN_UNREADABLE="$(sort -u "$KEEPER_SCAN_UNREADABLE_FILE" | grep -c . | tr -d ' ')"
+  [ "$SCAN_UNREADABLE" = "0" ] && SCAN_UNREADABLE=""
+fi
+if [ -n "$SCAN_UNREADABLE" ]; then
+  printf 'vaultkeeper: %s path(s) unreadable on %s — every readable note was scanned; permissions are not something a tick can fix\n' \
+    "$SCAN_UNREADABLE" "$HOST" >&2
+fi
+
 # These two stay above the gate because both survive a partial candidate set:
 # base_view_write's content does not depend on CAND, and the digest is a full
 # overwrite that nothing reads back. A permanently-faulting host therefore still
 # surfaces something, which beats surfacing nothing — and the digest is told to say
-# which it is. Caveat: keeper_quarantine_conflicts (line 38) already moved any sync
-# conflict irreversibly and emits its row once, so on a faulted tick that row never
-# reaches Pending.md and no later tick can re-emit it. The file is safely in
-# .vaultkeeper-quarantine either way; the missing checklist line is filed separately.
+# which it is. keeper_quarantine_conflicts has already moved any sync conflict
+# irreversibly and emitted its row once, so that row cannot survive being withheld —
+# the fault branch below appends it, and only it, for that reason (#58).
 base_view_write "$VAULT/_vaultkeeper.base"
-printf '%s\n' "$CAND" | surfacing_digest "$VAULT" "${SCAN_FAULT:+INCOMPLETE}"
+printf '%s\n' "$CAND" | surfacing_digest "$VAULT" "${SCAN_FAULT:+INCOMPLETE}" "$SCAN_UNREADABLE"
 
 if [ -n "$SCAN_FAULT" ]; then
   # Stop before the snapshot. surfacing_pending_transition diffs against it and then
@@ -105,8 +166,20 @@ if [ -n "$SCAN_FAULT" ]; then
   # complete tells it the vault was fully examined. Note the banner only fires once a
   # PREVIOUS last_scan ages out — a host that has never recorded one stays silent, so
   # a latched fault here is invisible rather than loud. That gap is filed separately.
-  printf 'vaultkeeper: scan INCOMPLETE on %s — snapshot and Pending.md left untouched; scanners said: %s\n' \
-    "$HOST" "$SCAN_FAULT" >&2
+  #
+  # One exception, and only one: rows whose side effect already happened and cannot be
+  # re-derived (#58). keeper_quarantine_conflicts has already `mv`d the conflict file
+  # and emitted its receipt once, and the file is excluded from every later walk — so a
+  # QUARANTINE row withheld here is withheld permanently, and the user never learns a
+  # sync conflict needs merging. Appended without touching the snapshot, which is what
+  # keeps the transition gate intact: a row that cannot be re-derived cannot come back
+  # through `comm -23` as new.
+  QUARANTINE_ROWS="$(printf '%s\n' "$CAND" | grep '^QUARANTINE'$'\t' || true)"
+  if [ -n "$QUARANTINE_ROWS" ]; then
+    printf '%s\n' "$QUARANTINE_ROWS" | surfacing_pending_append "$VAULT"
+  fi
+  printf 'vaultkeeper: scan INCOMPLETE on %s — snapshot untouched%s; scanners said: %s\n' \
+    "$HOST" "${QUARANTINE_ROWS:+, quarantine receipts appended to Pending.md}" "$SCAN_FAULT" >&2
   exit 0
 fi
 

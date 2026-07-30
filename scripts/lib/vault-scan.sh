@@ -48,8 +48,77 @@ _scan_rel() {
   printf '%s' "$rel"
 }
 
+# Two different things used to arrive on the scanners' stderr and the tick could
+# only see "some bytes", so it treated both as a fault (#51):
+#
+#   unreadable — one `chmod 000` directory, an iCloud path macOS TCC refuses, a
+#     stale network mount. `find` prints `Permission denied` and walks on. Every
+#     readable note WAS scanned, and no tick can ever fix the path, so treating it
+#     as a fault made the gate latch: INCOMPLETE forever, last_scan never recorded,
+#     no recovery. Counted here and reported as a count, not a fault.
+#   truncated — the scan stopped early: `find` killed by a signal, or dying of fd
+#     or memory exhaustion. The candidate set is short and nothing said so. This is
+#     the half stderr missed entirely, because a scanner killed by a signal prints
+#     nothing at all.
+#
+# So the walk gets a real status instead of a diagnostic channel. Deliberately a
+# noise *denylist* rather than a fatal-pattern allowlist: a too-narrow allowlist
+# fails silent, which is the bug class this is removing, hand-rebuilt. A too-narrow
+# denylist merely reports a benign line as a fault — loud, and recoverable.
+#
+# The unreadable channel is a file because the walk runs inside a pipeline (and,
+# for the scanners, inside a process substitution), so a variable set here would be
+# set in a subshell and lost. The caller opts in by creating it; a caller that does
+# not gets the old behaviour — every line on stderr — which is loud, not silent.
+#
+# Returns non-zero when it could not record the line, so the caller can fall back
+# to stderr. Swallowing it here instead would make an unset collector mean "drop
+# these silently" — the exact silence this classification exists to remove, just
+# relocated.
+_scan_note_unreadable() {
+  [ -n "${KEEPER_SCAN_UNREADABLE_FILE:-}" ] || return 1
+  printf '%s\n' "$1" >> "$KEEPER_SCAN_UNREADABLE_FILE" 2>/dev/null || return 1
+  return 0
+}
+
+_scan_walk() {
+  local root="$1"; shift
+  local err rc=0 line
+  err="$(mktemp "${TMPDIR:-/tmp}/kbwalk-XXXXXX" 2>/dev/null)" || err=""
+  if [ -z "$err" ]; then
+    # No buffer means no classification, and silently reclassifying everything as
+    # benign is the failure this function exists to prevent. Say so and let the
+    # walk's own stderr through untouched.
+    printf 'vault-scan: cannot buffer find stderr (mktemp failed); walk of %s is not verifiable\n' "$root" >&2
+    find "$root" "$@" || true
+    return 0
+  fi
+  # `|| rc=$?` and not a bare call: an unreadable directory makes find exit 1, and
+  # the only production caller runs under `set -e`, so a bare call would kill this
+  # subshell right here — skipping the classification below, which is the whole
+  # point of the function.
+  find "$root" "$@" 2>"$err" || rc=$?
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    case "$line" in
+      *'Permission denied'*|*'Operation not permitted'*)
+        _scan_note_unreadable "$line" || printf '%s\n' "$line" >&2
+        ;;
+      *) printf '%s\n' "$line" >&2 ;;
+    esac
+  done < "$err"
+  rm -f "$err" 2>/dev/null || true
+  # 128+N is "killed by signal N", which is the shape of a walk that stopped
+  # partway. find's plain exit 1 covers the unreadable-path case too, so it is not
+  # evidence of truncation on its own — the lines above already spoke for that.
+  if [ "$rc" -ge 128 ]; then
+    printf 'vault-scan: the walk of %s was killed (exit %s) — the candidate set is truncated\n' "$root" "$rc" >&2
+  fi
+  return 0
+}
+
 _scan_find_md() {
-  find "$1" -type f -name '*.md' \
+  _scan_walk "$1" -type f -name '*.md' \
     ! -path '*/.obsidian/*' ! -path '*/.trash/*' \
     ! -path '*/.git/*' ! -path '*/.vaultkeeper-quarantine/*' \
     ! -path '*/.vaultkeeper/*' \
@@ -70,7 +139,7 @@ scan_unfiled() {
   [ -d "$vault/Inbox" ] || return 0
   while IFS= read -r f; do
     printf 'UNFILED\t%s\n' "$(_scan_rel "$vault" "$f")"
-  done < <(find "$vault/Inbox" -type f -name '*.md')
+  done < <(_scan_walk "$vault/Inbox" -type f -name '*.md')
   return 0
 }
 

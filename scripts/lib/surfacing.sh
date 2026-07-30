@@ -3,19 +3,26 @@
 # append only genuinely-new candidates to Pending.md (transition-gated against
 # the prior-scan snapshot). Requires note-hash.sh + keeper-state.sh.
 
-# surfacing_digest <vault> [status]
+# surfacing_digest <vault> [status] [unreadable-count]
 # `status` is stamped as `scan_status:` when non-empty. The caller passes INCOMPLETE
 # when the scanners faulted: this file is the human-facing artifact and it was
 # claiming a fresh full scan — timestamp AND section counts — on ticks the keeper
 # itself refused to record as complete.
+#
+# `unreadable-count` is stamped as `paths_unreadable:`. It is separate from status on
+# purpose (#51): a path the host is not allowed to read is a standing condition, not
+# a fault — every readable note was still scanned — so the scan stays complete and
+# says how much of the vault it could not see. A count and not the paths: they are
+# absolute host paths, and this file is replicated to every host.
 surfacing_digest() {
-  local vault="$1" status="${2:-}" lines tmp target="$1/Librarian.md" kind label
+  local vault="$1" status="${2:-}" unreadable="${3:-}" lines tmp target="$1/Librarian.md" kind label
   lines="$(cat)"
   tmp="$(mktemp "$vault/.Librarian-XXXXXX")" || return 1
   {
     printf '%s\n' '<!-- MACHINE-OWNED: regenerated each vaultkeeper scan. Edits do not persist. -->'
     printf '# Librarian\n\nlast_scan: %s\n' "$(now_epoch)"
     [ -n "$status" ] && printf 'scan_status: %s\n' "$status"
+    [ -n "$unreadable" ] && printf 'paths_unreadable: %s\n' "$unreadable"
     for kind in GAP UNFILED ASK CLUSTER QUARANTINE; do
       if [ "$kind" = "GAP" ]; then label="Frontmatter gaps"
       elif [ "$kind" = "UNFILED" ]; then label="Unfiled (Inbox)"
@@ -29,6 +36,36 @@ surfacing_digest() {
     done
   } > "$tmp"
   mv "$tmp" "$target"
+}
+
+# surfacing_pending_append <vault>
+# Append rows to Pending.md without touching the prior-scan snapshot. For rows whose
+# side effect already happened and cannot be re-derived (#58).
+#
+# The four scanners re-derive their rows every tick, so withholding them on a faulted
+# tick loses nothing — the next healthy tick emits them again. QUARANTINE is not like
+# that: the row is a receipt for an irreversible `mv`, emitted exactly once, and the
+# file it names is excluded from every later walk, so a row dropped here is dropped
+# permanently. The user loses the `- [ ] QUARANTINE: …` line telling them a sync
+# conflict needs merging. The file is safely in .vaultkeeper-quarantine either way.
+#
+# Append-only is what makes this safe next to the transition gate: the snapshot is
+# left alone, and because the row can never be re-derived, the next healthy tick's
+# `comm -23` cannot see it as new and re-append it.
+surfacing_pending_append() {
+  local vault="$1" pending="$1/Pending.md" line out
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    out="- [ ] $(printf '%s' "$line" | sed 's/'$'\t''/: /')"
+    # Idempotent against what is already there. The move happens once so a repeat is
+    # not reachable today, but Pending.md is hand-edited and Syncthing-replicated —
+    # a duplicated checklist line is exactly the damage #49 went to lengths to avoid.
+    if [ -f "$pending" ] && grep -qxF -- "$out" "$pending"; then
+      continue
+    fi
+    printf '%s\n' "$out" >> "$pending"
+  done
+  return 0
 }
 
 surfacing_pending_transition() {

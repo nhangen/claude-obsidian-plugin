@@ -60,10 +60,20 @@ mkrepo() {
   git -C "$dir" remote add origin "$remote"
 }
 
+# Fixture files are named from the repo's own commit count and appended to, never
+# from $RANDOM into an empty file. The old shape drew `f$RANDOM.txt` and wrote it
+# empty, so any repeated draw across this suite's ~30 commits re-added an identical
+# blob at an identical path: git found nothing to commit, exited 1, and the arm
+# failed with `nothing to commit, working tree clean` — intermittently, at roughly
+# one whole-suite run in fifteen under bash 3.2, and never reproducibly. The commit
+# count is strictly increasing per repo (so it is unique even when a caller runs in a
+# subshell, where a shell counter would reset), and appending guarantees the content
+# differs even if a path is somehow reused — an amend leaves the count unchanged.
 commit_in() {
-  local dir="$1" subject="$2" file
-  file="f$RANDOM.txt"
-  : > "$dir/$file"
+  local dir="$1" subject="$2" file n
+  n="$(git -C "$dir" rev-list --count HEAD 2>/dev/null)" || n=0
+  file="f${n}.txt"
+  printf 'commit %s: %s\n' "$n" "$subject" >> "$dir/$file"
   git -C "$dir" add "$file"
   git -C "$dir" commit -q -m "$subject"
 }
