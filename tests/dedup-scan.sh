@@ -51,4 +51,23 @@ grep -Eq 'for[[:space:]]+[A-Za-z_]+[[:space:]]+in[^;]*\*\.md' "$ROOT_DIR/scripts
   && fail "same-day scan must use find, not a glob-for (breaks under zsh nomatch)"
 grep -q 'find .* -name' "$ROOT_DIR/scripts/lib/dedup-scan.sh" \
   || fail "dedup_same_day should scan via find"
+# --- the tokenizer folds spaces and underscores itself (#36) ------------------
+# It split on `-` only, and the two callers disagreed as a result: scan_clusters
+# pre-folded spaces, dedup_same_day did not. So a note saved with spaces in its name
+# was invisible to same-day dedup against its hyphenated twin — the exact filenames
+# this vault contains. The issue measured 0.00 vs 0.50 for this pair.
+J1="$(jaccard "beta note one" "beta-note-two")"
+J2="$(jaccard "beta-note-one" "beta-note-two")"
+[ "$J1" = "$J2" ] \
+  || fail "a space-named note scores $J1 against a hyphenated sibling while its hyphenated twin scores $J2; dedup cannot see it"
+case "$J1" in
+  0|0.00|0.0) fail "the space-named pair still scores zero: $J1" ;;
+esac
+# Underscores too — the other separator a filename arrives with.
+J3="$(jaccard "beta_note_one" "beta-note-two")"
+[ "$J3" = "$J2" ] || fail "an underscore-named note scores $J3, hyphenated twin scores $J2"
+# Mixed separators in one name must tokenize the same as any other spelling.
+[ "$(tokenize_slug "alpha beta_gamma-delta" | sort | paste -sd, -)" = "alpha,beta,delta,gamma" ] \
+  || fail "mixed separators did not tokenize: $(tokenize_slug "alpha beta_gamma-delta" | sort | paste -sd, -)"
+
 echo "PASS: dedup-scan"

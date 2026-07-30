@@ -185,10 +185,11 @@ scan_clusters() {
   while IFS= read -r f; do
     dir="${f%/*}"
     base="${f##*/}"; base="${base%.md}"
-    # Spaces are folded to the same separator before tokenizing: tokenize_slug
-    # splits on `-` only, and this vault has filenames with spaces. `sort -u`
-    # keeps the count "distinct files containing the token", not total occurrences.
-    slug="${base// /-}"
+    # No pre-folding: tokenize_slug splits on `-`, ` ` and `_` itself now (#36). Doing
+    # it here was what let this caller and dedup_same_day disagree about the same
+    # filename. `sort -u` below keeps the count "distinct files containing the token",
+    # not total occurrences.
+    slug="$base"
     rel="$(_scan_rel "$vault" "$dir")"
     tokenize_slug "$slug" | sort -u | while IFS= read -r tok; do
       [ -n "$tok" ] && printf '%s\t%s\n' "$rel" "$tok"
