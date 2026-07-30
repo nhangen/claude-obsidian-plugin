@@ -410,6 +410,77 @@ case "$POST_OUT" in
   *hash=*) fail "something was captured for a call that committed nothing"$'\n'"got: $POST_OUT" ;;
 esac
 
+# --- 14b. your own commit, pulled from another machine, is still not ours -----
+# Same shape as 14 but the committer email matches, because it is you on a second
+# machine. Identity cannot separate these, so the question becomes: did THIS repo
+# create the commit? HEAD's reflog answers it — a local commit leaves a `commit`
+# entry for that sha, a fast-forward pull leaves `pull:` (#72).
+reset_state
+UP2="$WORK/upstream2.git"
+git init -q --bare "$UP2"
+OTHER="$WORK/other-machine"
+mkrepo "$OTHER" "$UP2"
+git -C "$OTHER" config user.email me@example.com
+git -C "$OTHER" config user.name Me
+commit_in "$OTHER" "shared base"
+git -C "$OTHER" push -q origin HEAD:refs/heads/main
+
+HERE="$WORK/here"
+git clone -q "$UP2" "$HERE"
+git -C "$HERE" config core.hooksPath /dev/null
+git -C "$HERE" config commit.gpgsign false
+git -C "$HERE" config user.email me@example.com
+git -C "$HERE" config user.name Me
+
+commit_in "$OTHER" "my work from the laptop"
+git -C "$OTHER" push -q origin HEAD:refs/heads/main
+
+BEFORE_PULL2="$(git -C "$HERE" rev-parse HEAD)"
+P="$(payload 'git pull && git commit -q -m mine' "$HERE" call-14b)"
+run_pre "$P"
+git -C "$HERE" pull -q --ff-only origin main
+git -C "$HERE" remote set-url origin "git@github.com:nhangen/here.git"
+[ "$(git -C "$HERE" rev-parse HEAD)" != "$BEFORE_PULL2" ] \
+  || fail "case 14b fixture did not fast-forward"
+[ "$(git -C "$HERE" log -1 --format=%ce)" = "me@example.com" ] \
+  || fail "case 14b fixture: the pulled commit must carry OUR committer email or it proves nothing"
+run_post_verbose "$P"
+case "$POST_OUT" in
+  *"msg=my work from the laptop"*) fail "a commit pulled from another of your own machines was captured as made here"$'\n'"got: $POST_OUT" ;;
+  *hash=*) fail "something was captured for a call that committed nothing"$'\n'"got: $POST_OUT" ;;
+esac
+
+# --- 14c. a commit followed by a checkout is still ours ----------------------
+# The reason #68 rejected `git reflog -1`: after `git commit && git checkout`, the
+# newest reflog entry is the checkout. The check has to find the entry that created
+# THIS sha, not read the top of the log.
+reset_state
+P="$(payload 'git commit -q -m x && git checkout -q -b scratch' "$REPO" call-14c)"
+run_pre "$P"
+commit_in "$REPO" "committed then switched"
+git -C "$REPO" checkout -q -b scratch
+run_post_verbose "$P"
+case "$POST_OUT" in
+  *"msg=committed then switched"*) : ;;
+  *) fail "a commit followed by a checkout was not captured"$'\n'"got: ${POST_OUT:-<empty>}" ;;
+esac
+git -C "$REPO" checkout -q -
+
+# A repo with no reflog (core.logAllRefUpdates off, the bare default) must still
+# capture: absent evidence is not evidence of a pull.
+reset_state
+git -C "$REPO" config core.logAllRefUpdates false
+rm -f "$REPO/.git/logs/HEAD"
+P="$(payload 'git commit -q -m x' "$REPO" call-14d)"
+run_pre "$P"
+commit_in "$REPO" "no reflog here"
+run_post_verbose "$P"
+git -C "$REPO" config core.logAllRefUpdates true
+case "$POST_OUT" in
+  *"msg=no reflog here"*) : ;;
+  *) fail "a commit in a repo without a reflog was dropped"$'\n'"got: ${POST_OUT:-<empty>}" ;;
+esac
+
 # --- 15. a slow call does not lose the commit it made -----------------------
 # PostToolUse fires when the whole Bash call finishes, not when `git commit`
 # returns. `git commit && npm test` outlived the 120s recency window and the note

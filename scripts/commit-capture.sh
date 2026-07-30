@@ -234,6 +234,53 @@ if [ -n "$RANGE_BASE" ]; then
   RANGE_LIST=$(GIT rev-list --reverse "${RANGE_BASE}..${FULL_SHA}" 2>/dev/null) || RANGE_LIST=""
   [ -z "$RANGE_LIST" ] || SHAS="$RANGE_LIST"
 fi
+# Which of those did this repo actually create? The committer check above catches a
+# teammate's commit, but not your own commit pushed from another machine — same
+# email, so `git pull && git commit` with a failing commit captured the pulled tip
+# as though this call had made it (#72). Identity cannot separate those; provenance
+# can. HEAD's reflog records how each ref update happened: a local commit leaves
+# `commit: …` (or `commit (amend)`, `commit (initial)`), a real merge leaves
+# `merge …: Merge made by …`, while anything that arrived over the wire leaves a
+# Fast-forward entry — and the intermediate commits of a fast-forward appear in the
+# reflog not at all, since only the final ref update is logged.
+#
+# Read the entry that created each sha rather than the top of the log: after
+# `git commit && git checkout`, the newest entry is the checkout. That is why #68
+# rejected `git reflog -1` and left this open.
+# Every entry for the sha, not the newest: a sha keeps its `commit` entry while
+# later operations add their own for the same value. `git commit && git checkout -b`
+# logs the checkout against the same sha, so reading one entry — even the first
+# matching one — answers "what happened last" instead of "was this created here".
+cc_is_ours() {
+  local sha="$1" entry
+  while IFS= read -r entry; do
+    [ -n "$entry" ] || continue
+    case "${entry#* }" in
+      commit*) return 0 ;;
+      merge*Fast-forward|pull*Fast-forward) ;;
+      merge*) return 0 ;;
+      *) ;;
+    esac
+  done <<EOF
+$(printf '%s\n' "$REFLOG" | grep "^${sha} " || true)
+EOF
+  return 1
+}
+# No reflog at all (core.logAllRefUpdates off, the bare-repo default) means no
+# evidence either way, and absent evidence is not evidence of a pull — capture.
+REFLOG=$(GIT reflog show --format='%H %gs' 2>/dev/null) || REFLOG=""
+if [ -n "$REFLOG" ]; then
+  OURS=""
+  for SHA_ONE in $SHAS; do
+    if cc_is_ours "$SHA_ONE"; then
+      OURS="${OURS}${SHA_ONE}"$'\n'
+    fi
+  done
+  # Every commit in the range came from somewhere else, so this call made none.
+  [ -n "$OURS" ] || exit 0
+  SHAS="$OURS"
+fi
+
 SHA_COUNT=0
 for SHA_ONE in $SHAS; do
   SHA_COUNT=$(( SHA_COUNT + 1 ))
