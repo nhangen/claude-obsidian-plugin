@@ -35,7 +35,7 @@ surfacing_digest() {
       [ -n "$sel" ] && printf '%s\n' "$sel" | cut -f2- | sed 's/^/- /'
     done
   } > "$tmp"
-  mv "$tmp" "$target"
+  keeper_swap_or_clean "$tmp" "$target"
 }
 
 # surfacing_pending_append <vault>
@@ -77,11 +77,15 @@ surfacing_pending_transition() {
   fi
   snap="$(keeper_read_snapshot "$vault")"
   new="$(comm -23 <(printf '%s\n' "$cur") <(printf '%s\n' "$snap"))"
+  # Through the same deduping appender as the irreversible-row path. The snapshot is
+  # written *after* the append, so a failed snapshot swap leaves the append committed
+  # and the gate un-advanced: every later tick sees the same rows as new. That order is
+  # the right one — it fails toward a duplicate line rather than a lost one — but with
+  # a plain `>>` it grew Pending.md without bound, three lines a tick, in a file the
+  # user hand-edits and Syncthing replicates (#43). Deduping makes the stuck state
+  # idempotent instead; the stalled keeper still shows up through the staleness banner.
   if [ -n "$new" ]; then
-    while IFS=$'\t' read -r kind rest; do
-      [ -z "$kind" ] && continue
-      printf -- '- [ ] %s: %s\n' "$kind" "$rest" >> "$pending"
-    done <<<"$new"
+    printf '%s\n' "$new" | surfacing_pending_append "$vault"
   fi
   printf '%s\n' "$cur" | keeper_write_snapshot "$vault"
 }

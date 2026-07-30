@@ -84,18 +84,77 @@ _kb_cfg_ensure() {
 }
 
 # keeper_ensure_active <config_file> <vault_path> [interval_secs]
+# Does the config still lack a usable frontmatter_required? Absent OR present-but-empty
+# both count: the seed used to write the key empty when nothing cleared its threshold,
+# and readers then fall back to a hardcoded `tags type` while the seed's own presence
+# check short-circuits forever.
+_kb_needs_schema() {
+  local cfg="$1" line
+  line="$(grep '^frontmatter_required:' "$cfg" 2>/dev/null | head -1)" || return 0
+  line="${line#frontmatter_required:}"
+  line="${line%$'\r'}"
+  # Strip surrounding whitespace; what is left is the value.
+  line="${line#"${line%%[![:space:]]*}"}"
+  line="${line%"${line##*[![:space:]]}"}"
+  [ -z "$line" ]
+}
+
+# Run the seed and quote what it said. Its stderr used to go to /dev/null, so a
+# degraded seed printed a fallback notice that never said why (#46) — the one thing a
+# user needs to fix it. Bounded and stripped of control bytes, like the installer's
+# stderr above: this is subprocess text headed for a hook's stderr.
+_kb_seed_schema() {
+  local scripts="$1" vault="$2" cfg="$3" tmp="" err=""
+  tmp="$(mktemp "${TMPDIR:-/tmp}/kbseed-XXXXXX" 2>/dev/null)" || tmp=""
+  if [ -n "$tmp" ]; then
+    bash "$scripts/seed-frontmatter-schema.sh" "$vault" "$cfg" >/dev/null 2>"$tmp" && { rm -f "$tmp"; return 0; }
+    err="$(tr -c '[:print:]' ' ' < "$tmp")" || err=""
+    err="${err:0:300}"
+    rm -f "$tmp"
+  else
+    bash "$scripts/seed-frontmatter-schema.sh" "$vault" "$cfg" >/dev/null 2>&1 && return 0
+  fi
+  printf 'vaultkeeper: frontmatter-schema seed failed; using default (tags type)%s\n' \
+    "${err:+ — it said: ${err%"${err##*[![:space:]]}"}}" >&2
+  return 0
+}
+
 keeper_ensure_active() {
   local cfg="$1" vault="$2" interval="${3:-900}"
   [ -f "$cfg" ] && [ -d "$vault" ] || return 0
 
-  # `|| autostart=""` because a config without the key makes grep exit 1, and with
-  # `pipefail` that becomes the assignment's status — errexit would abort the
-  # errexit caller here, on the ordinary first-run config — session-save.sh is not
-# one today (`set -uo pipefail`, and it calls this with `|| true`), so this guards
-# the next sourcer rather than a live bug. Absent means "not false".
-  local autostart
-  autostart="$(grep '^keeper_autostart:' "$cfg" | head -1 | sed 's/^keeper_autostart:[[:space:]]*//')" || autostart=""
-  [ "$autostart" = "false" ] && return 0
+  # The key's presence is tested on its own, not folded into the pipeline that
+  # extracts its value (#45). The old single `|| autostart=""` had to be there for
+  # the ordinary case — a config without the key makes grep exit 1 and `pipefail`
+  # promotes it, which would abort an errexit caller on a first-run config — but it
+  # also absorbed a failure in `head` or `sed`, and an empty autostart means "not
+  # false", so a broken stage silently overrode a documented `keeper_autostart:
+  # false` and installed the scheduler anyway. Neutralizing the pipeline instead
+  # (`{ grep || true; } | head | sed`) was tested and is worse: it aborts the caller
+  # under errexit and still installs.
+  local autostart_line autostart
+  if autostart_line="$(grep '^keeper_autostart:' "$cfg")"; then
+    # Present. From here a parse failure must not read as consent to install.
+    autostart="$(printf '%s\n' "$autostart_line" | head -1 | sed 's/^keeper_autostart:[[:space:]]*//')" \
+      || autostart="__unreadable__"
+    # Trim trailing whitespace and a CRLF config's carriage return.
+    autostart="${autostart%$'\r'}"
+    autostart="${autostart%"${autostart##*[![:space:]]}"}"
+    case "$autostart" in
+      false) return 0 ;;
+      true)  : ;;
+      *)
+        # A value we do not recognise cannot be read as "yes, install" — the user
+        # wrote something here on purpose, and guessing wrong installs a scheduler
+        # against an intended opt-out. Refuse and name it, per
+        # enum-config-typo-fallback.
+        printf 'vaultkeeper: keeper_autostart in %s is "%s", which is neither true nor false; activation skipped (fix the value or remove the line)\n' \
+          "$cfg" "$autostart" >&2
+        return 0
+        ;;
+    esac
+  fi
+  # Absent means "not false" — the documented default for a first-run config.
 
   # Resolve the scripts dir before the label, so a lib that cannot find its own
   # siblings says that, instead of blaming install-watcher.sh for a file that is
@@ -138,14 +197,21 @@ keeper_ensure_active() {
     return 0
   fi
 
+  # The seed used to sit BELOW this gate, and it documents itself as one-time, so a
+  # seed that produced nothing usable during the single activation session was never
+  # retried on that host — the wrong value was permanent (#46). It runs above the gate
+  # now, but only when the config has no usable frontmatter_required: an installed
+  # host pays one grep per session, not a spawn.
+  if _kb_needs_schema "$cfg"; then
+    _kb_seed_schema "$scripts" "$vault" "$cfg"
+  fi
+
   # Pass the label we already resolved: the predicate would otherwise spawn the
   # installer a second time, every session, to ask what we just asked it.
   keeper_scheduler_installed "$label" && return 0
 
   local tick="$scripts/vaultkeeper-tick.sh"
-  if ! bash "$scripts/seed-frontmatter-schema.sh" "$vault" "$cfg" >/dev/null 2>&1; then
-    printf 'vaultkeeper: frontmatter-schema seed failed; using default (tags type)\n' >&2
-  fi
+  _kb_seed_schema "$scripts" "$vault" "$cfg"
   # `|| true` here meant a config that never gained keeper_interval_secs ran at
   # the compiled-in default forever with nothing to explain why. Name the key and
   # the consequence, the way the schema seed above names its fallback. Reachable

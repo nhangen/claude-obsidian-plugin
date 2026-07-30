@@ -36,7 +36,7 @@ keeper_write_snapshot() {
   mkdir -p "$(dirname "$f")"
   tmp="$(mktemp "${TMPDIR:-/tmp}/snap-XXXXXX")" || return 1
   sort -u > "$tmp"
-  mv "$tmp" "$f"
+  keeper_swap_or_clean "$tmp" "$f"
 }
 
 keeper_last_scan_file() { printf '%s/last_scan\n' "$(keeper_cache_dir "$1")"; }

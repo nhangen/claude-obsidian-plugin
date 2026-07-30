@@ -7,6 +7,45 @@ LABEL="com.nhangen.obsidian-vaultkeeper"
 
 usage() { echo "usage: install-watcher.sh {label|render-launchd|render-cron|install} <tick_abs_path> [interval_secs]" >&2; exit 2; }
 
+# Did WE render what is installed? The discriminator is the program's basename, not
+# its full path (#44).
+#
+# A full-path comparison cannot work: our own path is version-pinned into the plugin
+# cache, so it legitimately changes on every plugin update, and refusing on any
+# difference would block the re-install that heals a stranded pinned path (#35) — the
+# very failure the delegator exists to avoid. Every path we render ends in
+# `vaultkeeper-tick.sh`; a hand-written wrapper (the live host's
+# `~/.claude/hooks/obsidian-vaultkeeper-tick.sh`, which resolves the newest versioned
+# dir with `sort -V`) does not. So: same basename → ours, replace it; anything else →
+# somebody configured this on purpose, and silently replacing it swapped a
+# version-resilient wrapper for a pinned path while printing "activated".
+_TICK_BASENAME="vaultkeeper-tick.sh"
+
+_program_of() {
+  # First <string> inside ProgramArguments that is not the interpreter.
+  sed -n '/<key>ProgramArguments<\/key>/,/<\/array>/p' "$1" 2>/dev/null \
+    | sed -n 's/.*<string>\(.*\)<\/string>.*/\1/p' \
+    | grep -v '^/bin/bash$' \
+    | head -1
+}
+
+_own_program() {
+  local plist="$1" prog
+  # Nothing there yet is ours to write.
+  [ -f "$plist" ] || return 0
+  prog="$(_program_of "$plist")"
+  # An unparseable or program-less plist is not something to guess about either.
+  [ -n "$prog" ] || return 1
+  [ "${prog##*/}" = "$_TICK_BASENAME" ]
+}
+
+_own_cron_line() {
+  case "$1" in
+    *"/$_TICK_BASENAME"*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 render_launchd() {
   local tick="$1" interval="$2"
   cat <<EOF
@@ -22,6 +61,12 @@ render_launchd() {
   </array>
   <key>StartInterval</key><integer>${interval}</integer>
   <key>RunAtLoad</key><true/>
+  <!-- Logs, because the tick's own stderr is the only account of a fault on a
+       host nobody is watching: the 700+ ticks that logged "Too many open files"
+       above "scan complete" (#42) were diagnosed from exactly these two paths on
+       a hand-written plist, and a rendered one had no such record. -->
+  <key>StandardOutPath</key><string>${HOME}/Library/Logs/${LABEL}.log</string>
+  <key>StandardErrorPath</key><string>${HOME}/Library/Logs/${LABEL}.log</string>
 </dict>
 </plist>
 EOF
@@ -38,6 +83,12 @@ install_watcher() {
   case "$(uname -s)" in
     Darwin)
       local plist="$HOME/Library/LaunchAgents/${LABEL}.plist"
+      if ! _own_program "$plist"; then
+        echo "install-watcher: $plist runs $(_program_of "$plist"), which this script did not render — refusing to replace it" >&2
+        echo "install-watcher: that is usually a deliberate wrapper (a delegator that resolves the newest plugin version, per #35). Remove or update the plist by hand if you want it rebuilt." >&2
+        exit 1
+      fi
+      mkdir -p "$HOME/Library/Logs"
       render_launchd "$tick" "$interval" > "$plist"
       launchctl unload "$plist" 2>/dev/null || true
       if ! launchctl load "$plist"; then
@@ -47,6 +98,13 @@ install_watcher() {
       fi
       echo "installed launchd agent: $plist" ;;
     *)
+      local existing
+      existing="$(crontab -l 2>/dev/null | grep -F "# ${LABEL}" | head -1)" || existing=""
+      if [ -n "$existing" ] && ! _own_cron_line "$existing"; then
+        echo "install-watcher: the existing ${LABEL} crontab line runs something this script did not render — refusing to replace it" >&2
+        echo "install-watcher: [$existing]" >&2
+        exit 1
+      fi
       local line; line="$(render_cron "$tick" "$interval")"
       ( crontab -l 2>/dev/null | grep -vF "# ${LABEL}"; printf '%s\n' "$line" ) | crontab -
       echo "installed cron line for ${LABEL}" ;;

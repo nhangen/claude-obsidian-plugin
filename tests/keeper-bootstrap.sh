@@ -111,6 +111,12 @@ RCFG="$ROD/obsidian.local.md"; RVAULT="$WORK/vaultro"
 printf -- '---\nvault_path: %s\n---\n' "$RVAULT" > "$RCFG"
 mk_vault "$RVAULT"
 export VAULTKEEPER_INSTALL="$WORK/stub-install.sh"
+# Root writes straight through a read-only directory, so under root this arm and the
+# one below it would assert on a write that SUCCEEDED and pass without testing
+# anything (#47). Skipped loudly rather than left to pass vacuously.
+if [ "$(id -u)" = "0" ]; then
+  echo "note: running as root, skipping the read-only-config arms" >&2
+else
 chmod a-w "$ROD"
 RERR="$(KEEPER_OS="Darwin" keeper_ensure_active "$RCFG" "$RVAULT" 900 2>&1 >/dev/null)" \
   || { chmod u+w "$ROD"; fail "ensure_active must return 0 when a config write fails"; }
@@ -133,6 +139,25 @@ fi
 chmod u+w "$ROD"
 LEFT="$(find "$LEAK" -name 'kbcfg-*' -type f | wc -l | tr -d ' ')"
 [ "$LEFT" = "0" ] || fail "_kb_cfg_ensure leaked $LEFT temp file(s) into $LEAK"
+fi
+
+# --- _kb_cfg_ensure when mktemp itself cannot resolve TMPDIR (#47) ---
+# The other half of the same failure, and the genuinely silent one: with an
+# unresolvable TMPDIR there is no temp to leak and no `mv` to fail, so the write
+# simply does not happen. Root-safe — no permission bit is involved — which is why
+# this arm carries the invariant on hosts where the two above are skipped.
+UCFG="$WORK/unresolvable.local.md"; UVAULT="$WORK/vaultunres"
+printf -- '---\nvault_path: %s\n---\n' "$UVAULT" > "$UCFG"
+mk_vault "$UVAULT"
+if ( TMPDIR="$WORK/no/such/dir"; _kb_cfg_ensure unres_probe 1 "$UCFG" ); then
+  fail "_kb_cfg_ensure reported success when mktemp could not resolve TMPDIR"
+fi
+grep -q 'unres_probe' "$UCFG" \
+  && fail "_kb_cfg_ensure claims to have failed but the key is in the config: $(cat "$UCFG")"
+UERR="$( TMPDIR="$WORK/no/such/dir" KEEPER_OS="Darwin" keeper_ensure_active "$UCFG" "$UVAULT" 900 2>&1 >/dev/null )" \
+  || fail "ensure_active must stay non-zero-free when mktemp fails; a Stop hook cannot abort"
+grep -q 'keeper_interval_secs' <<<"$UERR" \
+  || fail "an unwritable-because-no-TMPDIR config write was silent: [$UERR]"
 
 # --- opt-out: keeper_autostart: false skips install entirely ---
 CFG2="$WORK/optout.local.md"; VAULT2="$WORK/vault2"
@@ -148,6 +173,102 @@ chmod +x "$VAULTKEEPER_INSTALL"
 KEEPER_OS="Darwin" keeper_ensure_active "$CFG2" "$VAULT2" 900 \
   || fail "ensure_active returned non-zero on opt-out config"
 [ ! -s "$CALLS2" ] || fail "keeper_autostart:false still installed: $(cat "$CALLS2")"
+
+# --- the opt-out survives a broken pipeline stage (#45) ----------------------
+# The single `|| autostart=""` had to absorb grep's exit 1 on a config without the
+# key, but it absorbed a failure in `head` or `sed` too — and an empty autostart
+# means "not false", so a broken stage silently overrode a documented opt-out and
+# installed the scheduler. Break `sed` on PATH and the opt-out must still hold.
+BSED="$WORK/brokensed"; mkdir -p "$BSED"
+printf '#!/usr/bin/env bash\nexit 1\n' > "$BSED/sed"; chmod +x "$BSED/sed"
+printf '#!/usr/bin/env bash\nexit 1\n' > "$BSED/head"; chmod +x "$BSED/head"
+: > "$CALLS2"
+PATH="$BSED:$PATH" KEEPER_OS="Darwin" keeper_ensure_active "$CFG2" "$VAULT2" 900 2>/dev/null \
+  || fail "a broken pipeline stage must not make ensure_active non-zero"
+[ ! -s "$CALLS2" ] \
+  || fail "a broken sed/head overrode keeper_autostart:false and installed anyway: $(cat "$CALLS2")"
+
+# …and the same for a value that is neither true nor false. Guessing "install"
+# there installs a scheduler against something the user typed on purpose.
+CFG3="$WORK/typo.local.md"; VAULT3="$WORK/vault3"
+printf -- '---\nvault_path: %s\nkeeper_autostart: flase\n---\n' "$VAULT3" > "$CFG3"
+mk_vault "$VAULT3"
+: > "$CALLS2"
+TERR="$(KEEPER_OS="Darwin" keeper_ensure_active "$CFG3" "$VAULT3" 900 2>&1 >/dev/null)" \
+  || fail "an unrecognised keeper_autostart made ensure_active non-zero"
+[ ! -s "$CALLS2" ] \
+  || fail "an unrecognised keeper_autostart was treated as consent to install: $(cat "$CALLS2")"
+grep -q 'keeper_autostart' <<<"$TERR" \
+  || fail "an unrecognised keeper_autostart was skipped silently: [$TERR]"
+
+# An explicit true still installs — the refusal above must not swallow the yes.
+CFG4="$WORK/explicit.local.md"; VAULT4="$WORK/vault4"
+printf -- '---\nvault_path: %s\nkeeper_autostart: true\n---\n' "$VAULT4" > "$CFG4"
+mk_vault "$VAULT4"
+: > "$CALLS2"
+KEEPER_OS="Darwin" keeper_ensure_active "$CFG4" "$VAULT4" 900 2>/dev/null \
+  || fail "ensure_active returned non-zero on an explicit keeper_autostart: true"
+[ -s "$CALLS2" ] \
+  || fail "keeper_autostart: true did not install"
+
+# --- the seed's reason reaches the user, and it retries (#46) -----------------
+# `>/dev/null 2>&1` meant a degraded seed printed a fallback notice that never said
+# WHY — the one thing needed to fix it. And the seed sat below the installed-gate
+# while documenting itself as one-time, so a seed that produced nothing usable during
+# the single activation session was never retried on that host.
+SDIR="$WORK/seedscripts"; mkdir -p "$SDIR/lib"
+cp "${ROOT_DIR}"/scripts/*.sh "$SDIR/" 2>/dev/null || true
+cp -R "${ROOT_DIR}/scripts/lib/." "$SDIR/lib/"
+cat > "$SDIR/seed-frontmatter-schema.sh" <<'EOF'
+#!/usr/bin/env bash
+printf 'seed-frontmatter-schema: SEED-SAID-THIS\n' >&2
+exit 1
+EOF
+chmod +x "$SDIR/seed-frontmatter-schema.sh"
+SCFG="$WORK/seed.local.md"; SVAULT="$WORK/vaultseed"
+printf -- '---\nvault_path: %s\n---\n' "$SVAULT" > "$SCFG"
+mk_vault "$SVAULT"
+: > "$CALLS2"
+SERR="$(KEEPER_OS="Darwin" bash -c ". '$SDIR/lib/keeper-bootstrap.sh'; keeper_ensure_active '$SCFG' '$SVAULT' 900" 2>&1 >/dev/null)" \
+  || fail "a failing seed must not make ensure_active non-zero"
+grep -q 'SEED-SAID-THIS' <<<"$SERR" \
+  || fail "the seed's own words were discarded, so the notice cannot be acted on: [$SERR]"
+
+# Retry on a host where the scheduler is ALREADY installed: the seed must still run,
+# because that is precisely the host that can never retry otherwise.
+# Drive the suite's existing launchctl stub rather than replacing it: it reads
+# $LAUNCHCTL_STATE, and the predicate matches the label as the LAST field.
+SLABEL="$(bash "${ROOT_DIR}/scripts/install-watcher.sh" label)"
+printf '%s\t%s\t%s\n' 123 0 "$SLABEL" > "$STATE"
+# Clear the install log first: the not-installed call above legitimately installed,
+# and the assertion below is about THIS call.
+: > "$CALLS2"
+SERR2="$(KEEPER_OS="Darwin" bash -c ". '$SDIR/lib/keeper-bootstrap.sh'; keeper_ensure_active '$SCFG' '$SVAULT' 900" 2>&1 >/dev/null)" \
+  || fail "ensure_active went non-zero on an installed host with a failing seed"
+grep -q 'SEED-SAID-THIS' <<<"$SERR2" \
+  || fail "an installed host skipped the seed, so a bad value there is permanent: [$SERR2]"
+# …and it really was the installed path: the gate returned before the installer ran.
+# Without this the arm above passes on a host the gate never recognised as installed,
+# which is not the case #46 is about.
+[ ! -s "$CALLS2" ] \
+  || fail "the launchctl stub did not make this an installed host, so the retry arm proves nothing: $(cat "$CALLS2")"
+
+# …but a config that already HAS a usable value must not spawn the seed at all —
+# that is the per-session cost this ordering has to stay cheap about.
+printf -- '---\nvault_path: %s\nfrontmatter_required: tags type\n---\n' "$SVAULT" > "$SCFG"
+SERR3="$(KEEPER_OS="Darwin" bash -c ". '$SDIR/lib/keeper-bootstrap.sh'; keeper_ensure_active '$SCFG' '$SVAULT' 900" 2>&1 >/dev/null)" \
+  || fail "ensure_active went non-zero on a seeded host"
+grep -q 'SEED-SAID-THIS' <<<"$SERR3" \
+  && fail "a config with a usable frontmatter_required still spawned the seed: [$SERR3]"
+
+# A present-but-empty value is NOT usable, and must retry.
+printf -- '---\nvault_path: %s\nfrontmatter_required:\n---\n' "$SVAULT" > "$SCFG"
+SERR4="$(KEEPER_OS="Darwin" bash -c ". '$SDIR/lib/keeper-bootstrap.sh'; keeper_ensure_active '$SCFG' '$SVAULT' 900" 2>&1 >/dev/null)" \
+  || fail "ensure_active went non-zero on an empty-value host"
+grep -q 'SEED-SAID-THIS' <<<"$SERR4" \
+  || fail "a present-but-empty frontmatter_required was treated as seeded, so the host stays broken: [$SERR4]"
+# Leave the shared stub in place for anything after this; just clear its state.
+: > "$STATE"
 
 # --- wiring: the Stop hook actually invokes the bootstrap ---
 SAVE="${ROOT_DIR}/scripts/session-save.sh"
