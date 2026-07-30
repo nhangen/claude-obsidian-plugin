@@ -46,8 +46,9 @@ cleanup_git_stub() {
 # hook captures only when the snapshot shows HEAD moved, and it consumes the
 # snapshot, so a shared state dir would make every case after the first return
 # empty. It also keeps the suite from writing to the host's real state dir.
-# `sha=` is a value the stubbed HEAD cannot equal and `root=` is left empty so it
-# is not compared — these cases are about the vault_path parse, not the gate.
+# `sha=` is a value the stubbed HEAD cannot equal, and `root=` is the toplevel the
+# stub reports — a pair the real pre-hook could have written. These cases are about
+# the vault_path parse, not the gate.
 new_state_home() {
   local dir key
   dir="$(mktemp -d)"
@@ -56,7 +57,7 @@ new_state_home() {
     cc_snapshot_key "$1"
   )"
   mkdir -p "${dir}/claude-obsidian/pre-commit-head"
-  printf 'sha=1111111111111111111111111111111111111111\nroot=\n' \
+  printf 'sha=1111111111111111111111111111111111111111\nroot=/tmp/test-repo\nintent=\n' \
     > "${dir}/claude-obsidian/pre-commit-head/${key}"
   printf '%s' "$dir"
 }

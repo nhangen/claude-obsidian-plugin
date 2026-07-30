@@ -52,6 +52,13 @@ case "\$*" in
   "remote get-url origin") echo "${remote}" ;;
   "rev-parse --show-toplevel") echo "/tmp/mtf-builder" ;;
   "rev-parse HEAD") echo 0123456789abcdef0123456789abcdef01234567 ;;
+  # The post-hook asks git what the HEAD move was: is the snapshot's sha an
+  # ancestor, and did we commit it. Answer yes to both — these cases are about
+  # what happens once the gate has opened.
+  "merge-base --is-ancestor "*) exit 0 ;;
+  "config user.email") echo tester@example.com ;;
+  "log -1 --format=%ce") echo tester@example.com ;;
+  "rev-list --count "*) echo 1 ;;
   *) echo "unexpected git argv: \$*" >&2; exit 99 ;;
 esac
 STUB
@@ -62,7 +69,8 @@ STATE_HOME="$(mktemp -d "${TMPDIR:-/tmp}/cc-det-state-XXXXXX")"
 
 # The post-hook captures only when a PreToolUse snapshot shows HEAD moved. These
 # cases are about what happens once it has: the snapshot sha is one no HEAD can
-# equal, and the root is left empty so it is not compared.
+# equal, and the root is the one the stub reports — a sha/root pair the real
+# pre-hook could actually have written, so the fixture stays representable.
 seed_snapshot() {
   local payload="$1" key
   key="$(
@@ -70,7 +78,22 @@ seed_snapshot() {
     cc_snapshot_key "$payload"
   )"
   mkdir -p "${STATE_HOME:?}/claude-obsidian/pre-commit-head"
-  printf 'sha=%s\nroot=\n' "1111111111111111111111111111111111111111" \
+  printf 'sha=%s\nroot=/tmp/mtf-builder\nintent=\n' "1111111111111111111111111111111111111111" \
+    > "${STATE_HOME}/claude-obsidian/pre-commit-head/${key}"
+}
+
+# The other snapshot shape: the pre-hook found no repo to read (the call created it),
+# so there is no before-image and freshness is the only signal left. `intent` is a
+# directory that exists, which the stub resolves to the same toplevel the post-hook
+# sees — that is what marks the snapshot as being about *this* repo.
+seed_blind_snapshot() {
+  local payload="$1" key
+  key="$(
+    . "${ROOT_DIR}/scripts/lib/commit-capture-parse.sh"
+    cc_snapshot_key "$payload"
+  )"
+  mkdir -p "${STATE_HOME:?}/claude-obsidian/pre-commit-head"
+  printf 'sha=unresolved\nroot=\nintent=%s\n' "$PWD" \
     > "${STATE_HOME}/claude-obsidian/pre-commit-head/${key}"
 }
 
@@ -78,6 +101,13 @@ run_hook() {
   local payload="$1"
   rm -rf "${STATE_HOME:?}/claude-obsidian"
   seed_snapshot "$payload"
+  printf '%s' "$payload" | PATH="${GIT_BIN_DIR}:$PATH" XDG_STATE_HOME="$STATE_HOME" bash "$SCRIPT" 2>/dev/null || true
+}
+
+run_hook_blind() {
+  local payload="$1"
+  rm -rf "${STATE_HOME:?}/claude-obsidian"
+  seed_blind_snapshot "$payload"
   printf '%s' "$payload" | PATH="${GIT_BIN_DIR}:$PATH" XDG_STATE_HOME="$STATE_HOME" bash "$SCRIPT" 2>/dev/null || true
 }
 
@@ -109,26 +139,34 @@ case "$OUT" in
   *) fail "non-quiet commit stopped being captured"$'\n'"got: ${OUT:-<empty>}" ;;
 esac
 
-# --- 3. a stale HEAD is NOT captured -----------------------------------------
-# HEAD can move without a commit of ours landing — a `git pull` or `git checkout`
-# in front of a failed commit leaves a tip that was committed earlier. The
-# freshness check is what rejects those.
+# --- 3. with no before-image, a stale HEAD is NOT captured -------------------
+# When the repo did not exist at pre-time there is nothing to compare against, so
+# freshness is the only thing separating a brand-new first commit from history that
+# was already there. (With a real before-image the clock is not consulted: it used
+# to discard commits whose Bash call simply kept running — see the head-gate suite.)
 make_git_stub 4000 "git@github.com:nhangen/test.git"
-OUT="$(run_hook "$QUIET")"
-[ -z "$OUT" ] || fail "stale HEAD was captured; the recency window is not enforced"$'\n'"got: $OUT"
+OUT="$(run_hook_blind "$QUIET")"
+[ -z "$OUT" ] || fail "stale HEAD was captured on the blind path; the recency window is not enforced"$'\n'"got: $OUT"
 
 # --- 4. non-commit Bash calls stay silent ------------------------------------
 make_git_stub 0 "git@github.com:nhangen/test.git"
 OUT="$(run_hook '{"tool_input":{"command":"git status"},"tool_response":{"stdout":"nothing"}}')"
 [ -z "$OUT" ] || fail "non-commit command produced output: $OUT"
 
-# --- 5. recency boundary -----------------------------------------------------
+# --- 5. recency boundary (blind path) ----------------------------------------
 make_git_stub 60 "git@github.com:nhangen/test.git"
-OUT="$(printf '%s' "$QUIET" | { rm -rf "${STATE_HOME:?}/claude-obsidian"; seed_snapshot "$QUIET"; PATH="${GIT_BIN_DIR}:$PATH" XDG_STATE_HOME="$STATE_HOME" OBSIDIAN_COMMIT_RECENT_WINDOW=60 bash "$SCRIPT" 2>/dev/null; } || true)"
+OUT="$(printf '%s' "$QUIET" | { rm -rf "${STATE_HOME:?}/claude-obsidian"; seed_blind_snapshot "$QUIET"; PATH="${GIT_BIN_DIR}:$PATH" XDG_STATE_HOME="$STATE_HOME" OBSIDIAN_COMMIT_RECENT_WINDOW=60 bash "$SCRIPT" 2>/dev/null; } || true)"
 case "$OUT" in *hash=*) : ;; *) fail "AGE == window must capture"$'\n'"got: ${OUT:-<empty>}" ;; esac
 make_git_stub 61 "git@github.com:nhangen/test.git"
-OUT="$(printf '%s' "$QUIET" | { rm -rf "${STATE_HOME:?}/claude-obsidian"; seed_snapshot "$QUIET"; PATH="${GIT_BIN_DIR}:$PATH" XDG_STATE_HOME="$STATE_HOME" OBSIDIAN_COMMIT_RECENT_WINDOW=60 bash "$SCRIPT" 2>/dev/null; } || true)"
+OUT="$(printf '%s' "$QUIET" | { rm -rf "${STATE_HOME:?}/claude-obsidian"; seed_blind_snapshot "$QUIET"; PATH="${GIT_BIN_DIR}:$PATH" XDG_STATE_HOME="$STATE_HOME" OBSIDIAN_COMMIT_RECENT_WINDOW=60 bash "$SCRIPT" 2>/dev/null; } || true)"
 [ -z "$OUT" ] || fail "AGE == window+1 must skip"$'\n'"got: $OUT"
+
+# A trusted before-image is NOT subject to the clock: the same 4000s-old tip that
+# case 3 rejects is captured here, because the snapshot proves the tip moved during
+# this call. This is the `git commit && <slow thing>` loss.
+make_git_stub 4000 "git@github.com:nhangen/test.git"
+OUT="$(run_hook "$QUIET")"
+case "$OUT" in *hash=*) : ;; *) fail "the clock still vetoes a commit the snapshot observed"$'\n'"got: ${OUT:-<empty>}" ;; esac
 
 # --- 6. a FUTURE HEAD is not evidence of a fresh commit ---------------------
 make_git_stub -4000 "git@github.com:nhangen/test.git"

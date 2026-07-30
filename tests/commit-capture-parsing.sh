@@ -46,19 +46,39 @@ mkrepo() {
   git -C "$dir" commit -q -m "$subject"
 }
 
-# The post-hook only captures when a PreToolUse snapshot says HEAD moved, so
-# every positive case needs one. `sha=` is a value no real HEAD can equal and
-# `root=` is left empty (unvalidated), which keeps these cases about payload
-# parsing and repo resolution rather than about the gate — the gate has its own
-# suite in commit-capture-head-gate.sh.
+# The post-hook only captures when a PreToolUse snapshot says HEAD moved *in this
+# repo*, so every positive case needs one naming the repo the hook will resolve.
+# Rather than hard-code that (these cases are precisely about which repo gets
+# resolved), ask the production functions — the same ones the real pre-hook uses.
+# `sha=` is a value no real HEAD can equal, which keeps these cases about payload
+# parsing and repo resolution; the gate itself has its own suite in
+# commit-capture-head-gate.sh.
+resolved_root_for() {
+  local from="$1" payload="$2"
+  (
+    cd "$from" || exit 0
+    . "${ROOT_DIR}/scripts/lib/commit-capture-parse.sh"
+    cmd="$(cc_json_value "$payload" '"command"')"
+    cwd="$(cc_json_value "$payload" '"cwd"')"
+    cc_invokes_commit "$cmd" || exit 0
+    d="$(cc_find_repo_dir "$cwd")" || exit 0
+    git -C "$d" rev-parse --show-toplevel 2>/dev/null || printf '%s' "$d"
+  )
+}
+
 snapshot_for() {
-  local payload="$1" sha="${2:-0000000000000000000000000000000000000000}" root="${3:-}" key
+  local payload="$1" sha="${2:-}" root="${3:-}" key
+  # `none` is what the pre-hook records for an unborn HEAD, and it is what these
+  # fixtures actually are: a repo whose seed commit is its first. A fabricated sha
+  # would fail the post-hook's ancestry check — correctly, since no such object
+  # exists — and every case here would go quiet for the wrong reason.
+  [ -n "$sha" ] || sha=none
   key="$(
     . "${ROOT_DIR}/scripts/lib/commit-capture-parse.sh"
     cc_snapshot_key "$payload"
   )"
   mkdir -p "${STATE_HOME:?}/claude-obsidian/pre-commit-head"
-  printf 'sha=%s\nroot=%s\n' "$sha" "$root" \
+  printf 'sha=%s\nroot=%s\nintent=\n' "$sha" "$root" \
     > "${STATE_HOME}/claude-obsidian/pre-commit-head/${key}"
 }
 
@@ -67,7 +87,7 @@ snapshot_for() {
 run_from() {
   local from="$1" payload="$2"
   rm -rf "${STATE_HOME:?}/claude-obsidian"
-  snapshot_for "$payload"
+  snapshot_for "$payload" "" "$(resolved_root_for "$from" "$payload")"
   ( cd "$from" && printf '%s' "$payload" | XDG_STATE_HOME="$STATE_HOME" bash "$SCRIPT" 2>/dev/null ) || true
 }
 
@@ -273,12 +293,14 @@ esac
 mkdir -p "$REAL/sub"
 keep() { printf '%s' "$1" | XDG_STATE_HOME="$STATE_HOME" bash "$SCRIPT" 2>/dev/null || true; }
 rm -rf "${STATE_HOME:?}/claude-obsidian"
-snapshot_for "$(payload 'git commit -q -m x' "$REAL")"
+snapshot_for "$(payload 'git commit -q -m x' "$REAL")" "" "$(git -C "$REAL" rev-parse --show-toplevel)"
 FIRST="$(keep "$(payload 'git commit -q -m x' "$REAL")")"
 case "$FIRST" in *hash=*) : ;; *) fail "first capture missing"$'\n'"got: ${FIRST:-<empty>}" ;; esac
 for variant in "$REAL/sub" "$REAL/" "$REAL"; do
   AGAIN="$(keep "$(payload 'git commit -q -m x' "$variant")")"
-  [ -z "$AGAIN" ] || fail "same commit re-captured from cwd '$variant' (snapshot not consumed)"$'\n'"got: $AGAIN"
+  case "$AGAIN" in
+    *hash=*) fail "same commit re-captured from cwd '$variant' (snapshot not consumed)"$'\n'"got: $AGAIN" ;;
+  esac
 done
 
 # --- 6. the record is not injectable via the commit message -----------------
@@ -332,7 +354,7 @@ DEEP="$WORK/$(printf 'd%.0s' $(seq 1 60))/$(printf 'e%.0s' $(seq 1 60))/$(printf
 mkrepo "$DEEP" "git@github.com:nhangen/deep.git" "deep commit"
 DEEP_PAYLOAD="$(payload 'git commit -q -m x' "$DEEP")"
 rm -rf "${STATE_HOME:?}/claude-obsidian"
-snapshot_for "$DEEP_PAYLOAD"
+snapshot_for "$DEEP_PAYLOAD" "" "$(git -C "$DEEP" rev-parse --show-toplevel)"
 ERR="$(mktemp)"
 OUT="$( cd "$DEEP" && printf '%s' "$DEEP_PAYLOAD" | XDG_STATE_HOME="$STATE_HOME" bash "$SCRIPT" 2>"$ERR" )" || true
 case "$OUT" in *hash=*) : ;; *) fail "deep-path repo was not captured"$'\n'"got: ${OUT:-<empty>}" ;; esac
@@ -350,11 +372,18 @@ cp "$SCRIPT" "$COPY/scripts/commit-capture.sh"
 cp "${ROOT_DIR}/scripts/lib/commit-capture-parse.sh" "$COPY/scripts/lib/"
 COPY_PAYLOAD="$(payload 'git commit -q -m x' "$REAL")"
 rm -rf "${STATE_HOME:?}/claude-obsidian"
-snapshot_for "$COPY_PAYLOAD"
+snapshot_for "$COPY_PAYLOAD" "" "$(git -C "$REAL" rev-parse --show-toplevel)"
 ERR="$(mktemp)"
 OUT="$( cd "$REAL" && printf '%s' "$COPY_PAYLOAD" | XDG_STATE_HOME="$STATE_HOME" bash "$COPY/scripts/commit-capture.sh" 2>"$ERR" )" || true
-[ -z "$OUT" ] || { rm -f "$ERR"; fail "hook emitted a record with no config library present"$'\n'"got: $OUT"; }
-grep -q 'vault_path unresolved' "$ERR" || { local_err="$(cat "$ERR")"; rm -f "$ERR"; fail "a missing config library was not reported on stderr"$'\n'"got: ${local_err:-<empty>}"; }
+case "$OUT" in
+  *hash=*) rm -f "$ERR"; fail "hook emitted a record with no config library present"$'\n'"got: $OUT" ;;
+esac
+# Reported on stdout, which is the channel a hook exiting 0 actually surfaces.
+case "$OUT" in
+  *'vault_path unresolved'*) : ;;
+  *) rm -f "$ERR"; fail "a missing config library was not reported"$'\n'"got: ${OUT:-<empty>}" ;;
+esac
+[ ! -s "$ERR" ] || { local_err="$(cat "$ERR")"; rm -f "$ERR"; fail "hook wrote to stderr, where nothing reads it: $local_err"; }
 rm -f "$ERR"
 
 # Without the parsing lib the hook has no decoder at all. It must say so rather
@@ -364,8 +393,25 @@ mkdir -p "$BARE/scripts"
 cp "$SCRIPT" "$BARE/scripts/commit-capture.sh"
 ERR="$(mktemp)"
 OUT="$( cd "$REAL" && printf '%s' "$COPY_PAYLOAD" | XDG_STATE_HOME="$STATE_HOME" bash "$BARE/scripts/commit-capture.sh" 2>"$ERR" )" || true
-[ -z "$OUT" ] || { rm -f "$ERR"; fail "hook emitted a record with no parsing library"$'\n'"got: $OUT"; }
-grep -q 'commit-capture-parse.sh' "$ERR" || { bare_err="$(cat "$ERR")"; rm -f "$ERR"; fail "a missing parsing library was not reported on stderr"$'\n'"got: ${bare_err:-<empty>}"; }
+case "$OUT" in
+  *hash=*) rm -f "$ERR"; fail "hook emitted a record with no parsing library"$'\n'"got: $OUT" ;;
+esac
+case "$OUT" in
+  *'commit-capture-parse.sh'*) : ;;
+  *) bare_err="$(cat "$ERR")"; rm -f "$ERR"; fail "a missing parsing library was not reported"$'\n'"stdout: ${OUT:-<empty>}"$'\n'"stderr: ${bare_err:-<empty>}" ;;
+esac
 rm -f "$ERR"
+
+# A present-but-broken lib must be reported too, not swallowed as a non-commit call.
+BROKEN="$WORK/brokencopy"
+mkdir -p "$BROKEN/scripts/lib"
+cp "$SCRIPT" "$BROKEN/scripts/commit-capture.sh"
+printf 'this is not valid shell (\n' > "$BROKEN/scripts/lib/commit-capture-parse.sh"
+OUT="$( cd "$REAL" && printf '%s' "$COPY_PAYLOAD" | XDG_STATE_HOME="$STATE_HOME" bash "$BROKEN/scripts/commit-capture.sh" 2>/dev/null )" || true
+case "$OUT" in
+  *hash=*) fail "hook emitted a record with a broken parsing library"$'\n'"got: $OUT" ;;
+  *'failed to load'*) : ;;
+  *) fail "a broken parsing library was not reported"$'\n'"got: ${OUT:-<empty>}" ;;
+esac
 
 printf 'ok   commit-capture-parsing.sh (payload parsing, repo resolution, record integrity)\n'
