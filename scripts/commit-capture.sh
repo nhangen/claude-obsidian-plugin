@@ -89,7 +89,7 @@ REPO_ROOT=$(GIT rev-parse --show-toplevel 2>/dev/null) || REPO_ROOT=""
 
 # --- Did a commit actually land? ---
 
-SNAP_FILE="$(cc_state_dir)/pre-commit-head/$(cc_snapshot_key "$INPUT")"
+SNAP_FILE="$(cc_snapshot_file "$INPUT")"
 HEAD_BEFORE=""
 SNAP_ROOT=""
 SNAP_INTENT=""
@@ -146,7 +146,7 @@ case "$SNAP_STATE" in
     if [ -n "$HEAD_BEFORE" ]; then
       say "not captured — the PreToolUse snapshot for this call is about ${SNAP_ROOT:-another repository}, not ${REPO_ROOT}"
     else
-      say "not captured — no PreToolUse HEAD snapshot for this call (register scripts/commit-capture-pre.sh as a PreToolUse Bash hook and restart the session; if it is registered, check that ${XDG_STATE_HOME:-$HOME/.local/state}/claude-obsidian is writable)"
+      say "not captured — no PreToolUse HEAD snapshot for this call (register scripts/commit-capture-pre.sh as a PreToolUse Bash hook and restart the session; if it is registered, check that $(cc_state_dir) is writable)"
     fi
     exit 0
     ;;
