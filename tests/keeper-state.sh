@@ -34,12 +34,36 @@ keeper_has_snapshot "$VAULT" || fail "snapshot should exist after write"
 
 # last_scan + staleness
 [ -z "$(keeper_last_scan "$VAULT")" ] || fail "last_scan should be empty"
-[ -z "$(staleness_banner "$VAULT" 900)" ] || fail "no banner when last_scan absent"
+# An absent last_scan is NOT healthy (#52). The tick withholds last_scan when a
+# scan faults, so a host whose first scan ever faulted has none — and the old
+# behaviour (silence) made that indistinguishable from a fresh successful scan,
+# permanently. The cache dir exists here because keeper_state_init ran above,
+# which is the same condition a real tick establishes.
+COLD="$(staleness_banner "$VAULT" 900)"
+[ -n "$COLD" ] \
+  || fail "a host that has never recorded a scan reported nothing wrong"
+case "$COLD" in
+  *never*) : ;;
+  *) fail "cold start must say it has never scanned, not reuse the stale wording: $COLD" ;;
+esac
+# …but a vault the keeper has never touched is not a fault, and must stay quiet.
+UNTOUCHED="$TMP/untouched"; mkdir -p "$UNTOUCHED"
+[ -z "$(staleness_banner "$UNTOUCHED" 900)" ] \
+  || fail "warned about a vault where the keeper has never run: $(staleness_banner "$UNTOUCHED" 900)"
 keeper_record_scan "$VAULT"
 [ -n "$(keeper_last_scan "$VAULT")" ] || fail "last_scan not recorded"
 [ -z "$(staleness_banner "$VAULT" 900)" ] || fail "fresh scan should not warn"
 # force stale: last_scan far in the past (> 2*interval)
 printf '1000\n' > "$(keeper_cache_dir "$VAULT")/last_scan"
 [ -n "$(staleness_banner "$VAULT" 900)" ] || fail "stale scan should warn"
+
+# A corrupt last_scan must be reported, not silently compared. The arithmetic
+# below it would otherwise abort the caller — ask-staleness.sh runs under set -e.
+printf 'not-a-number\n' > "$(keeper_cache_dir "$VAULT")/last_scan"
+BAD="$(staleness_banner "$VAULT" 900)" || fail "an unreadable last_scan aborted staleness_banner"
+case "$BAD" in
+  *unreadable*) : ;;
+  *) fail "an unreadable last_scan produced no distinct warning: ${BAD:-<empty>}" ;;
+esac
 
 echo "PASS: keeper-state"
