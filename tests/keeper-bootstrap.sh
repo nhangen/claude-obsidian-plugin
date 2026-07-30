@@ -111,6 +111,12 @@ RCFG="$ROD/obsidian.local.md"; RVAULT="$WORK/vaultro"
 printf -- '---\nvault_path: %s\n---\n' "$RVAULT" > "$RCFG"
 mk_vault "$RVAULT"
 export VAULTKEEPER_INSTALL="$WORK/stub-install.sh"
+# Root writes straight through a read-only directory, so under root this arm and the
+# one below it would assert on a write that SUCCEEDED and pass without testing
+# anything (#47). Skipped loudly rather than left to pass vacuously.
+if [ "$(id -u)" = "0" ]; then
+  echo "note: running as root, skipping the read-only-config arms" >&2
+else
 chmod a-w "$ROD"
 RERR="$(KEEPER_OS="Darwin" keeper_ensure_active "$RCFG" "$RVAULT" 900 2>&1 >/dev/null)" \
   || { chmod u+w "$ROD"; fail "ensure_active must return 0 when a config write fails"; }
@@ -133,6 +139,25 @@ fi
 chmod u+w "$ROD"
 LEFT="$(find "$LEAK" -name 'kbcfg-*' -type f | wc -l | tr -d ' ')"
 [ "$LEFT" = "0" ] || fail "_kb_cfg_ensure leaked $LEFT temp file(s) into $LEAK"
+fi
+
+# --- _kb_cfg_ensure when mktemp itself cannot resolve TMPDIR (#47) ---
+# The other half of the same failure, and the genuinely silent one: with an
+# unresolvable TMPDIR there is no temp to leak and no `mv` to fail, so the write
+# simply does not happen. Root-safe — no permission bit is involved — which is why
+# this arm carries the invariant on hosts where the two above are skipped.
+UCFG="$WORK/unresolvable.local.md"; UVAULT="$WORK/vaultunres"
+printf -- '---\nvault_path: %s\n---\n' "$UVAULT" > "$UCFG"
+mk_vault "$UVAULT"
+if ( TMPDIR="$WORK/no/such/dir"; _kb_cfg_ensure unres_probe 1 "$UCFG" ); then
+  fail "_kb_cfg_ensure reported success when mktemp could not resolve TMPDIR"
+fi
+grep -q 'unres_probe' "$UCFG" \
+  && fail "_kb_cfg_ensure claims to have failed but the key is in the config: $(cat "$UCFG")"
+UERR="$( TMPDIR="$WORK/no/such/dir" KEEPER_OS="Darwin" keeper_ensure_active "$UCFG" "$UVAULT" 900 2>&1 >/dev/null )" \
+  || fail "ensure_active must stay non-zero-free when mktemp fails; a Stop hook cannot abort"
+grep -q 'keeper_interval_secs' <<<"$UERR" \
+  || fail "an unwritable-because-no-TMPDIR config write was silent: [$UERR]"
 
 # --- opt-out: keeper_autostart: false skips install entirely ---
 CFG2="$WORK/optout.local.md"; VAULT2="$WORK/vault2"
