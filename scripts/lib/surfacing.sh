@@ -53,14 +53,20 @@ surfacing_digest() {
 # left alone, and because the row can never be re-derived, the next healthy tick's
 # `comm -23` cannot see it as new and re-append it.
 surfacing_pending_append() {
-  local vault="$1" pending="$1/Pending.md" line out
+  local vault="$1" pending="$1/Pending.md" line out payload
   while IFS= read -r line; do
     [ -n "$line" ] || continue
-    out="- [ ] $(printf '%s' "$line" | sed 's/'$'\t''/: /')"
-    # Idempotent against what is already there. The move happens once so a repeat is
-    # not reachable today, but Pending.md is hand-edited and Syncthing-replicated —
-    # a duplicated checklist line is exactly the damage #49 went to lengths to avoid.
-    if [ -f "$pending" ] && grep -qxF -- "$out" "$pending"; then
+    payload="$(printf '%s' "$line" | sed 's/'$'\t''/: /')"
+    out="- [ ] ${payload}"
+    # Idempotent against what is already there — and against the box being TICKED
+    # (#37). Comparing whole lines missed `- [x] …`, so a candidate that dropped out
+    # of one scan and came back later got a fresh unchecked line appended next to the
+    # one the user had already ticked. Pending.md is hand-edited and
+    # Syncthing-replicated, which makes this the one path where a bug touches notes a
+    # person is working in. Compare the payload with the checkbox stripped, so any box
+    # state counts as present.
+    if [ -f "$pending" ] \
+      && sed -n 's/^- \[[^]]*\] //p' "$pending" | grep -qxF -- "$payload"; then
       continue
     fi
     printf '%s\n' "$out" >> "$pending"
