@@ -12,7 +12,10 @@ The value here is not commit metadata — git already has that. The value is the
 
 Detection and metadata extraction are handled by two shell hooks (zero AI cost): `scripts/commit-capture-pre.sh` records `HEAD` before a `git commit` runs, and `scripts/commit-capture.sh` captures only if `HEAD` moved. This skill is invoked when the post-hook outputs a line starting with `obsidian-commit-capture:` — all metadata is inline, no file read needed.
 
-A line beginning `obsidian-commit-capture: not captured —` is a diagnostic on stderr, not a record. Do not treat it as metadata and do not write a note for it; surface the reason if the user asks why a commit went uncaptured.
+**Only a line beginning `obsidian-commit-capture: hash=` is a record.** The hook uses the same channel for diagnostics, because a hook that exits 0 has its stdout read and nothing documented reads its stderr — a "not captured" line written there would be indistinguishable from dropping the capture in silence. Two other prefixes exist:
+
+- `obsidian-commit-capture: not captured — …` — nothing was captured, and the rest of the line says why. Do not write a note. Surface the reason if the user asks why a commit went uncaptured, or if it names a fix (an unregistered hook, an unwritable state dir, a missing `vault_path`).
+- `obsidian-commit-capture: partial — …` — a record follows, but the call made more commits than the one captured, and the line lists the shas that were skipped. Write the note for the record; mention the skipped shas only if the user is reconciling history.
 
 The actual write goes through the **keeper CLI** (`scripts/keeper append`) — the
 keeper's deterministic write primitive. The CLI creates the file on absence,

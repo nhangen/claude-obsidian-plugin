@@ -114,12 +114,14 @@ The keeper writes only to the Obsidian vault (`vault_path` from `obsidian.local.
 |---|---|---|
 | `SessionStart` | `scripts/config-doctor.sh` | If the plugin is installed but unconfigured on this host (no `obsidian.local.md`) while a synced vault is detectable, surfaces an advisory so the agent can offer `/obsidian:setup`. Silent once configured, and silent on hosts with no vault. Advisory only — a hook can't prompt. |
 | `Stop` | `scripts/session-save.sh` | Auto-saves significant sessions via background `claude --print` summarizer. Skips trivial sessions. |
-| `PreToolUse` (Bash) | `scripts/commit-capture-pre.sh` | For a Bash call that is about to run `git commit`, records the repo's current `HEAD`. Writes nothing else, and always exits 0 — a PreToolUse hook that fails would block the command. |
-| `PostToolUse` (Bash) | `scripts/commit-capture.sh` | If `HEAD` moved during the call, appends a context block to `<vault>/Projects/Development/<org>_<repo>/<YYYY-MM-DD>.md`. Per-repo overrides supported (e.g. `altamira2/mtf-builder` → flat `<vault>/Altamira/<date>-mtf-builder-commits.md`). |
+| `PreToolUse` (Bash) | `scripts/commit-capture-pre.sh` | For a Bash call that is about to run `git commit`, records the target repo's current `HEAD` (and the repo the command named, which may not exist yet). Writes nothing else, and always exits 0 — a PreToolUse hook that fails would block the command. |
+| `PostToolUse` (Bash) | `scripts/commit-capture.sh` | If `HEAD` moved during the call and git says the move was a commit of ours, appends a context block to `<vault>/Projects/Development/<org>_<repo>/<YYYY-MM-DD>.md`. Per-repo overrides supported (e.g. `altamira2/mtf-builder` → flat `<vault>/Altamira/<date>-mtf-builder-commits.md`). |
 
 Both hooks are gated — they inspect the Bash command first and exit silently for non-commit calls, so they don't interrupt normal tool flow.
 
-**The two halves are one mechanism: register both or neither.** Whether a commit landed is decided by comparing `HEAD` before the call against `HEAD` after, which is the only signal that actually distinguishes a commit from a `git commit` that was rejected, aborted, short-circuited by `false &&`, or had nothing to commit. With only the PostToolUse half wired up there is no "before", and the hook says so on stderr rather than guessing from the command text.
+**The two halves are one mechanism: register both or neither.** Whether a commit landed is decided by comparing `HEAD` before the call against `HEAD` after — the only signal that distinguishes a commit from a `git commit` that was rejected, aborted, short-circuited by `false &&`, or had nothing to commit. A tip that moved is necessary but not sufficient, so the post-hook also asks git *what* the move was: the old tip (or its parent, for an amend) has to be reachable from the new one, and the new commit's committer has to be you — a `git pull` that fast-forwards in front of a failed commit leaves someone else's commit at the tip.
+
+With only the PostToolUse half wired up there is no "before". The hook says so, on stdout, alongside every other reason a commit went uncaptured — a hook that exits 0 has its stdout read, and nothing documented reads its stderr, so a diagnostic written there would be indistinguishable from silence. Only a line beginning `obsidian-commit-capture: hash=` is a record.
 
 ## Examples
 
