@@ -430,6 +430,25 @@ esac
 case "$ORG_REPO" in
   ''|*/) ORG_REPO="local/$REPO_NAME" ;;
 esac
+# GitLab subgroups nest arbitrarily deep, so `https://gitlab.com/g/sub1/sub2/repo`
+# derived `g/sub1/sub2/repo` and the note landed four levels under
+# Projects/Development/ where every other repo lands two. The prefix-shaped
+# routing overrides in the capture rule do not anticipate that, and neither does
+# anything that globs `Projects/Development/*/*`.
+#
+# org_repo is always exactly two segments now: everything above the repository is
+# folded into the first, joined with `-`. Collapsing to `<top-group>/<repo>`
+# instead — the other option the issue offered — would make `g/team-a/api` and
+# `g/team-b/api` the same folder, so two repos' notes would interleave in one
+# file. Keeping the repository as the leaf also means `repo_name` below, which
+# reads the last segment, needs no special case.
+case "$ORG_REPO" in
+  */*/*)
+    ORG_LEAF="${ORG_REPO##*/}"
+    ORG_GROUPS="${ORG_REPO%/*}"
+    ORG_REPO="$(printf '%s' "$ORG_GROUPS" | tr '/' '-')/${ORG_LEAF}"
+    ;;
+esac
 # Now that the remote has been parsed, it — not any directory — is what names the
 # repository: a clone is free to sit in a directory called anything, and a worktree
 # always does. The `local/` form means no remote resolved, and there the directory

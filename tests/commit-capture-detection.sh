@@ -250,7 +250,14 @@ check_org_repo "https://gitlab.com/altamira2/mtf-builder"     "altamira2/mtf-bui
 check_org_repo "git@github.com:nhangen/test.git"              "nhangen/test"
 check_org_repo "https://github.com/nhangen/test.git"          "nhangen/test"
 check_org_repo "git@gitlab.com:altamira2/mtf-builder.git"     "altamira2/mtf-builder"
-check_org_repo "https://gitlab.com/group/sub/repo.git"        "group/sub/repo"
+# GitLab subgroups (#64): org_repo is always exactly two segments, so the note
+# lands two levels under Projects/Development/ like every other repo. Everything
+# above the repository folds into the first segment; the repository stays the
+# leaf, so `group/team-a/api` and `group/team-b/api` remain distinct folders
+# instead of interleaving into one file.
+check_org_repo "https://gitlab.com/group/sub/repo.git"        "group-sub/repo"
+check_org_repo "https://gitlab.com/g/sub1/sub2/repo.git"      "g-sub1-sub2/repo"
+check_org_repo "git@gitlab.com:group/sub/repo.git"            "group-sub/repo"
 check_org_repo "ssh://git@gitlab.com:2222/altamira2/mtf-builder.git" "altamira2/mtf-builder"
 check_org_repo "https://gitlab.com/altamira2/mtf-builder/"    "altamira2/mtf-builder"
 check_org_repo "https://user@gitlab.com/org/repo.git"         "org/repo"
@@ -259,6 +266,15 @@ check_org_repo "https://oauth2:ghp_SECRET@gitlab.com:8443/org/repo.git" "org/rep
 # putting the token in stdout and in a synced note's `repo:` frontmatter.
 check_org_repo "https://oauth2:ghp_SECRET@gitlab.com/org/repo.git" "org/repo"
 check_org_repo "https://host:8443/org/repo.git"               "org/repo"
+
+# The fold must not reach repo_name: that field is a note's H1 and a tag, so a
+# subgroup repo would otherwise be titled `g-sub1-sub2-repo`.
+make_git_stub 0 "https://gitlab.com/g/sub1/sub2/repo.git"
+OUT="$(run_hook "$QUIET")"
+case "$OUT" in
+  *'repo_name=repo '*|*'repo_name=repo') : ;;
+  *) fail "a subgroup remote must still name the repository, not the folded group path"$'\n'"got: ${OUT:-<empty>}" ;;
+esac
 check_org_repo "file:///srv/git/repo.git"                     "local/mtf-builder"
 check_org_repo "/srv/git/bare-repo"                           "local/mtf-builder"
 
