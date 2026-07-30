@@ -23,6 +23,9 @@ STATE_HOME=""
 fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
 cleanup() {
   [ -n "$WORK" ] && rm -rf "$WORK"
+  # A case below makes the snapshot dir unwritable; without restoring the bit,
+  # rm -rf leaves the tree behind and every later run inherits it.
+  [ -n "$STATE_HOME" ] && chmod -R u+w "$STATE_HOME" 2>/dev/null
   [ -n "$STATE_HOME" ] && rm -rf "$STATE_HOME"
   [ -n "${ISOLATED_XDG:-}" ] && rm -rf "$ISOLATED_XDG"
   return 0
@@ -84,6 +87,15 @@ run_pre() {
   local rc=0
   ( cd "$WORK" && printf '%s' "$1" | XDG_STATE_HOME="$STATE_HOME" bash "$PRE" ) || rc=$?
   [ "$rc" -eq 0 ] || fail "pre-hook exited $rc — a non-zero PreToolUse hook blocks the Bash call"
+}
+# Pre with output captured; sets PRE_OUT and PRE_ERR. Same cwd rule as run_pre.
+run_pre_verbose() {
+  local err rc=0
+  err="$(mktemp)"
+  PRE_OUT="$( cd "$WORK" && printf '%s' "$1" | XDG_STATE_HOME="$STATE_HOME" bash "$PRE" 2>"$err" )" || rc=$?
+  PRE_ERR="$(cat "$err")"
+  rm -f "$err"
+  [ "$rc" -eq 0 ] || fail "pre-hook exited $rc — a non-zero PreToolUse hook blocks or errors the Bash call"
 }
 # Post with stderr captured; sets POST_OUT and POST_ERR.
 run_post_verbose() {
@@ -577,6 +589,60 @@ ctx = d["hookSpecificOutput"]["additionalContext"]
 assert 'fix "quoted"' in ctx, ctx
 assert "backslash" in ctx, ctx
 EOF
+
+# --- 22. an unwritable state dir is reported by the hook that failed ----------
+# Before this, the pre-hook exited 0 having written nothing and said nothing, and
+# the post-hook then blamed hook registration for the loss (#71). The hook that
+# actually failed has to be the one that speaks — and it speaks through
+# additionalContext, since PreToolUse bare stdout is no more visible than
+# PostToolUse's and exit 2 would block the commit outright.
+reset_state
+mkdir -p "$SNAP_DIR"
+chmod 500 "$SNAP_DIR"
+P="$(payload 'git commit -q -m x' "$REPO" call-22)"
+run_pre_verbose "$P"
+chmod u+w "$SNAP_DIR"
+python3 - "$PRE_OUT" <<'EOF' || fail "an unwritable snapshot dir was not reported by the pre-hook"$'\n'"stdout: ${PRE_OUT:-<empty>}"$'\n'"stderr: ${PRE_ERR:-<empty>}"
+import json, sys
+d = json.loads(sys.argv[1])
+h = d["hookSpecificOutput"]
+assert h["hookEventName"] == "PreToolUse", h
+ctx = h["additionalContext"]
+assert "not captured" in ctx, ctx
+assert "pre-commit-head" in ctx, ctx
+EOF
+# Reporting a failure must not smuggle in a permission decision — the commit still runs.
+case "$PRE_OUT" in
+  *permissionDecision*) fail "the pre-hook's failure report carried a permission decision" ;;
+esac
+[ -z "$PRE_ERR" ] || fail "the pre-hook wrote to stderr: $PRE_ERR"
+# And nothing may be left behind that a later call could read as a snapshot.
+if [ -n "$(ls -A "$SNAP_DIR" 2>/dev/null)" ]; then
+  fail "a failed snapshot write left a file behind: $(ls -A "$SNAP_DIR")"
+fi
+
+# --- 23. the snapshot is swapped into place, not written through -------------
+# A direct `> file` truncates first: a crash or a full disk mid-write leaves a
+# half-written snapshot that parses as a valid one (a `sha=` line and nothing
+# else). Writing a temp file and renaming means a reader sees the old snapshot or
+# the new one. Observable as an inode change — truncate-in-place keeps it.
+reset_state
+mkdir -p "$SNAP_DIR"
+P="$(payload 'git commit -q -m x' "$REPO" call-23)"
+KEY_FILE="${SNAP_DIR}/$( . "${ROOT_DIR}/scripts/lib/commit-capture-parse.sh"; cc_snapshot_key "$P" )"
+printf 'sha=stale\nroot=/nowhere\nintent=\n' > "$KEY_FILE"
+INODE_BEFORE="$(ls -i "$KEY_FILE" | awk '{print $1}')"
+run_pre "$P"
+INODE_AFTER="$(ls -i "$KEY_FILE" | awk '{print $1}')"
+[ "$INODE_BEFORE" != "$INODE_AFTER" ] || fail "the snapshot was written in place (inode $INODE_BEFORE unchanged) — a partial write would be readable"
+# Compare against the resolved toplevel: on macOS $TMPDIR is a symlink, so the
+# hook records /private/var/... where $REPO says /var/....
+REPO_TOP="$(git -C "$REPO" rev-parse --show-toplevel)"
+grep -q "^root=${REPO_TOP}\$" "$KEY_FILE" || fail "the replaced snapshot does not describe this repo"$'\n'"$(cat "$KEY_FILE")"
+# The temp file is an implementation detail and must not survive as a snapshot.
+if ls -A "$SNAP_DIR" | grep -qv "^$(basename "$KEY_FILE")\$"; then
+  fail "a temp file was left in the snapshot dir: $(ls -A "$SNAP_DIR")"
+fi
 
 # --- wiring: both halves are registered on Bash ------------------------------
 # The pair is one mechanism. Shipping the post-hook without the pre-hook turns
