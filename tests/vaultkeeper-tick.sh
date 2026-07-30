@@ -110,6 +110,59 @@ if [ -f "$CV/Pending.md" ]; then
     || fail "fault/heal cycles duplicated $_dups Pending.md item(s): $(grep '^- \[ \]' "$CV/Pending.md" | sort | uniq -d | head -3)"
 fi
 
+# --- the whole tick under real fd exhaustion (#57) ---------------------------
+# The scanner fix and the fault gate were each pinned individually, but nothing ran
+# the composition against the condition that produced the incident: the tick's own
+# fault arms shadow a scanner with a stub that writes to stderr, and per
+# `test-the-fix-not-the-investigation` a stub override exercising the stub is not
+# coverage of the shipped condition. This arm exhausts real file descriptors.
+#
+# The negative half restores the PRE-#49 scan_clusters verbatim from
+# f670411^ — nested process substitutions, two live fds per directory. Reconstructed
+# rather than stubbed, so what it proves is that the shipped code is what survives.
+FDV="$TMP/fdtickvault"; mkdir -p "$FDV/Inbox"
+for _i in $(seq 1 120); do
+  _d="$FDV/Folder $_i"; mkdir -p "$_d"
+  for _j in 1 2 3; do printf -- '---\ntags: [x]\ntype: a\n---\nbody\n' > "$_d/topic$_i note $_j.md"; done
+done
+FDCFG="$TMP/fdtick.local.md"; sed "s|^vault_path: .*|vault_path: $FDV|" "$CFG" > "$FDCFG"
+
+# 1. Shipped code, 64 fds: the tick completes and records the scan.
+FD1="$TMP/fdtick-fixed.out"
+( ulimit -n 64; OBSIDIAN_LOCAL_MD="$FDCFG" VAULTKEEPER_HOST="ml-1" \
+    bash "${ROOT_DIR}/scripts/vaultkeeper-tick.sh" >"$FD1" 2>&1 ) \
+  || fail "the tick failed under ulimit -n 64; got: $(cat "$FD1")"
+grep -q 'scan complete' "$FD1" \
+  || fail "the tick did not complete under ulimit -n 64; got: $(cat "$FD1")"
+grep -q 'scan INCOMPLETE' "$FD1" \
+  && fail "the tick reported a fault under ulimit -n 64 with the shipped scanner; got: $(cat "$FD1")"
+[ -f "$(keeper_last_scan_file "$FDV")" ] \
+  || fail "the tick completed under ulimit -n 64 but did not record last_scan"
+# 120 dirs x 3 files sharing 2 tokens each — the whole set, not whatever fd headroom
+# happened to allow. This is the number the incident's host got wrong (503 idle, 211
+# under load, silently).
+_fdclusters="$(grep -c '^- ' "$FDV/Librarian.md" || true)"
+[ "$_fdclusters" -ge 240 ] \
+  || fail "the digest lists only $_fdclusters rows under ulimit -n 64; the candidate set was truncated"
+
+# 2. Pre-#49 scanner, same limit: the tick must NOT record the scan as complete.
+FDLIB="$TMP/fdticklib"; mkdir -p "$FDLIB"; cp "${ROOT_DIR}"/scripts/lib/*.sh "$FDLIB/"
+git -C "$ROOT_DIR" show f670411^:scripts/lib/vault-scan.sh \
+  | sed -n '/^scan_clusters/,/^}/p' >> "$FDLIB/vault-scan.sh" \
+  || fail "could not recover the pre-#49 scan_clusters from git history"
+FDS="$TMP/fdtickscripts"; mkdir -p "$FDS"; cp "${ROOT_DIR}"/scripts/*.sh "$FDS/" 2>/dev/null || true
+cp -R "$FDLIB" "$FDS/lib"
+FDV2="$TMP/fdtickvault2"; cp -R "$FDV" "$FDV2"; rm -f "$FDV2/Librarian.md" "$FDV2/Pending.md"
+FDCFG2="$TMP/fdtick2.local.md"; sed "s|^vault_path: .*|vault_path: $FDV2|" "$CFG" > "$FDCFG2"
+FD2="$TMP/fdtick-old.out"
+( ulimit -n 64; OBSIDIAN_LOCAL_MD="$FDCFG2" VAULTKEEPER_HOST="ml-1" \
+    bash "$FDS/vaultkeeper-tick.sh" >"$FD2" 2>&1 ) \
+  || fail "the reverted-scanner tick aborted rather than reporting; got: $(cat "$FD2")"
+grep -q 'scan INCOMPLETE' "$FD2" \
+  || fail "the pre-#49 scanner exhausted fds and the tick still called the scan complete — the gate does not see it: $(cat "$FD2")"
+[ -f "$(keeper_last_scan_file "$FDV2")" ] \
+  && fail "the reverted-scanner tick recorded last_scan on a truncated scan"
+
 # --- a failed quarantine move is a fault too (#53) ---------------------------
 # `CONFLICTS="$(keeper_quarantine_conflicts … || true)"` ran above the buffer, so a
 # failed `mv` printed `failed to quarantine …` straight past the gate and `|| true`
