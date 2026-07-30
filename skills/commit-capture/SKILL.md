@@ -1,7 +1,7 @@
 ---
 name: commit-capture
 description: Captures conversation context around git commits to Obsidian vault. Fires automatically via PostToolUse hook.
-version: 2.5.0
+version: 2.6.0
 ---
 
 # Commit Capture
@@ -94,13 +94,25 @@ Vault path is passed inline by the hook (parsed once from the resolved config �
      --target "Projects/Development/<org_repo>/<date>.md" \
      --section "## <time> — <hash>" \
      --body-file "<body-temp>" \
-     --init-file "<header-temp>"
+     --init-file "<header-temp>" \
+     --skip-if-hash "<hash>"
    ```
 
    The CLI creates parent dirs, writes the header on first commit of the day,
    and appends the section. No `Read`/`Write`/`mkdir`, no subagent.
 
-7. **Confirm silently** — output only: `Captured <hash> → <org_repo>/<date>.md`
+   `--skip-if-hash` makes the append idempotent per commit: if the note already
+   has a section heading ending in that sha, nothing is written and the CLI says
+   so on stderr. **Always pass it.** The check reads the note, which is the
+   record that syncs — the earlier gate kept its key in a host-local state dir
+   and so could not see the file it was protecting, and two hosts committing to
+   the same repo (or one host re-running after a Syncthing conflict copy) each
+   captured (#62).
+
+7. **Confirm silently** — output only: `Captured <hash> → <org_repo>/<date>.md`.
+   If the CLI printed `append skipped` on stderr, say
+   `Already captured <hash> → <org_repo>/<date>.md` instead — the note already
+   holds this commit, and claiming a fresh capture would be false.
 
 ## Important
 
