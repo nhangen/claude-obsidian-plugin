@@ -59,6 +59,14 @@ case "\$*" in
   "config user.email") echo tester@example.com ;;
   "log -1 --format=%ce") echo tester@example.com ;;
   "rev-list --count "*) echo 1 ;;
+  # One record per commit: the hook walks the range, then asks each sha for its
+  # short hash, subject and paths. A single-commit range keeps these cases about
+  # detection rather than about the walk (head-gate covers the walk on real repos).
+  "rev-list --reverse "*) echo 0123456789abcdef0123456789abcdef01234567 ;;
+  "rev-parse --short "*) echo abc1234 ;;
+  "log -1 --pretty=format:%s "*) echo "test commit" ;;
+  "diff --name-only "*) echo foo.txt ;;
+  "diff-tree --no-commit-id --name-only -r --root "*) echo foo.txt ;;
   *) echo "unexpected git argv: \$*" >&2; exit 99 ;;
 esac
 STUB

@@ -180,15 +180,17 @@ fi
 # working for two minutes afterwards — `git commit && npm test` lost the note, with
 # no output on any stream). It is kept only for the blind case below, where there is
 # no before-image to reason from.
+RANGE_BASE=""
 if [ "$SNAP_STATE" = "trusted" ] && [ "$HEAD_BEFORE" != "none" ]; then
   # An amend or a reset-then-commit makes the old tip a sibling, not an ancestor,
   # so its parent is what has to be reachable.
   if GIT merge-base --is-ancestor "$HEAD_BEFORE" "$FULL_SHA" >/dev/null 2>&1; then
-    :
+    RANGE_BASE="$HEAD_BEFORE"
   elif GIT merge-base --is-ancestor "${HEAD_BEFORE}^" "$FULL_SHA" >/dev/null 2>&1; then
     # …but landing exactly ON that parent is an undo, not a commit.
     BEFORE_PARENT=$(GIT rev-parse "${HEAD_BEFORE}^" 2>/dev/null) || BEFORE_PARENT=""
     [ "$BEFORE_PARENT" != "$FULL_SHA" ] || exit 0
+    RANGE_BASE="${HEAD_BEFORE}^"
   else
     exit 0
   fi
@@ -224,6 +226,42 @@ fi
 
 HASH=$(GIT rev-parse --short HEAD 2>/dev/null) || exit 0
 
+# Which commits did this call make? Oldest first, so appending the records to a
+# daily note reads in the order the work happened. Without a trusted before-image
+# there is no range to walk and the tip is all we can claim.
+SHAS="$FULL_SHA"
+if [ -n "$RANGE_BASE" ]; then
+  RANGE_LIST=$(GIT rev-list --reverse "${RANGE_BASE}..${FULL_SHA}" 2>/dev/null) || RANGE_LIST=""
+  [ -z "$RANGE_LIST" ] || SHAS="$RANGE_LIST"
+fi
+SHA_COUNT=0
+for SHA_ONE in $SHAS; do
+  SHA_COUNT=$(( SHA_COUNT + 1 ))
+done
+
+# A record per commit is unbounded in principle — a scripted loop over paths can
+# make dozens, and each one costs the skill a note. Cap it, and name what the cap
+# dropped: a truncated capture is indistinguishable from a complete one otherwise.
+MAX_RECORDS="${OBSIDIAN_COMMIT_MAX_RECORDS:-20}"
+case "$MAX_RECORDS" in
+  ''|*[!0-9]*|0) MAX_RECORDS=20 ;;
+esac
+if [ "$SHA_COUNT" -gt "$MAX_RECORDS" ]; then
+  KEPT=""
+  SKIPPED=""
+  N=0
+  for SHA_ONE in $SHAS; do
+    N=$(( N + 1 ))
+    if [ "$N" -le "$MAX_RECORDS" ]; then
+      KEPT="${KEPT}${SHA_ONE}"$'\n'
+    else
+      SKIPPED="${SKIPPED}$(GIT rev-parse --short "$SHA_ONE" 2>/dev/null) "
+    fi
+  done
+  SHAS="$KEPT"
+  say "partial — this call made ${SHA_COUNT} commits; the oldest ${MAX_RECORDS} are captured, skipped: ${SKIPPED% }"
+fi
+
 # The record below is ` | `-delimited and the skill parses it by field name, turning
 # org_repo into a path under the vault and vault_path into a --vault argument. Any
 # field a commit author controls can therefore inject its own `org_repo=` /
@@ -239,26 +277,23 @@ scrub_field() {
   printf '%s' "$s"
 }
 
-MSG=$(GIT log -1 --pretty=format:'%s' 2>/dev/null) || MSG=""
-MSG="$(scrub_field "$MSG")"
 BRANCH=$(GIT rev-parse --abbrev-ref HEAD 2>/dev/null) || BRANCH="unknown"
 BRANCH="$(scrub_field "$BRANCH")"
-FILES_RAW=$(GIT diff --name-only HEAD~1..HEAD 2>/dev/null) || FILES_RAW=""
-FILES=$(printf '%s' "$FILES_RAW" | tr '\n' ',' | sed 's/,$//')
-FILES="$(scrub_field "$FILES")"
 
-# One snapshot answers for one invocation, so a call that made several commits emits
-# one record — for the tip. Name the others: a silent partial capture reads exactly
-# like a complete one.
-if [ "$SNAP_STATE" = "trusted" ] && [ "$HEAD_BEFORE" != "none" ]; then
-  EXTRA=$(GIT rev-list --count "${HEAD_BEFORE}..${FULL_SHA}" 2>/dev/null) || EXTRA=""
-  case "$EXTRA" in
-    ''|*[!0-9]*) ;;
-    *) if [ "$EXTRA" -gt 1 ]; then
-         say "partial — this call made ${EXTRA} commits; only ${HASH} is captured, skipped: $(GIT log --format=%h "${HEAD_BEFORE}..${FULL_SHA}^" 2>/dev/null | tr '\n' ' ')"
-       fi ;;
-  esac
-fi
+# The subject and the file list are per commit; everything else below (branch,
+# org_repo, vault_path, the clock) is a property of the call and is shared.
+cc_files_for() {
+  local sha="$1" raw=""
+  raw=$(GIT diff --name-only "${sha}~1..${sha}" 2>/dev/null) || raw=""
+  # A root commit has no ~1, and a merge's diff against its first parent is not
+  # what it changed; --root handles the first and prints nothing for the second,
+  # which is honest — a merge introduces no paths of its own.
+  if [ -z "$raw" ]; then
+    raw=$(GIT diff-tree --no-commit-id --name-only -r --root "$sha" 2>/dev/null) || raw=""
+  fi
+  printf '%s' "$raw" | tr '\n' ',' | sed 's/,$//'
+}
+
 REMOTE=$(GIT remote get-url origin 2>/dev/null) || REMOTE="local"
 REPO_NAME=${REPO_ROOT##*/}
 : "${REPO_NAME:=unknown}"
@@ -420,5 +455,13 @@ fi
 # put an attacker-chosen org_repo and vault_path *ahead* of the real ones, and
 # whoever parses the first match resolves a path outside the vault. Last means
 # every parseable field precedes anything a commit author can influence.
-say "$(printf 'hash=%s | branch=%s | files=%s | org_repo=%s | repo_name=%s | ticket=%s | date=%s | time=%s | vault_path=%s | msg=%s' \
-  "$HASH" "$BRANCH" "$FILES" "$ORG_REPO" "$REPO_NAME" "$TICKET" "$TODAY" "$NOW" "$VAULT_PATH" "$MSG")"
+#
+# One record per commit this call made, oldest first. The skill reads each line
+# independently, so several records from one invocation need no new contract.
+for SHA_ONE in $SHAS; do
+  ONE_HASH=$(GIT rev-parse --short "$SHA_ONE" 2>/dev/null) || continue
+  ONE_MSG=$(GIT log -1 --pretty=format:'%s' "$SHA_ONE" 2>/dev/null) || ONE_MSG=""
+  say "$(printf 'hash=%s | branch=%s | files=%s | org_repo=%s | repo_name=%s | ticket=%s | date=%s | time=%s | vault_path=%s | msg=%s' \
+    "$ONE_HASH" "$BRANCH" "$(scrub_field "$(cc_files_for "$SHA_ONE")")" "$ORG_REPO" "$REPO_NAME" \
+    "$TICKET" "$TODAY" "$NOW" "$VAULT_PATH" "$(scrub_field "$ONE_MSG")")"
+done
