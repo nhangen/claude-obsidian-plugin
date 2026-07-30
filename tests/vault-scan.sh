@@ -205,6 +205,24 @@ _n="$(printf '%s\n' "$_out" | grep -c '^CLUSTER' || true)"
 printf '%s\n' "$_out" | grep -qF "CLUSTER"$'\t'"Awesome Folder 7"$'\t'"note"$'\t'"3" \
   || fail "space-bearing folder name was mangled: $(printf '%s\n' "$_out" | grep 'Awesome' | head -2)"
 
+# --- a non-numeric cluster threshold fails loudly (#55) ----------------------
+# awk coerces a non-numeric `t` to 0, so an unusable threshold returned every token
+# in the vault as a cluster — silently, filling Librarian.md with noise. Each of
+# these must refuse instead, and refuse without emitting rows: a caller that
+# ignores the status must not receive plausible-looking output.
+for _bad in "" "abc" "3.7" "-1" "0" " 3"; do
+  _terr="$TMP/thr.err"
+  if _tout="$(scan_clusters "$V" "$_bad" 2>"$_terr")"; then
+    fail "threshold '$_bad' was accepted; got $(printf '%s\n' "$_tout" | grep -c '^CLUSTER' || true) cluster row(s)"
+  fi
+  [ -z "$_tout" ] \
+    || fail "threshold '$_bad' was refused but still emitted rows:"$'\n'"$_tout"
+  grep -q 'cluster threshold' "$_terr" \
+    || fail "threshold '$_bad' failed without saying why: $(cat "$_terr")"
+done
+# A valid threshold is unaffected.
+scan_clusters "$V" 3 >/dev/null || fail "a valid threshold was refused"
+
 # --- vault-root records carry no host path (#56) -----------------------------
 # Every row's path field is vault-relative by contract. `${p#"$vault"/}` cannot
 # strip when the path IS the vault, so a .md file directly in the root emitted the

@@ -100,6 +100,19 @@ scan_open_asks() {
 # process substitution for the whole scan, so there is no headroom to run out of.
 scan_clusters() {
   local vault="$1" threshold="$2" f dir base slug rel
+  # The awk gate below coerces a non-numeric threshold to 0, so `""` or `"abc"`
+  # returned every token in the vault as a cluster — silently, filling Librarian.md
+  # with noise. `"3.7"` returned a partial answer for the same reason. The `[ "$cnt"
+  # -ge "$threshold" ]` shape this replaced errored loudly instead, and loud is the
+  # direction this codebase went in #49. Production passes a literal 3 today, so
+  # there is no live defect — but keeper_interval_secs and its neighbours are already
+  # config-sourced, and this is one typo away the moment the threshold joins them.
+  case "$threshold" in
+    ''|*[!0-9]*|0)
+      printf 'vault-scan: cluster threshold must be a positive integer, got "%s"\n' "$threshold" >&2
+      return 1
+      ;;
+  esac
   while IFS= read -r f; do
     dir="${f%/*}"
     base="${f##*/}"; base="${base%.md}"
