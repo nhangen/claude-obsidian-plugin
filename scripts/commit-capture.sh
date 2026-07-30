@@ -342,7 +342,24 @@ cc_files_for() {
 }
 
 REMOTE=$(GIT remote get-url origin 2>/dev/null) || REMOTE="local"
-REPO_NAME=${REPO_ROOT##*/}
+# In a worktree the toplevel is the worktree directory, so its basename is
+# `obsidian-i82` or `wp-content-pr7100-slug` rather than the repository. That name
+# reaches a note's `tags:` and its H1, and PR work happens in worktrees by
+# convention — so most PR commits tagged the daily note with a directory that no
+# longer exists a week later. The linked worktrees share one common git dir; its
+# parent is the main worktree, which is the repository as far as the filesystem
+# can say. (The remote says it better still — see below, once it is parsed.)
+GIT_COMMON=$(GIT rev-parse --git-common-dir 2>/dev/null) || GIT_COMMON=""
+case "$GIT_COMMON" in
+  '') MAIN_ROOT="$REPO_ROOT" ;;
+  /*) MAIN_ROOT="$GIT_COMMON" ;;
+  # Relative, and relative to the directory git ran in — not to the toplevel.
+  *)  MAIN_ROOT="${REPO_DIR}/${GIT_COMMON}" ;;
+esac
+MAIN_ROOT="${MAIN_ROOT%/}"
+MAIN_ROOT="${MAIN_ROOT%/.git}"
+REPO_NAME=${MAIN_ROOT##*/}
+REPO_NAME=${REPO_NAME%.git}
 : "${REPO_NAME:=unknown}"
 TODAY=$(date '+%Y-%m-%d')
 NOW=$(date '+%H:%M')
@@ -412,6 +429,14 @@ case "$ORG_REPO" in
 esac
 case "$ORG_REPO" in
   ''|*/) ORG_REPO="local/$REPO_NAME" ;;
+esac
+# Now that the remote has been parsed, it — not any directory — is what names the
+# repository: a clone is free to sit in a directory called anything, and a worktree
+# always does. The `local/` form means no remote resolved, and there the directory
+# above is already the best available answer.
+case "$ORG_REPO" in
+  local/*) ;;
+  */*) REPO_NAME="${ORG_REPO##*/}" ;;
 esac
 
 # --- Extract ticket number from branch ---

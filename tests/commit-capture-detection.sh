@@ -68,6 +68,8 @@ case "\$*" in
   "diff --name-only HEAD~1..HEAD") echo foo.txt ;;
   "remote get-url origin") echo "${remote}" ;;
   "rev-parse --show-toplevel") echo "/tmp/mtf-builder" ;;
+  # Where the repository really is, which in a worktree the toplevel does not say.
+  "rev-parse --git-common-dir") echo "/tmp/mtf-builder/.git" ;;
   "rev-parse HEAD") echo 0123456789abcdef0123456789abcdef01234567 ;;
   # The post-hook asks git what the HEAD move was: is the snapshot's sha an
   # ancestor, and did we commit it. Answer yes to both — these cases are about

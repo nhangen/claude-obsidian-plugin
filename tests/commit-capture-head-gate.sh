@@ -856,6 +856,59 @@ case "$POST_OUT" in
   *) fail "the amend record does not name the amended commit's own path"$'\n'"got: $POST_OUT" ;;
 esac
 
+# --- 26. a commit made in a worktree names the repository, not the worktree ---
+# `repo_name` reaches a note's `tags:` and its H1, and PR work happens in a
+# worktree by convention — so this used to tag the daily note with a directory
+# that no longer exists once the PR lands. The remote names the repository; the
+# worktree directory is deliberately something else.
+reset_state
+WT="$WORK/pr-1234-slug"
+git -C "$REPO" worktree add -q -b wt-branch "$WT" >/dev/null 2>&1
+P="$(payload 'git commit -q -m wt' "$WT" call-26)"
+run_pre "$P"
+: > "$WT/in-the-worktree.txt"
+git -C "$WT" add in-the-worktree.txt
+git -C "$WT" commit -q -m "work in a worktree"
+run_post_verbose "$P"
+case "$POST_OUT" in
+  *hash=*) : ;;
+  *) fail "a commit made in a worktree was not captured at all"$'\n'"got: ${POST_OUT:-<empty>}"$'\n'"stderr: $POST_ERR" ;;
+esac
+GOT_NAME="$(printf '%s' "$POST_OUT" | sed -n 's/.*repo_name=\([^ |]*\).*/\1/p')"
+[ "$GOT_NAME" = "mtf-builder" ] \
+  || fail "repo_name=${GOT_NAME:-<absent>}, expected mtf-builder — a note filed from a PR worktree must not be tagged with the checkout directory"$'\n'"got: $POST_OUT"
+case "$POST_OUT" in
+  *'org_repo=altamira2/mtf-builder'*) : ;;
+  *) fail "a worktree commit was filed under the wrong org_repo"$'\n'"got: $POST_OUT" ;;
+esac
+
+# Same shape with no remote at all: nothing can name the repository except the
+# filesystem, and the *main* worktree is the closest it gets. Without the common-dir
+# lookup this reports the linked worktree's directory and org_repo becomes
+# local/<throwaway-dir> — the folder fragmentation the org/repo work removed for
+# remotes, reappearing for repos that have none.
+reset_state
+BARE="$WORK/no-remote"
+mkrepo "$BARE"
+git -C "$BARE" remote remove origin
+commit_in "$BARE" "seed"
+BWT="$WORK/no-remote-wt"
+git -C "$BARE" worktree add -q -b wt2 "$BWT" >/dev/null 2>&1
+P="$(payload 'git commit -q -m wt' "$BWT" call-26b)"
+run_pre "$P"
+: > "$BWT/x.txt"
+git -C "$BWT" add x.txt
+git -C "$BWT" commit -q -m "work with no remote"
+run_post_verbose "$P"
+case "$POST_OUT" in
+  *'repo_name=no-remote '*) : ;;
+  *) fail "a remoteless worktree commit did not fall back to the main worktree's name"$'\n'"got: ${POST_OUT:-<empty>}"$'\n'"stderr: $POST_ERR" ;;
+esac
+case "$POST_OUT" in
+  *'org_repo=local/no-remote '*) : ;;
+  *) fail "a remoteless worktree commit was filed under the worktree directory"$'\n'"got: $POST_OUT" ;;
+esac
+
 # --- wiring: both halves are registered on Bash ------------------------------
 # The pair is one mechanism. Shipping the post-hook without the pre-hook turns
 # every capture into a stderr diagnostic.
