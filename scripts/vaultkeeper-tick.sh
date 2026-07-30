@@ -35,7 +35,6 @@ if ! keeper_is_owner "$LEASE" "$HOST" "$PRIORITY" "$MAXAGE"; then
   exit 0
 fi
 
-CONFLICTS="$(keeper_quarantine_conflicts "$VAULT" || true)"
 # Capture the scanners' stderr instead of letting it fly past. Every scanner
 # returns 0 unconditionally, so a truncated scan was indistinguishable from a
 # complete one and got recorded as complete — for every one of 700+ consecutive
@@ -80,12 +79,37 @@ cleanup_bufs() {
   return 0
 }
 trap cleanup_bufs EXIT
+# Quarantine runs here, INSIDE the fault capture, and its status is kept (#53). It
+# used to run above — before the buffer even existed — with `|| true`, so a failed
+# `mv` printed `failed to quarantine …` straight past the gate and the non-zero exit
+# was discarded: the QUARANTINE list came back short and the tick recorded the scan
+# as complete. Same invariant as the scanners, one function over.
+#
+# It stays above the digest so its rows appear in Librarian.md. That its rows cannot
+# reach Pending.md on a faulted tick is a separate, filed problem (#58) — the move is
+# irreversible and no later tick re-derives the row.
 CAND="$( {
+  # First inside the group, not before it (#53). Before it, `CONFLICTS="$(… || true)"`
+  # ran while the buffer did not exist yet — and even appending to the buffer would
+  # not have worked, because the group's own `2>"$SCAN_ERR"` truncates the file when
+  # it opens. So a failed `mv` printed `failed to quarantine …` past the gate and
+  # `|| true` discarded the status: the QUARANTINE list came back short and the tick
+  # recorded the scan as complete. Inside, its stderr is the scanners' stderr.
+  #
+  # First and not last, because the scanners must not see the files it moves — run
+  # after them, a conflict file that was quarantined successfully still shows up as a
+  # frontmatter gap. Its rows go straight into CAND; the separate CONFLICTS variable
+  # existed only to carry them across the group boundary.
+  #
+  # It stays above the digest so its rows reach Librarian.md. That its rows cannot
+  # reach Pending.md on a faulted tick is a separate, filed problem (#58): the move is
+  # irreversible and no later tick re-derives the row.
+  keeper_quarantine_conflicts "$VAULT" \
+    || printf 'keeper_quarantine_conflicts exited non-zero\n' >&2
   scan_frontmatter_gaps "$VAULT" "$REQUIRED"
   scan_unfiled "$VAULT"
   scan_open_asks "$VAULT"
   scan_clusters "$VAULT" 3
-  if [ -n "$CONFLICTS" ]; then printf '%s\n' "$CONFLICTS"; fi
 } 2>"${SCAN_ERR:-/dev/stderr}" | sed '/^$/d' )"
 if [ -n "$SCAN_ERR" ] && [ -s "$SCAN_ERR" ]; then
   # Deduplicate before truncating. `_scan_find_md` backs three scanners, so one

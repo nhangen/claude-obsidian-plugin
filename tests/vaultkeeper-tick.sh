@@ -110,6 +110,54 @@ if [ -f "$CV/Pending.md" ]; then
     || fail "fault/heal cycles duplicated $_dups Pending.md item(s): $(grep '^- \[ \]' "$CV/Pending.md" | sort | uniq -d | head -3)"
 fi
 
+# --- a failed quarantine move is a fault too (#53) ---------------------------
+# `CONFLICTS="$(keeper_quarantine_conflicts … || true)"` ran above the buffer, so a
+# failed `mv` printed `failed to quarantine …` straight past the gate and `|| true`
+# threw away the status: the QUARANTINE list came back short and the tick recorded
+# the scan as complete. Same invariant as the scanners, one function over.
+if [ "$(id -u)" = "0" ]; then
+  echo "note: running as root, skipping the failed-quarantine arm" >&2
+else
+  QV="$TMP/quarantinevault"; mkdir -p "$QV/Inbox"
+  printf -- '---\ntags: [x]\n---\nbody\n' > "$QV/n.md"
+  # A real Syncthing conflict name, so the quarantine matcher fires on it.
+  printf 'conflicted\n' > "$QV/Pending.sync-conflict-20260730-120000-ABCDEFG.md"
+  # Pre-create the destination read-only: mkdir -p succeeds, the mv into it does not.
+  mkdir -p "$QV/.vaultkeeper-quarantine"
+  chmod 555 "$QV/.vaultkeeper-quarantine"
+  QCFG="$TMP/quarantine.local.md"; sed "s|^vault_path: .*|vault_path: $QV|" "$CFG" > "$QCFG"
+  QOUT="$TMP/quarantine.out"
+  OBSIDIAN_LOCAL_MD="$QCFG" VAULTKEEPER_HOST="ml-1" \
+    bash "${ROOT_DIR}/scripts/vaultkeeper-tick.sh" >"$QOUT" 2>&1 \
+    || { chmod 755 "$QV/.vaultkeeper-quarantine"; fail "a failed quarantine must not abort the tick; got: $(cat "$QOUT")"; }
+  chmod 755 "$QV/.vaultkeeper-quarantine"
+  grep -q 'scan INCOMPLETE' "$QOUT" \
+    || fail "a failed quarantine move was recorded as a complete scan; got: $(cat "$QOUT")"
+  grep -q 'quarantine' "$QOUT" \
+    || fail "the quarantine failure's own words never reached the report; got: $(cat "$QOUT")"
+  [ -f "$(keeper_last_scan_file "$QV")" ] \
+    && fail "a tick whose quarantine failed still recorded last_scan"
+
+  # And a SUCCESSFUL quarantine must run before the scanners, not merely inside the
+  # same capture: run after them, the conflict file is still in place when they walk
+  # the vault, so a file that was correctly quarantined also gets reported as a
+  # frontmatter gap that no longer exists.
+  QV2="$TMP/quarantineok"; mkdir -p "$QV2/Inbox"
+  printf -- '---\ntags: [x]\ntype: a\n---\nbody\n' > "$QV2/n.md"
+  printf 'conflicted\n' > "$QV2/Pending.sync-conflict-20260730-120000-HIJKLMN.md"
+  Q2CFG="$TMP/quarantineok.local.md"; sed "s|^vault_path: .*|vault_path: $QV2|" "$CFG" > "$Q2CFG"
+  Q2OUT="$TMP/quarantineok.out"
+  OBSIDIAN_LOCAL_MD="$Q2CFG" VAULTKEEPER_HOST="ml-1" \
+    bash "${ROOT_DIR}/scripts/vaultkeeper-tick.sh" >"$Q2OUT" 2>&1 \
+    || fail "a successful quarantine aborted the tick; got: $(cat "$Q2OUT")"
+  grep -q 'scan complete' "$Q2OUT" \
+    || fail "a successful quarantine was reported as a fault; got: $(cat "$Q2OUT")"
+  grep -q '^- Pending.sync-conflict-20260730-120000-HIJKLMN.md$' "$QV2/Librarian.md" \
+    || fail "the quarantined conflict was not listed in the digest: $(cat "$QV2/Librarian.md")"
+  grep -qE '^- Pending\.sync-conflict-20260730-120000-HIJKLMN\.md\s' "$QV2/Librarian.md" \
+    && fail "the quarantined file was ALSO scanned as a gap, so quarantine ran after the scanners: $(cat "$QV2/Librarian.md")"
+fi
+
 # --- an unreadable directory must not latch the gate (#51) -------------------
 # One `chmod 000` directory made find print `Permission denied`, and the gate — which
 # could only see bytes on stderr — reported INCOMPLETE on every tick from then on and
