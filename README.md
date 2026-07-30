@@ -201,6 +201,7 @@ scripts/lib/allowlist-validate.sh Frontmatter/path allowlist validation shared b
 scripts/lib/dedup-scan.sh     Shared dedup-against-existing-notes scan
 scripts/lib/keeper-save-payload.sh Payload parsing/validation for keeper-save
 scripts/lib/vault-index.sh    Shared INDEX.md read/refresh helpers
+scripts/lib/moc-promote.sh    Retargets inbound wikilinks when an MOC promotion moves notes
 scripts/keeper                CLI entry point for keeper insert/append operations
 agents/                       Subagents (vault-organizer for /obsidian reorganize paths)
 integrations/                 External tool integrations
@@ -212,7 +213,7 @@ The plugin root is resolved by Claude Code via `${CLAUDE_PLUGIN_ROOT}` — scrip
 ## Known Limitations
 
 - The Stop hook requires `claude` on `PATH` for background summarization. If absent, the session save no-ops with a logged warning.
-- Commit capture relies on parsing `git` output; very large commits are truncated to keep the note readable.
+- Commit capture asks `git` about a HEAD snapshot taken before the call, so a failed or dry-run commit is not captured. A call that makes more than `OBSIDIAN_COMMIT_MAX_RECORDS` commits (20 by default) captures the oldest of them and names the shas it skipped rather than truncating silently. The append is idempotent per commit sha, read from the note itself, so a re-run or a second host does not duplicate a record.
 - Routing is keyword-based, not semantic. Intent inference records confidence and evidence, but folder placement still depends on taxonomy/routing rules; ambiguous sessions can still land in `Inbox/`.
 
 ## License

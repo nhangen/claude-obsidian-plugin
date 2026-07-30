@@ -10,6 +10,7 @@ strict_domains: true
 dedup_jaccard_threshold: 0.4
 moc_promotion: true
 moc_promotion_threshold: 3
+moc_promotion_fix_links: true
 frontmatter_required: tags type
 keeper_host_priority: ml-1 mbp
 keeper_interval_secs: 900

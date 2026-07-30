@@ -339,7 +339,7 @@ After a successful new-file write, check whether the parent folder has grown a c
      > Promoting will break the following wikilinks (Obsidian will not auto-update them via shell `mv`):
      > - `<note-with-link>` → `[[<broken-target>]]`
      >
-     > Continue anyway? (yes/no — recommend running Obsidian's "Update links on rename" manually after if you proceed)
+     > Continue? The links will be retargeted to the new location automatically. (yes/no)
 
      If the user declines on the link-warning prompt, treat as an MOC decline (cache it) and stop.
    - `mkdir -p "<parent>/<Stem>/notes"` — these writes operate under the already-validated parent folder and bypass the Step 7 allow-list check by design.
@@ -364,7 +364,32 @@ After a successful new-file write, check whether the parent folder has grown a c
 
      -
      ```
-   - Confirm to user with the new paths.
+   - **Retarget the inbound wikilinks** — after the `mv`s and before confirming. The
+     user accepting the promotion already accepted the link churn, and the repair is
+     mechanical, so it does not go back to them (#18):
+
+         . "${CLAUDE_PLUGIN_ROOT}/scripts/lib/note-hash.sh"
+         . "${CLAUDE_PLUGIN_ROOT}/scripts/lib/moc-promote.sh"
+         moc_retarget_wikilinks "<vault_path>" "<Stem>/notes" "<file-1>" "<file-2>" "<file-3>"
+
+     Pass the filename **stems** (no `.md`), not paths. It rewrites `[[<stem>]]`,
+     `[[<stem>|alias]]` and `[[<stem>#heading]]` to the new relative path across the
+     vault, leaves links that already carry a path alone, and echoes
+     `<links-updated> <files-changed>`.
+
+     Skip this step when `moc_promotion_fix_links: false` is set in
+     `obsidian.local.md` frontmatter — for the case where the user would rather do it
+     through Obsidian's own rename UI. Then keep the old advice: tell them to run
+     "Update links on rename" manually.
+
+     Why not leave it to Obsidian: its "Update internal links on rename" only fires
+     inside the running app's rename UI, and this flow moves files with a shell `mv`.
+     Without this step the user has to hunt each broken link down by hand, which is
+     the friction the soft-prompt flow exists to remove.
+   - Confirm to user with the new paths, and name the link repair — e.g. *"Promoted 3
+     notes to `Panel/` — also retargeted 4 inbound wikilinks across 3 files."* Say so
+     even when the count is 0, so "no links needed fixing" is distinguishable from
+     "the step did not run".
 
 5. **On decline**: write `moc-declined:<stem>` to the session cache and move on. Do not ask again this session.
 
