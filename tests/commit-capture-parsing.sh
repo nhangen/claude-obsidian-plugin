@@ -414,4 +414,42 @@ case "$OUT" in
   *) fail "a broken parsing library was not reported"$'\n'"got: ${OUT:-<empty>}" ;;
 esac
 
+# --- 9. a wrapper in front of git (rtk) --------------------------------------
+# RTK's own PreToolUse hook returns `updatedInput` from `rtk rewrite`, so the
+# command the PostToolUse payload reports is `rtk git commit`, not `git commit`.
+# The pre-hook sees the payload before that rewrite and records a snapshot, so a
+# gate that only knows the word `git` leaves the two halves disagreeing about
+# whether a commit happened — and the capture dies silently (issue #73).
+WRAPPED="$WORK/wrapped"
+mkrepo "$WRAPPED" "git@github.com:nhangen/wrapped.git" "wrapped commit"
+OUT="$(run_from "$WORK" "$(payload "cd $WRAPPED && rtk git commit -q -m x")")"
+case "$OUT" in
+  *"org_repo=nhangen/wrapped"*) : ;;
+  *) fail "rtk-wrapped git commit was not recognized"$'\n'"got: ${OUT:-<empty>}" ;;
+esac
+
+# The wrapper must not hide `-C` from resolution either: the flag is parsed after
+# the command word, so a skipped wrapper has to hand off mid-argv intact.
+OUT="$(run_from "$WORK" "$(payload "rtk git -C $WRAPPED commit -q -m x")")"
+case "$OUT" in
+  *"org_repo=nhangen/wrapped"*) : ;;
+  *) fail "rtk-wrapped 'git -C <dir> commit' lost the -C target"$'\n'"got: ${OUT:-<empty>}" ;;
+esac
+
+# `rtk proxy <cmd>` is the second wrapper shape in RTK's docs, which is why the
+# skip loops instead of stripping one token.
+OUT="$(run_from "$WORK" "$(payload "cd $WRAPPED && rtk proxy git commit -q -m x")")"
+case "$OUT" in
+  *"org_repo=nhangen/wrapped"*) : ;;
+  *) fail "'rtk proxy git commit' was not recognized"$'\n'"got: ${OUT:-<empty>}" ;;
+esac
+
+# The allowlist is narrow on purpose. Skipping any unrecognized leading word
+# would make `rtk echo git commit` — and every other command that merely names
+# git — read as a commit.
+OUT="$(run_from "$WORK" "$(payload "cd $WRAPPED && rtk echo git commit")")"
+case "$OUT" in
+  *hash=*) fail "a wrapped command that only names git was captured"$'\n'"got: $OUT" ;;
+esac
+
 printf 'ok   commit-capture-parsing.sh (payload parsing, repo resolution, record integrity)\n'

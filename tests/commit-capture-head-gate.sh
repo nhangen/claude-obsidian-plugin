@@ -508,6 +508,26 @@ else
   printf 'skip commit-capture-head-gate.sh case 19: filesystem refused a path containing |\n' >&2
 fi
 
+# --- 20. a wrapper rewritten in between the two halves ----------------------
+# The real asymmetry from issue #73: RTK's PreToolUse hook returns `updatedInput`,
+# so the pre-hook's payload says `git commit` and the post-hook's says
+# `rtk git commit`. Both halves share cc_invokes_commit, and it has to answer the
+# same for both texts or the snapshot is written and never read.
+reset_state
+P_PRE="$(payload 'git commit -q -m x' "$REPO" call-rtk)"
+P_POST="$(payload 'rtk git commit -q -m x' "$REPO" call-rtk)"
+run_pre "$P_PRE"
+commit_in "$REPO" "work behind a wrapper"
+run_post_verbose "$P_POST"
+case "$POST_OUT" in
+  *"org_repo=altamira2/mtf-builder"*) : ;;
+  *) fail "a commit whose command was rewritten to 'rtk git' between pre and post was lost"$'\n'"got: ${POST_OUT:-<empty>}"$'\n'"stderr: $POST_ERR" ;;
+esac
+# And the snapshot must be consumed, not leaked until the daily sweep.
+if [ -n "$(ls -A "${STATE_HOME}/claude-obsidian/pre-commit-head" 2>/dev/null)" ]; then
+  fail "the snapshot survived a capture behind a wrapper"
+fi
+
 # --- wiring: both halves are registered on Bash ------------------------------
 # The pair is one mechanism. Shipping the post-hook without the pre-hook turns
 # every capture into a stderr diagnostic.

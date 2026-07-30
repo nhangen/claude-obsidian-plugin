@@ -139,6 +139,22 @@ cc_invokes_commit() {
     cc_take_token "$seg"
     word="$CC_TOKEN"
     args="$CC_REST"
+    # A wrapper can sit in front of git. RTK's own PreToolUse hook returns
+    # `updatedInput` from `rtk rewrite`, so the command the PostToolUse payload
+    # reports is `rtk git commit` while the pre-hook's payload still said
+    # `git commit` — the two halves of the gate then disagreed about whether a
+    # commit happened and the capture died silently. Allowlisted by name: skipping
+    # any unrecognized leading word would make `rtk echo git commit` a commit.
+    if [ "${word##*/}" = rtk ] && [ -n "$args" ]; then
+      cc_take_token "$args"
+      word="$CC_TOKEN"
+      args="$CC_REST"
+      if [ "${word##*/}" = proxy ] && [ -n "$args" ]; then
+        cc_take_token "$args"
+        word="$CC_TOKEN"
+        args="$CC_REST"
+      fi
+    fi
     # Match the basename so /usr/bin/git counts, and remember a `cd` target: it is
     # where git actually ran.
     case "${word##*/}" in
