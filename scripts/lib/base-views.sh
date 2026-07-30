@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # base-views.sh — maintain the write-only Obsidian Bases view that renders
-# frontmatter gaps inside the GUI. WRITE-ONLY: no keeper code reads a .base to
+# frontmatter gaps inside the GUI. Requires note-hash.sh (keeper_swap_or_clean).
+# WRITE-ONLY: no keeper code reads a .base to
 # answer a query (headless reader is the frontmatter walk). Idempotent.
 
 base_view_content() {
@@ -26,5 +27,5 @@ base_view_write() {
     rm -f "$tmp"
     return 0
   fi
-  mv "$tmp" "$target"
+  keeper_swap_or_clean "$tmp" "$target"
 }
