@@ -1,7 +1,15 @@
 #!/usr/bin/env bash
 # commit-capture.sh
-# PostToolUse command hook. Detects git commits from Bash tool output,
-# extracts metadata, and outputs it inline. Non-commit Bash calls exit silently.
+# PostToolUse command hook. Detects git commits from Bash tool calls, extracts
+# metadata, and outputs it inline. Non-commit Bash calls exit silently.
+#
+# "A commit happened" is decided by comparing HEAD against the snapshot its
+# PreToolUse sibling (commit-capture-pre.sh) took before the call ran. Reading
+# success out of the command text and the tool output could not do that job: the
+# guard list had to grow a phrase for every way git can fail, `--dry-run` had to
+# be told apart from a commit message that mentions the flag, `false && git
+# commit` still read as success, and a failed commit inherited its predecessor's
+# tip. None of that survives a HEAD comparison, so none of it is here any more.
 
 set -uo pipefail
 
@@ -14,272 +22,154 @@ case "$INPUT" in
   *) exit 0 ;;
 esac
 
-# The payload is JSON: a quote inside the command arrives as \" and a newline as
-# the two characters \n. Truncating a value at the first `"` therefore cut the
-# command short at its first quoted argument, silently dropping
-# `cd "<worktree>" && git commit` — this project's own documented workflow — and
-# `git add "a b.txt" && git commit`. Decode the string instead of slicing it.
-# Walking the string a character at a time cost ~11s on a 4 KB command, which is
-# not something a PostToolUse hook may spend. Substitute the two escapes that can
-# be confused with the closing quote for placeholders, cut at the first quote
-# that is now genuinely unescaped, then restore — all bulk expansions.
-# \uXXXX is left as written: it can never be a delimiter or a shell separator.
-json_value() {
-  local s="$1" key="$2"
-  s="${s#*"$key"}"
-  [ "$s" != "$1" ] || { printf '%s' ''; return 0; }
-  s="${s#*\"}"
-  s="${s//\\\\/$'\001'}"
-  s="${s//\\\"/$'\002'}"
-  s="${s%%\"*}"
-  s="${s//\\n/$'\n'}"
-  s="${s//\\t/$'\t'}"
-  s="${s//\\r/$'\r'}"
-  s="${s//$'\002'/\"}"
-  s="${s//$'\001'/\\}"
-  printf '%s' "$s"
-}
+# Diagnostics go to stdout, not stderr. A hook that exits 0 has its stdout read
+# (that is how the record below reaches the skill at all); exit-0 stderr has no
+# documented surface, so a "not captured" line written there is indistinguishable
+# from dropping the capture in silence. The skill knows that only a line starting
+# `obsidian-commit-capture: hash=` is a record.
+say() { printf 'obsidian-commit-capture: %s\n' "$1"; }
 
-COMMAND_LINE="$(json_value "$INPUT" '"command"')"
-PAYLOAD_CWD="$(json_value "$INPUT" '"cwd"')"
-# Failure text must be judged on what the tool reported, never on the command or
-# the commit message. Matching the whole payload discarded a successful commit
-# whose subject contained `fatal:`, `error:`, or `--dry-run`.
-RESPONSE=""
-case "$INPUT" in
-  *'"tool_response"'*) RESPONSE="${INPUT#*'"tool_response"'}" ;;
-esac
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+LIB="${SCRIPT_DIR}/lib/commit-capture-parse.sh"
+if [ ! -f "$LIB" ]; then
+  say "not captured — missing ${LIB} (reinstall the plugin)"
+  exit 0
+fi
+# Guarded, like the pre-hook: a truncated lib (a partial plugin update) otherwise
+# leaves every function undefined, and the gate below would swallow the resulting
+# command-not-found as an ordinary non-commit call.
+# shellcheck source=lib/commit-capture-parse.sh
+if ! . "$LIB"; then
+  say "not captured — ${LIB} failed to load (reinstall the plugin)"
+  exit 0
+fi
 
-# Pull the first shell token off a string, honouring "…" and '…' so a path with
-# spaces survives. Sets TOKEN and REST.
-TOKEN=""
-REST=""
-take_token() {
-  local s="$1"
-  s="${s#"${s%%[![:space:]]*}"}"
-  case "$s" in
-    '"'*) s="${s#\"}"; TOKEN="${s%%\"*}"; REST="${s#"$TOKEN"}"; REST="${REST#\"}" ;;
-    "'"*) s="${s#\'}"; TOKEN="${s%%\'*}"; REST="${s#"$TOKEN"}"; REST="${REST#\'}" ;;
-    *)    TOKEN="${s%%[[:space:]]*}"; REST="${s#"$TOKEN"}" ;;
-  esac
-  REST="${REST#"${REST%%[![:space:]]*}"}"
-}
+COMMAND_LINE="$(cc_json_value "$INPUT" '"command"')"
+PAYLOAD_CWD="$(cc_json_value "$INPUT" '"cwd"')"
 
-# `git commit` must be an actual command word, not a substring. Matching the
-# substring captured `grep -rn "git commit" docs/`, `echo "run git commit"`, and
-# `git log --grep="git commit"` — each of which fires the hook and, with a recent
-# HEAD, re-captures whatever commit happened to be at the tip.
-# Split the command on shell separators and require some segment to *invoke* git
-# with the `commit` subcommand. A newline is a separator too: it arrives decoded
-# by now, and `git add -A` on one line with `git commit` on the next is the most
-# common shape there is.
-#
-# Heredoc bodies are not commands. This only became reachable once newlines were
-# decoded: `cat <<EOF` / `git commit -q` / `EOF` used to survive as one segment and
-# be rejected, and now the body line would match the gate on its own. The opening
-# line is kept, because `git commit -F - <<EOF` is a real invocation.
-strip_heredoc_bodies() {
-  local s="$1" out="" line trimmed delim="" tag
-  while IFS= read -r line; do
-    if [ -n "$delim" ]; then
-      trimmed="${line#"${line%%[![:space:]]*}"}"
-      [ "$trimmed" = "$delim" ] && delim=""
-      continue
-    fi
-    out="${out}${line}"$'\n'
-    case "$line" in
-      *'<<<'*) ;;                                   # herestring: no body follows
-      *'<<'*)
-        tag="${line#*<<}"
-        tag="${tag#-}"
-        tag="${tag#"${tag%%[![:space:]]*}"}"
-        tag="${tag%%[[:space:]]*}"
-        tag="${tag%%[;&|)]*}"
-        tag="${tag//\"/}"
-        tag="${tag//\'/}"
-        [ -n "$tag" ] && delim="$tag"
-        ;;
-    esac
-  done <<EOF
-$s
-EOF
-  printf '%s' "$out"
-}
-
-INVOKES_COMMIT=0
-GIT_C_DIR=""
-CD_TARGET=""
-SEGMENTS="$(strip_heredoc_bodies "$COMMAND_LINE")"
-SEGMENTS="${SEGMENTS//&&/$'\n'}"
-SEGMENTS="${SEGMENTS//||/$'\n'}"
-SEGMENTS="${SEGMENTS//;/$'\n'}"
-SEGMENTS="${SEGMENTS//|/$'\n'}"
-while IFS= read -r seg; do
-  seg="${seg#"${seg%%[![:space:]]*}"}"          # ltrim
-  # Shell keywords and grouping tokens sit in front of the real command word, so
-  # `if true; then git commit; fi` and `for f in a; do git commit; done` used to
-  # miss entirely.
-  while :; do
-    case "$seg" in
-      'then '*|'do '*|'else '*|'elif '*|'time '*|'exec '*|'! '*|'{ '*)
-        seg="${seg#* }" ;;
-      '('*|'{'*) seg="${seg#?}" ;;
-      *) break ;;
-    esac
-    seg="${seg#"${seg%%[![:space:]]*}"}"
-  done
-  # Leading VAR=value assignments (GIT_AUTHOR_DATE=… git commit …).
-  while :; do
-    case "$seg" in
-      [A-Za-z_]*=*)
-        assign="${seg%%=*}"
-        case "$assign" in
-          *[!A-Za-z0-9_]*) break ;;
-        esac
-        case "$seg" in
-          *' '*) seg="${seg#* }"; seg="${seg#"${seg%%[![:space:]]*}"}" ;;
-          *) break ;;
-        esac
-        ;;
-      *) break ;;
-    esac
-  done
-  take_token "$seg"
-  word="$TOKEN"
-  args="$REST"
-  # Match the basename so /usr/bin/git counts, and remember a `cd` target: it is
-  # where git actually ran.
-  case "${word##*/}" in
-    cd)
-      while :; do
-        case "$args" in
-          -*) take_token "$args"; args="$REST" ;;
-          *) break ;;
-        esac
-      done
-      take_token "$args"
-      [ -n "$TOKEN" ] && [ -z "$CD_TARGET" ] && CD_TARGET="$TOKEN"
-      continue
-      ;;
-    git) ;;
-    *) continue ;;
-  esac
-  [ -n "$args" ] || continue
-  # Skip git's global flags. `-C <dir>` is recorded, not just skipped: the gate
-  # used to parse it while resolution ignored it, so the two layers disagreed
-  # about which repository the commit landed in.
-  while :; do
-    case "$args" in
-      -C' '*|-c' '*|--git-dir' '*|--work-tree' '*|--namespace' '*|--exec-path' '*)
-        flag="${args%%[[:space:]]*}"
-        args="${args#"$flag"}"
-        args="${args#"${args%%[![:space:]]*}"}"
-        take_token "$args"
-        [ "$flag" = "-C" ] && [ -z "$GIT_C_DIR" ] && GIT_C_DIR="$TOKEN"
-        args="$REST"
-        ;;
-      -*) take_token "$args"; args="$REST" ;;
-      *) break ;;
-    esac
-    [ -n "$args" ] || break
-  done
-  case "$args" in
-    commit|commit' '*|commit$'\t'*) INVOKES_COMMIT=1; break ;;
-  esac
-done <<EOF
-$SEGMENTS
-EOF
-[ "$INVOKES_COMMIT" -eq 1 ] || exit 0
-
-# --dry-run is a flag, so look for it outside quoted text: a commit whose message
-# mentions the flag (`-m "add --dry-run flag"`) is still a real commit.
-strip_quoted() {
-  local s="$1" q="$2" out="" pre
-  while :; do
-    case "$s" in
-      *"$q"*)
-        pre="${s%%"$q"*}"
-        s="${s#*"$q"}"
-        case "$s" in
-          *"$q"*) s="${s#*"$q"}" ;;
-          *) s="" ;;                    # unbalanced: treat the tail as quoted
-        esac
-        out="${out}${pre} "
-        ;;
-      *) out="${out}${s}"; break ;;
-    esac
-  done
-  printf '%s' "$out"
-}
-UNQUOTED="$(strip_quoted "$COMMAND_LINE" '"')"
-UNQUOTED="$(strip_quoted "$UNQUOTED" "'")"
-case "$UNQUOTED" in
-  *--dry-run*)
-    exit 0
-    ;;
-esac
-
-# Failure text. The old list matched three phrases and `"error:` (which only
-# fires when stderr *starts* with it), so a rejected pre-commit hook and
-# `fatal: cannot do a partial commit during a merge` both read as success.
-case "$RESPONSE" in
-  *'nothing to commit'*|*'nothing added'*|*'no changes added'*|*'Aborting'*  |*'error:'*|*'fatal:'*|*'exited with code'*|*'hook failed'*|*'Untracked files'*)
-    exit 0
-    ;;
-esac
+cc_invokes_commit "$COMMAND_LINE" || exit 0
 
 # Which repo? The commit may have been made in a worktree via
-# `cd <worktree> && git commit`, which is this project's documented workflow.
-# Running git in the hook's own cwd read the wrong HEAD — dropping the capture
-# when the session repo was idle, or capturing the wrong commit when it wasn't.
-# A relative `cd` has to be resolved against the payload's cwd, not the hook's:
-# with a same-named directory beside the hook it captured a different
-# repository's commit outright, and filed the note under that repo's name.
-resolve_repo_dir() {
-  local d="$1"
-  [ -n "$d" ] || return 1
-  case "$d" in
-    '~') d="$HOME" ;;
-    '~/'*) d="$HOME/${d#\~/}" ;;
-  esac
-  case "$d" in
-    /*) ;;
-    *)
-      [ -n "$PAYLOAD_CWD" ] || return 1
-      d="$PAYLOAD_CWD/$d"
-      ;;
-  esac
-  [ -d "$d" ] || return 1
-  git -C "$d" rev-parse --show-toplevel >/dev/null 2>&1 || return 1
-  printf '%s' "$d"
-}
-
-REPO_DIR=""
-for cand in "$GIT_C_DIR" "$CD_TARGET" "$PAYLOAD_CWD" "$PWD"; do
-  [ -n "$cand" ] || continue
-  REPO_DIR="$(resolve_repo_dir "$cand")" && break
-  REPO_DIR=""
-done
-[ -n "$REPO_DIR" ] || exit 0
+# `cd <worktree> && git commit`, which is this project's documented workflow, so
+# the hook's own cwd is the last candidate rather than the first.
+REPO_DIR="$(cc_find_repo_dir "$PAYLOAD_CWD")" || exit 0
 GIT() { git -C "$REPO_DIR" "$@"; }
-
-# Resolved once, above the dedup gate, because the gate has to key on the
-# repository rather than on whatever cwd string this invocation happened to
-# carry — `$R`, `$R/sub` and `$R/` are one repo and produced three captures.
 REPO_ROOT=$(GIT rev-parse --show-toplevel 2>/dev/null) || REPO_ROOT=""
 [ -n "$REPO_ROOT" ] || REPO_ROOT="$REPO_DIR"
 
-# Confirm a commit actually landed, and that it is one we have not already
-# captured. The old gate required the "[branch hash]" summary line, which
-# `git commit -q` does not print, so every quiet commit was silently skipped.
-# Asking git instead needs two parts: the sha must be new (otherwise any later
-# Bash call that merely mentions `git commit` re-captures the same commit, and a
-# failed commit re-captures its predecessor), and it must be recent (otherwise a
-# first-ever mention captures unrelated history).
+# --- Did a commit actually land? ---
+
+SNAP_FILE="$(cc_state_dir)/pre-commit-head/$(cc_snapshot_key "$INPUT")"
+HEAD_BEFORE=""
+SNAP_ROOT=""
+SNAP_INTENT=""
+if [ -f "$SNAP_FILE" ]; then
+  while IFS= read -r line; do
+    case "$line" in
+      sha=*) HEAD_BEFORE="${line#sha=}" ;;
+      root=*) SNAP_ROOT="${line#root=}" ;;
+      intent=*) SNAP_INTENT="${line#intent=}" ;;
+    esac
+  done < "$SNAP_FILE"
+  # Consumed: one snapshot answers for exactly one invocation, so a second
+  # PostToolUse for the same call cannot re-capture the commit.
+  rm -f "$SNAP_FILE" 2>/dev/null || true
+fi
+
+# Which of the three states is this snapshot in?
+#
+#   trusted   — it recorded THIS repo's HEAD, so HEAD_BEFORE is a real before-image.
+#   blind     — it is about this repo (the command named it) but had no HEAD to read:
+#               the repo did not exist yet at pre-time. `git worktree add ../wt && cd
+#               ../wt && git commit` and `mkdir sub && cd sub && git init && git
+#               commit` are both this shape, and both are common. There is no
+#               before-image, so the fallback below has to decide.
+#   foreign   — it is about some other repo. Its sha is unequal to this HEAD whether
+#               or not anything was committed here, which is exactly the "unequal
+#               tip, assume a commit" inference this gate removes. Discard it.
+#
+# `intent` is the repo the command *named*, recorded even when it did not resolve at
+# pre-time. Without it a `cd <not-yet-a-repo>` snapshot fell back to the surrounding
+# repo, the roots then disagreed, and the real commit was discarded as foreign.
+SNAP_STATE="none"
+if [ -n "$HEAD_BEFORE" ]; then
+  if [ -n "$SNAP_ROOT" ] && [ "$SNAP_ROOT" = "$REPO_ROOT" ]; then
+    SNAP_STATE="trusted"
+  elif [ -n "$SNAP_INTENT" ]; then
+    # The intent now resolves (the call created it). Compare repo roots, not path
+    # strings: `../wt`, a symlinked /tmp, and the toplevel are the same repo.
+    INTENT_DIR="$(cc_resolve_repo_dir "$SNAP_INTENT" "$PAYLOAD_CWD")" || INTENT_DIR=""
+    if [ -n "$INTENT_DIR" ]; then
+      INTENT_ROOT=$(git -C "$INTENT_DIR" rev-parse --show-toplevel 2>/dev/null) || INTENT_ROOT=""
+      [ "$INTENT_ROOT" = "$REPO_ROOT" ] && SNAP_STATE="blind"
+    fi
+  fi
+fi
+
+case "$SNAP_STATE" in
+  none)
+    # Either the PreToolUse hook did not run for this call — a partial install, a
+    # hand-wired config carrying only the PostToolUse half, a session predating the
+    # pre-hook, or a state dir it could not write — or the snapshot it left belongs
+    # to another repository. Both are reported: dropping a commit in silence is the
+    # failure this whole mechanism exists to prevent.
+    if [ -n "$HEAD_BEFORE" ]; then
+      say "not captured — the PreToolUse snapshot for this call is about ${SNAP_ROOT:-another repository}, not ${REPO_ROOT}"
+    else
+      say "not captured — no PreToolUse HEAD snapshot for this call (register scripts/commit-capture-pre.sh as a PreToolUse Bash hook and restart the session; if it is registered, check that ${XDG_STATE_HOME:-$HOME/.local/state}/claude-obsidian is writable)"
+    fi
+    exit 0
+    ;;
+esac
+
 FULL_SHA=$(GIT rev-parse HEAD 2>/dev/null) || exit 0
 case "$FULL_SHA" in
   *[!0-9a-f]*|'') exit 0 ;;
 esac
+
+# The gate: the tip moved during this call. A commit that was rejected, aborted,
+# dry-run, short-circuited by `false &&`, or found nothing to commit leaves HEAD
+# exactly where the snapshot found it.
+if [ "$HEAD_BEFORE" = "$FULL_SHA" ]; then
+  exit 0
+fi
+
+# HEAD moving is necessary but not sufficient — other operations move it too. Ask
+# git what the move was rather than guessing from the clock:
+#
+#   - `git pull && git commit` where the commit failed leaves the *pulled* tip.
+#     It is a fast-forward, so ancestry accepts it; the committer is not us, which
+#     is what rejects it.
+#   - `git checkout other && git commit` where the commit failed leaves another
+#     branch's tip, which is not a descendant of where we were.
+#   - `git reset --hard HEAD~1` leaves HEAD at the previous commit's parent.
+#
+# The wall clock used to stand in for all of this, and it was both too weak (a
+# teammate's commit pulled within the window read as ours) and too strong (it
+# discarded a commit the gate had positively observed whenever the Bash call kept
+# working for two minutes afterwards — `git commit && npm test` lost the note, with
+# no output on any stream). It is kept only for the blind case below, where there is
+# no before-image to reason from.
+if [ "$SNAP_STATE" = "trusted" ] && [ "$HEAD_BEFORE" != "none" ]; then
+  # An amend or a reset-then-commit makes the old tip a sibling, not an ancestor,
+  # so its parent is what has to be reachable.
+  if GIT merge-base --is-ancestor "$HEAD_BEFORE" "$FULL_SHA" >/dev/null 2>&1; then
+    :
+  elif GIT merge-base --is-ancestor "${HEAD_BEFORE}^" "$FULL_SHA" >/dev/null 2>&1; then
+    # …but landing exactly ON that parent is an undo, not a commit.
+    BEFORE_PARENT=$(GIT rev-parse "${HEAD_BEFORE}^" 2>/dev/null) || BEFORE_PARENT=""
+    [ "$BEFORE_PARENT" != "$FULL_SHA" ] || exit 0
+  else
+    exit 0
+  fi
+  # Whoever ran `git commit` is the committer, always — author can be overridden,
+  # committer cannot. A commit that arrived over the wire carries someone else's.
+  LOCAL_EMAIL=$(GIT config user.email 2>/dev/null) || LOCAL_EMAIL=""
+  if [ -n "$LOCAL_EMAIL" ]; then
+    HEAD_EMAIL=$(GIT log -1 --format=%ce 2>/dev/null) || HEAD_EMAIL=""
+    [ -z "$HEAD_EMAIL" ] || [ "$HEAD_EMAIL" = "$LOCAL_EMAIL" ] || exit 0
+  fi
+fi
 
 COMMIT_RECENT_WINDOW="${OBSIDIAN_COMMIT_RECENT_WINDOW:-120}"
 HEAD_CT=$(GIT log -1 --format=%ct 2>/dev/null) || exit 0
@@ -288,38 +178,57 @@ case "$HEAD_CT" in
 esac
 NOW_CT=$(date +%s)
 AGE=$(( NOW_CT - HEAD_CT ))
-# A HEAD dated in the future is not evidence a commit just happened — clock skew
-# or a script-set GIT_COMMITTER_DATE would otherwise make every mention qualify
-# until real time caught up. Allow a few seconds for jitter.
-if [ "$AGE" -lt -5 ] || [ "$AGE" -gt "$COMMIT_RECENT_WINDOW" ]; then
+# A HEAD dated in the future is not evidence a commit just happened — clock skew or
+# a script-set GIT_COMMITTER_DATE would otherwise qualify until real time caught up.
+# Allow a few seconds for jitter. The upper bound applies only to the blind case:
+# with no before-image, freshness is the only thing separating this repo's brand-new
+# first commit from history that was already there.
+if [ "$AGE" -lt -5 ]; then
   exit 0
 fi
-
-STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/claude-obsidian"
-# Keyed on a bounded digest of the repo root. Slugging the raw path both split
-# one repo across several keys and, in a deep worktree, exceeded NAME_MAX — the
-# open failed, the error went to the hook's stderr, and dedup stayed off.
-ROOT_KEY=$(printf '%s' "$REPO_ROOT" | cksum 2>/dev/null | tr -cd '0-9') || ROOT_KEY=""
-[ -n "$ROOT_KEY" ] || ROOT_KEY="unkeyed"
-SHA_FILE="${STATE_DIR}/last-capture-${ROOT_KEY}"
-if [ -f "$SHA_FILE" ] && [ "$(cat "$SHA_FILE" 2>/dev/null)" = "$FULL_SHA" ]; then
+if [ "$SNAP_STATE" = "blind" ] && [ "$AGE" -gt "$COMMIT_RECENT_WINDOW" ]; then
   exit 0
 fi
 
 # --- Extract git metadata ---
 
 HASH=$(GIT rev-parse --short HEAD 2>/dev/null) || exit 0
+
+# The record below is ` | `-delimited and the skill parses it by field name, turning
+# org_repo into a path under the vault and vault_path into a --vault argument. Any
+# field a commit author controls can therefore inject its own `org_repo=` /
+# `vault_path=` ahead of the real one, and a reader taking the first match resolves
+# the attacker's. `msg` was moved last and stripped for this reason — but a *path* is
+# author-controlled too (`|` is legal in a filename and in a refname), and `files=`
+# and `branch=` both precede the fields they could spoof. Strip all three.
+scrub_field() {
+  local s="$1"
+  s="${s//|/ }"
+  s="${s//$'\r'/ }"
+  s="${s//$'\n'/ }"
+  printf '%s' "$s"
+}
+
 MSG=$(GIT log -1 --pretty=format:'%s' 2>/dev/null) || MSG=""
-# The record below is ` | `-delimited and the skill parses it by field name,
-# turning org_repo into a path under the vault and vault_path into a --vault
-# argument. A subject containing ` | org_repo=…` injected its own fields ahead of
-# the real ones, so the delimiter cannot survive in free-form text.
-MSG="${MSG//|/ }"
-MSG="${MSG//$'\r'/ }"
-MSG="${MSG//$'\n'/ }"
+MSG="$(scrub_field "$MSG")"
 BRANCH=$(GIT rev-parse --abbrev-ref HEAD 2>/dev/null) || BRANCH="unknown"
+BRANCH="$(scrub_field "$BRANCH")"
 FILES_RAW=$(GIT diff --name-only HEAD~1..HEAD 2>/dev/null) || FILES_RAW=""
 FILES=$(printf '%s' "$FILES_RAW" | tr '\n' ',' | sed 's/,$//')
+FILES="$(scrub_field "$FILES")"
+
+# One snapshot answers for one invocation, so a call that made several commits emits
+# one record — for the tip. Name the others: a silent partial capture reads exactly
+# like a complete one.
+if [ "$SNAP_STATE" = "trusted" ] && [ "$HEAD_BEFORE" != "none" ]; then
+  EXTRA=$(GIT rev-list --count "${HEAD_BEFORE}..${FULL_SHA}" 2>/dev/null) || EXTRA=""
+  case "$EXTRA" in
+    ''|*[!0-9]*) ;;
+    *) if [ "$EXTRA" -gt 1 ]; then
+         say "partial — this call made ${EXTRA} commits; only ${HASH} is captured, skipped: $(GIT log --format=%h "${HEAD_BEFORE}..${FULL_SHA}^" 2>/dev/null | tr '\n' ' ')"
+       fi ;;
+  esac
+fi
 REMOTE=$(GIT remote get-url origin 2>/dev/null) || REMOTE="local"
 REPO_NAME=${REPO_ROOT##*/}
 : "${REPO_NAME:=unknown}"
@@ -429,11 +338,10 @@ done
 # picks up the new value.
 
 VAULT_PATH=""
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 CONFIG_FILE=""
 # Sourced unguarded, a partial install produced two shell errors, an empty
-# vault_path — which the skill skips silently, by contract — and a captured
-# marker already on disk, making the miss permanently unretryable.
+# vault_path — which the skill skips silently, by contract — and (before the
+# HEAD-snapshot gate) a marker on disk that made the miss unretryable.
 if [ -f "${SCRIPT_DIR}/lib/resolve-config.sh" ]; then
   . "${SCRIPT_DIR}/lib/resolve-config.sh"
   CONFIG_FILE="$(resolve_obsidian_config "${CLAUDE_PLUGIN_ROOT:-$(dirname "$SCRIPT_DIR")}")" || CONFIG_FILE=""
@@ -471,10 +379,9 @@ fi
 # --- Output metadata inline for the obsidian:commit-capture skill ---
 
 # With no vault_path the skill has nothing to write to and skips silently, so
-# emitting the record would burn the capture. Say so on stderr and leave no
-# marker, which keeps the next invocation able to retry.
+# emitting the record would burn the capture. Say so on stderr instead.
 if [ -z "$VAULT_PATH" ]; then
-  printf 'obsidian-commit-capture: %s not captured — vault_path unresolved (run /obsidian:setup)\n' "$HASH" >&2
+  say "not captured — ${HASH}: vault_path unresolved (run /obsidian:setup)"
   exit 0
 fi
 
@@ -485,9 +392,3 @@ fi
 # every parseable field precedes anything a commit author can influence.
 printf 'obsidian-commit-capture: hash=%s | branch=%s | files=%s | org_repo=%s | repo_name=%s | ticket=%s | date=%s | time=%s | vault_path=%s | msg=%s\n' \
   "$HASH" "$BRANCH" "$FILES" "$ORG_REPO" "$REPO_NAME" "$TICKET" "$TODAY" "$NOW" "$VAULT_PATH" "$MSG"
-
-# Marker last, and brace-grouped so a failed open cannot spray the hook's stderr.
-# It is still best-effort: dedup degrading to a duplicate note is better than a
-# non-zero exit from a PostToolUse hook.
-mkdir -p "$STATE_DIR" 2>/dev/null || true
-{ printf '%s\n' "$FULL_SHA" > "$SHA_FILE"; } 2>/dev/null || true
