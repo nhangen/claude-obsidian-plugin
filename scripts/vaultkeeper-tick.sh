@@ -64,7 +64,22 @@ CAND="$( {
   if [ -n "$CONFLICTS" ]; then printf '%s\n' "$CONFLICTS"; fi
 } 2>"${SCAN_ERR:-/dev/stderr}" | sed '/^$/d' )"
 if [ -n "$SCAN_ERR" ] && [ -s "$SCAN_ERR" ]; then
-  SCAN_FAULT="$(tr -c '[:print:]' ' ' < "$SCAN_ERR")" || SCAN_FAULT="unreadable"
+  # Deduplicate before truncating. `_scan_find_md` backs three scanners, so one
+  # unreadable directory yields the same `find: … Permission denied` line three
+  # times; the 300-char clamp then spent the whole budget on the repetition and cut
+  # off mid-word, hiding anything more serious further down. The buffer is the only
+  # description of the fault the user gets, so what it drops matters.
+  #
+  # Newlines are kept through the control-character scrub so there are lines to
+  # deduplicate, then folded to spaces afterwards for the one-line report. `sort -u`
+  # costs the chronological order, which is worth less here than not losing a
+  # distinct message.
+  SCAN_FAULT="$(tr -c '[:print:]\n' ' ' < "$SCAN_ERR" | sed 's/ *$//' | sed '/^$/d' | sort -u | tr '\n' ' ')" \
+    || SCAN_FAULT="unreadable"
+  SCAN_FAULT="${SCAN_FAULT% }"
+  # An unreadable-but-nonempty buffer must still read as a fault: empty here would
+  # be read as "no fault" by every `-n "$SCAN_FAULT"` test below.
+  [ -n "$SCAN_FAULT" ] || SCAN_FAULT="scanners wrote to stderr but the buffer could not be summarised"
   SCAN_FAULT="${SCAN_FAULT:0:300}"
   printf '%s\n' "$SCAN_FAULT" >&2
 fi

@@ -110,6 +110,45 @@ if [ -f "$CV/Pending.md" ]; then
     || fail "fault/heal cycles duplicated $_dups Pending.md item(s): $(grep '^- \[ \]' "$CV/Pending.md" | sort | uniq -d | head -3)"
 fi
 
+# --- one repeated benign error must not crowd out a serious one (#54) --------
+# `_scan_find_md` backs three scanners, so a single unreadable directory puts the
+# same `find: … Permission denied` line in the buffer three times. The 300-char
+# clamp then spent its whole budget on the repetition and cut off mid-word, so the
+# fault the user actually needed to see never got reported. The buffer is the only
+# description of the fault they get.
+RV="$TMP/repeatvault"; mkdir -p "$RV/Inbox"
+printf -- '---\ntags: [x]\n---\nbody\n' > "$RV/n.md"
+RCFG="$TMP/repeat.local.md"; sed "s|^vault_path: .*|vault_path: $RV|" "$CFG" > "$RCFG"
+RLIB="$TMP/repeatlib"; mkdir -p "$RLIB"; cp "${ROOT_DIR}"/scripts/lib/*.sh "$RLIB/"
+cat >> "$RLIB/vault-scan.sh" <<'EOF'
+scan_open_asks() {
+  local i
+  # Identical every time, exactly as one chmod 000 directory reaches the buffer
+  # through three callers — only more of them, so the clamp is unambiguous.
+  for i in $(seq 1 40); do
+    printf 'find: /vault/some/deep/unreadable/directory/path: Permission denied\n' >&2
+  done
+  printf 'find: CRITICAL-LATE-FAULT too many open files\n' >&2
+  return 0
+}
+EOF
+RS="$TMP/repeatscripts"; mkdir -p "$RS"; cp "${ROOT_DIR}"/scripts/*.sh "$RS/" 2>/dev/null || true
+cp -R "$RLIB" "$RS/lib"
+ROUT="$TMP/repeat.out"
+OBSIDIAN_LOCAL_MD="$RCFG" VAULTKEEPER_HOST="ml-1" \
+  bash "$RS/vaultkeeper-tick.sh" >"$ROUT" 2>&1 \
+  || fail "a repeated scanner fault must not abort the tick; got: $(cat "$ROUT")"
+grep -q 'scan INCOMPLETE' "$ROUT" \
+  || fail "the repeated-fault tick was not named incomplete; got: $(cat "$ROUT")"
+grep -q 'CRITICAL-LATE-FAULT' "$ROUT" \
+  || fail "the serious fault was truncated away by 40 copies of a benign one; got: $(cat "$ROUT")"
+# The tick reports the buffer twice (once raw, once in the INCOMPLETE line), so a
+# deduplicated buffer shows the repeated message twice in total. Without the dedup
+# the clamp packs several copies into each of those lines.
+_reps="$(grep -o 'Permission denied' "$ROUT" | wc -l | tr -d ' ')"
+[ "$_reps" -le 2 ] \
+  || fail "the repeated message appears $_reps times, so it is still eating the 300-char budget"
+
 # --- a gate that cannot arm must not wave the tick through (#42, panel) ---
 # `SCAN_ERR="$(mktemp …)" || SCAN_ERR=""` failed open: with no buffer the fault
 # check could never fire, so the tick recorded a partial scan as complete — the

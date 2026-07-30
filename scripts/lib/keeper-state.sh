@@ -43,10 +43,33 @@ keeper_last_scan_file() { printf '%s/last_scan\n' "$(keeper_cache_dir "$1")"; }
 keeper_record_scan()    { local f; f="$(keeper_last_scan_file "$1")"; mkdir -p "$(dirname "$f")"; now_epoch > "$f"; }
 keeper_last_scan()      { local f; f="$(keeper_last_scan_file "$1")"; [ -f "$f" ] && cat "$f" || true; }
 
+# The banner is the only place a user hears that the index is not being
+# maintained. It used to return silently when last_scan was absent, which is
+# indistinguishable from a fresh successful scan — and absent is exactly what a
+# host whose *first* scan faulted has, because the tick withholds last_scan on a
+# fault. Such a host reported nothing wrong, permanently (#52).
+#
+# The cache dir is the "has the keeper ever run here" test: it is created by
+# keeper_state_init at the top of every tick. Without that condition the banner
+# would nag on any vault where the keeper was never installed, which is not a
+# fault and not this warning's business.
 staleness_banner() {
   local vault="$1" interval="$2" last now
   last="$(keeper_last_scan "$vault")"
-  [ -z "$last" ] && return 0
+  if [ -z "$last" ]; then
+    [ -d "$(keeper_cache_dir "$vault")" ] || return 0
+    printf '⚠ index has never completed a scan on this host\n'
+    return 0
+  fi
+  # A last_scan that is not a number cannot be compared, and the arithmetic below
+  # would abort the caller (ask-staleness.sh runs under set -e). Unreadable is a
+  # state to report, not one to fall silent on.
+  case "$last" in
+    *[!0-9]*)
+      printf '⚠ index last_scan is unreadable on this host\n'
+      return 0
+      ;;
+  esac
   now="$(now_epoch)"
   if [ "$(( now - last ))" -gt "$(( interval * 2 ))" ]; then
     printf '⚠ index last maintained %ss ago\n' "$(( now - last ))"
