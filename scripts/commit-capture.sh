@@ -35,6 +35,11 @@ esac
 # and two JSON documents on stdout parse as neither. The skill's contract is
 # unchanged — the text inside is the same, and only a line starting
 # `obsidian-commit-capture: hash=` is a record.
+#
+# Deliberately NOT the shared cc_deliver_context: two of this hook's messages report
+# that the parsing library is missing or unloadable, and a delivery path that lived in
+# that library could not deliver them. The pre-hook, which has nothing to say until
+# after the library loads, uses the shared one.
 CC_OUT=""
 say() { CC_OUT="${CC_OUT}obsidian-commit-capture: $1"$'\n'; }
 cc_deliver() {

@@ -77,8 +77,19 @@ elif [ -z "$INTENT" ]; then
   exit 0
 fi
 
+# The one thing this hook says, and only when it has failed. Silence here used to
+# mean the post-hook reported "no PreToolUse HEAD snapshot for this call" and named
+# hook registration first — so an unwritable state dir looked like a setup mistake
+# and every commit was lost until someone read the wrong message. Reported through
+# additionalContext rather than a non-zero exit: exit 2 would block the commit, and
+# any other non-zero surfaces as a hook error on a call that is otherwise fine.
+warn() { cc_deliver_context PreToolUse "obsidian-commit-capture: $1"; }
+
 SNAP_DIR="$(cc_state_dir)/pre-commit-head"
-mkdir -p "$SNAP_DIR" 2>/dev/null || exit 0
+if ! mkdir -p "$SNAP_DIR" 2>/dev/null; then
+  warn "not captured — cannot create ${SNAP_DIR}; the commit this call makes will not be captured"
+  exit 0
+fi
 
 # A snapshot is consumed by the post-hook, which deletes it. One is left behind
 # whenever the tool call never completes (denied, interrupted, session killed),
@@ -87,10 +98,30 @@ mkdir -p "$SNAP_DIR" 2>/dev/null || exit 0
 find "$SNAP_DIR" -type f -mtime +1 -delete 2>/dev/null || true
 
 KEY="$(cc_snapshot_key "$INPUT")"
+SNAP_FILE="${SNAP_DIR}/${KEY}"
+# Written to a temp name and renamed into place. A direct `> file` truncates before
+# it writes, so a full disk or a killed shell mid-write leaves a file holding half a
+# snapshot — and half a snapshot still parses: a `sha=` line with no `root=` reads as
+# a snapshot about no particular repository. Rename is atomic within a directory, so
+# a reader sees either the previous snapshot or the complete new one. The temp name
+# carries $$ so two calls cannot land on each other's.
+#
 # One `key=value` per line, and every value is newline-free: sha passes a hex check,
 # root comes from rev-parse, and a newline cannot survive the payload decode into a
 # single shell token. The post-hook reads the keys it knows and ignores the rest, so
 # adding a field does not strand an in-flight snapshot from an older version.
-{ printf 'sha=%s\nroot=%s\nintent=%s\n' "$SHA" "$ROOT" "$INTENT" > "${SNAP_DIR}/${KEY}"; } 2>/dev/null || true
+TMP_FILE="${SNAP_DIR}/.tmp.${KEY}.$$"
+WROTE=0
+if { printf 'sha=%s\nroot=%s\nintent=%s\n' "$SHA" "$ROOT" "$INTENT" > "$TMP_FILE"; } 2>/dev/null; then
+  if mv -f "$TMP_FILE" "$SNAP_FILE" 2>/dev/null; then
+    WROTE=1
+  fi
+fi
+if [ "$WROTE" -eq 0 ]; then
+  # Leaving the temp file would hand the daily sweep — and anything globbing the
+  # directory — a file that is not a snapshot.
+  rm -f "$TMP_FILE" 2>/dev/null || true
+  warn "not captured — could not write the HEAD snapshot under ${SNAP_DIR} (check permissions and free space); the commit this call makes will not be captured"
+fi
 
 exit 0

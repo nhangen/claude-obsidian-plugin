@@ -247,6 +247,35 @@ cc_state_dir() {
   printf '%s' "${XDG_STATE_HOME:-$HOME/.local/state}/claude-obsidian"
 }
 
+# Anything either hook says reaches Claude only as hookSpecificOutput.additionalContext:
+# bare stdout on exit 0 goes to the debug log for both PreToolUse and PostToolUse, and
+# the only alternatives — exit 2, or a permissionDecision — block or error the very
+# commit we are trying to observe. Shared here so the two hooks cannot drift on either
+# the envelope or the escaping.
+#
+# The escaping is not decorative: a commit subject reaches this, and an unparseable
+# envelope loses the whole message rather than the subject.
+cc_json_escape() {
+  local s="$1"
+  # Backslashes first, or the escapes added below get doubled.
+  s="${s//\\/\\\\}"
+  s="${s//\"/\\\"}"
+  s="${s//$'\t'/\\t}"
+  s="${s//$'\r'/\\r}"
+  s="${s//$'\n'/\\n}"
+  # No raw control byte is legal in a JSON string, and nothing above covers them.
+  printf '%s' "$s" | tr -d '\000-\010\013\014\016-\037\177'
+}
+
+# $1 = hook event name, $2 = text. Emits nothing for empty text so a caller can
+# flush unconditionally.
+cc_deliver_context() {
+  local event="$1" text="$2"
+  [ -n "$text" ] || return 0
+  printf '{"hookSpecificOutput":{"hookEventName":"%s","additionalContext":"%s"}}\n' \
+    "$event" "$(cc_json_escape "$text")"
+}
+
 # Keyed on a bounded digest rather than a slug of the raw value: slugging split
 # one repo across several keys and, in a deep worktree, exceeded NAME_MAX.
 # The fallback keeps the value's own bytes (filtered to a filename-safe set, then
