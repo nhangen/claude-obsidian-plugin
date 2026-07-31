@@ -34,14 +34,24 @@ keeper_has_snapshot "$VAULT" || fail "snapshot should exist after write"
 
 # last_scan + staleness
 [ -z "$(keeper_last_scan "$VAULT")" ] || fail "last_scan should be empty"
-# An absent last_scan is NOT healthy (#52). The tick withholds last_scan when a
-# scan faults, so a host whose first scan ever faulted has none — and the old
-# behaviour (silence) made that indistinguishable from a fresh successful scan,
-# permanently. The cache dir exists here because keeper_state_init ran above,
-# which is the same condition a real tick establishes.
+# The cache dir alone is not evidence that anything tried to scan. keeper_state_init
+# creates it at the top of every tick — above the ownership gate — so it exists on a
+# host that only ever defers to the elected owner. Keying the warning off it warned
+# there on every ask, forever, about a vault the owner was scanning fine.
+[ -z "$(keeper_last_attempt "$VAULT")" ] || fail "last_attempt should be empty"
+[ -d "$(keeper_cache_dir "$VAULT")" ] || fail "fixture precondition: cache dir should exist here"
+[ -z "$(staleness_banner "$VAULT" 900)" ] \
+  || fail "warned with only a cache dir to go on: $(staleness_banner "$VAULT" 900)"
+
+# An absent last_scan IS a fault once something has attempted a scan (#52). The tick
+# withholds last_scan when a scan faults, so a host whose first scan ever faulted has
+# an attempt and no scan — and the old behaviour (silence) made that indistinguishable
+# from a fresh successful scan, permanently.
+keeper_record_attempt "$VAULT"
+[ -n "$(keeper_last_attempt "$VAULT")" ] || fail "last_attempt not recorded"
 COLD="$(staleness_banner "$VAULT" 900)"
 [ -n "$COLD" ] \
-  || fail "a host that has never recorded a scan reported nothing wrong"
+  || fail "a host that attempted a scan and never completed one reported nothing wrong"
 case "$COLD" in
   *never*) : ;;
   *) fail "cold start must say it has never scanned, not reuse the stale wording: $COLD" ;;
@@ -64,6 +74,17 @@ BAD="$(staleness_banner "$VAULT" 900)" || fail "an unreadable last_scan aborted 
 case "$BAD" in
   *unreadable*) : ;;
   *) fail "an unreadable last_scan produced no distinct warning: ${BAD:-<empty>}" ;;
+esac
+
+# Same for last_attempt, which the absent-last_scan branch now does arithmetic on.
+# A truncated or partially-written epoch there would otherwise abort the caller in the
+# one state this warning exists to describe.
+rm -f "$(keeper_last_scan_file "$VAULT")"
+printf 'not-a-number\n' > "$(keeper_last_attempt_file "$VAULT")"
+BADA="$(staleness_banner "$VAULT" 900)" || fail "an unreadable last_attempt aborted staleness_banner"
+case "$BADA" in
+  *unreadable*) : ;;
+  *) fail "an unreadable last_attempt produced no distinct warning: ${BADA:-<empty>}" ;;
 esac
 
 echo "PASS: keeper-state"

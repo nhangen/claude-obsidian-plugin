@@ -20,4 +20,16 @@ keeper_record_scan "$V"
 printf '1000\n' > "$(keeper_cache_dir "$V")/last_scan"
 [ -n "$(run)" ] || fail "stale index should warn"
 
+# never-completed, through the real script. tests/keeper-state.sh covers the branch at
+# the library level; this is the only test that runs what /obsidian:ask actually
+# invokes — config resolution, interval default and all — so the state #52 exists to
+# surface should be visible from here, and the cache-dir-only case should not be.
+rm -f "$(keeper_last_scan_file "$V")"
+[ -z "$(run)" ] || fail "a cache dir with no attempt must not warn through the real entrypoint"
+keeper_record_attempt "$V"
+case "$(run)" in
+  *"never completed"*) : ;;
+  *) fail "entrypoint did not surface the never-completed state: $(run)" ;;
+esac
+
 echo "PASS: ask-staleness"
