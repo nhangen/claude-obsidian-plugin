@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # keeper-state.sh — non-synced per-host state: cache dir, prior-scan snapshot,
-# last_scan, cold-start detection, staleness banner. Requires note-hash.sh.
+# last_scan, last_attempt, cold-start detection, staleness banner. Requires
+# note-hash.sh.
 
 keeper_vault_id() {
   local out
@@ -43,22 +44,49 @@ keeper_last_scan_file() { printf '%s/last_scan\n' "$(keeper_cache_dir "$1")"; }
 keeper_record_scan()    { local f; f="$(keeper_last_scan_file "$1")"; mkdir -p "$(dirname "$f")"; now_epoch > "$f"; }
 keeper_last_scan()      { local f; f="$(keeper_last_scan_file "$1")"; [ -f "$f" ] && cat "$f" || true; }
 
+# An attempt is recorded by the elected owner immediately before it scans, whether or
+# not that scan goes on to complete. It is what makes an absent last_scan legible: with
+# no attempt nothing has tried from this host, and with one every try faulted.
+keeper_last_attempt_file() { printf '%s/last_attempt\n' "$(keeper_cache_dir "$1")"; }
+keeper_record_attempt()    { local f; f="$(keeper_last_attempt_file "$1")"; mkdir -p "$(dirname "$f")"; now_epoch > "$f"; }
+keeper_last_attempt()      { local f; f="$(keeper_last_attempt_file "$1")"; [ -f "$f" ] && cat "$f" || true; }
+
 # The banner is the only place a user hears that the index is not being
 # maintained. It used to return silently when last_scan was absent, which is
 # indistinguishable from a fresh successful scan — and absent is exactly what a
 # host whose *first* scan faulted has, because the tick withholds last_scan on a
 # fault. Such a host reported nothing wrong, permanently (#52).
 #
-# The cache dir is the "has the keeper ever run here" test: it is created by
-# keeper_state_init at the top of every tick. Without that condition the banner
-# would nag on any vault where the keeper was never installed, which is not a
-# fault and not this warning's business.
+# The "has anything tried here" test is a recorded attempt, not the presence of the
+# cache dir. keeper_state_init creates that dir at the top of every tick — above the
+# ownership gate — so on a two-host vault it exists on the host that only ever defers,
+# and keying off it warned there on every ask, forever, about a vault the elected owner
+# was scanning perfectly well. A banner that always fires carries no information, which
+# is a worse failure than the silence #52 removed. The attempt file is written below
+# that gate, so only a host that actually scans has one.
 staleness_banner() {
-  local vault="$1" interval="$2" last now
+  local vault="$1" interval="$2" last attempted now
   last="$(keeper_last_scan "$vault")"
   if [ -z "$last" ]; then
-    [ -d "$(keeper_cache_dir "$vault")" ] || return 0
-    printf '⚠ index has never completed a scan on this host\n'
+    attempted="$(keeper_last_attempt "$vault")"
+    [ -n "$attempted" ] || return 0
+    # Same reasoning as the last_scan guard below: this branch does arithmetic on the
+    # value, and a truncated write here would abort the caller in the one state this
+    # warning exists to describe.
+    case "$attempted" in
+      *[!0-9]*)
+        printf '⚠ index last_attempt is unreadable on this host\n'
+        return 0
+        ;;
+    esac
+    # No aging grace here, deliberately: one recorded attempt with no completed scan
+    # already means the index has never been fully built on this host. The window
+    # between the attempt and the scan is however long one tick's scanners take, so on
+    # a first-ever tick over a large vault a healthy in-progress scan can show this
+    # line until it finishes — accepted, because a grace window is what let a latched
+    # fault hide in the first place.
+    printf '⚠ index has never completed a scan on this host (last attempt %ss ago)\n' \
+      "$(( $(now_epoch) - attempted ))"
     return 0
   fi
   # A last_scan that is not a number cannot be compared, and the arithmetic below

@@ -88,9 +88,12 @@ unfiled notes / open `[ask]`s / promotable clusters into the machine-owned
   keeper-owned files are quarantined under `.vaultkeeper-quarantine/`, never
   deleted.
 - `keeper_interval_secs` — tick cadence; the `/obsidian:ask` staleness banner
-  fires past `2x` this.
+  fires past `2x` this. It also fires, regardless of cadence, when this host has
+  attempted a scan but never completed one — the state a faulting scanner leaves
+  behind. A host that only ever defers to the elected owner attempts nothing, so
+  it stays quiet.
 
-State (`.state`, snapshots, `last_scan`) lives under
+State (`.state`, snapshots, `last_scan`, `last_attempt`) lives under
 `${XDG_CACHE_HOME:-$HOME/.cache}/vaultkeeper/<vault-id>/`, never in the vault.
 
 ## Session Intent Inference

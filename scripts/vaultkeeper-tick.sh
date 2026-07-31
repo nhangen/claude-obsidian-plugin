@@ -35,13 +35,31 @@ if ! keeper_is_owner "$LEASE" "$HOST" "$PRIORITY" "$MAXAGE"; then
   exit 0
 fi
 
+SCAN_FAULT=""
+# Record the attempt here — below the ownership gate, above the scanners. It is what
+# lets staleness_banner read a missing last_scan: no attempt means nothing has tried
+# from this host, an attempt with no scan means every try faulted. It must stay below
+# the gate, or a host that only ever defers claims an attempt it never makes and warns
+# on every ask forever (keeper_state_init, and so the cache dir the banner used to key
+# off, runs above the gate — which is exactly how that false alarm got shipped).
+#
+# Guarded rather than called bare: unchecked under `set -e` a failed write kills the
+# tick right here, above the scan, the base view and the digest, so a full or unwritable
+# cache dir would cost a degraded host the Librarian.md it can still produce. ENOSPC
+# here is the same correlated failure class as the mktemp buffer below, so it takes the
+# same route — fold into SCAN_FAULT and carry on. A scan whose attempt could not be
+# recorded is not one we can account for.
+if ! keeper_record_attempt "$VAULT"; then
+  SCAN_FAULT="cannot record the scan attempt (cache dir unwritable); scan not accountable"
+  printf 'vaultkeeper: %s\n' "$SCAN_FAULT" >&2
+fi
+
 # Capture the scanners' stderr instead of letting it fly past. Every scanner
 # returns 0 unconditionally, so a truncated scan was indistinguishable from a
 # complete one and got recorded as complete — for every one of 700+ consecutive
 # ticks on the maintainer's host, each logging `Too many open files` immediately
 # above `scan complete`. A scan whose scanners complained is not a scan we can
 # describe as done; the gate below sits between the digest and the snapshot.
-SCAN_FAULT=""
 SCAN_ERR="$(mktemp "${TMPDIR:-/tmp}/kbscan-XXXXXX" 2>/dev/null)" || SCAN_ERR=""
 if [ -n "$SCAN_ERR" ]; then
   :
@@ -163,9 +181,11 @@ if [ -n "$SCAN_FAULT" ]; then
   # this check sat below it, in a file the user hand-edits and Syncthing replicates.
   # keeper_record_scan is withheld for the ordinary reason: last_scan's consumer is
   # staleness_banner (scripts/ask-staleness.sh), and a partial scan recorded as
-  # complete tells it the vault was fully examined. Note the banner only fires once a
-  # PREVIOUS last_scan ages out — a host that has never recorded one stays silent, so
-  # a latched fault here is invisible rather than loud. That gap is filed separately.
+  # complete tells it the vault was fully examined. Withholding it reaches that consumer
+  # even on a host that has never recorded one: the attempt written above the scanners
+  # lets the banner tell a host whose every tick faulted from one that has never tried,
+  # so a fault latched from the very first tick reads as "never completed a scan"
+  # rather than as silence.
   #
   # One exception, and only one: rows whose side effect already happened and cannot be
   # re-derived (#58). keeper_quarantine_conflicts has already `mv`d the conflict file

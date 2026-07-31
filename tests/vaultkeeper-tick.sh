@@ -40,6 +40,26 @@ rm -f "$V/Librarian.md"
 run_tick "mbp"
 [ ! -f "$V/Librarian.md" ] || fail "non-owner must not write Librarian.md"
 
+# ...and it must not claim a scan ATTEMPT either. The attempt is what staleness_banner
+# reads to decide whether an absent last_scan is a fault, so a deferring host that
+# records one warns on every ask, forever, about a vault the elected owner is scanning
+# fine — the false alarm that keying off the cache dir produced. Needs its own vault:
+# $V already carries ml-1's last_scan, so the banner there takes the aging branch and
+# never reaches the never-completed one.
+NV="$TMP/nonownervault"; mkdir -p "$NV/Inbox"
+printf -- '---\ntags: [x]\ntype: note\n---\nbody\n' > "$NV/n.md"
+NCFG="$TMP/nonowner.local.md"
+sed "s|^vault_path: .*|vault_path: $NV|" "$CFG" > "$NCFG"
+OBSIDIAN_LOCAL_MD="$NCFG" run_tick "ml-1" >/dev/null    # ml-1 takes the lease
+rm -f "$(keeper_last_scan_file "$NV")" "$(keeper_last_attempt_file "$NV")"
+OBSIDIAN_LOCAL_MD="$NCFG" run_tick "mbp" >/dev/null     # mbp defers, scans nothing
+[ -d "$(keeper_cache_dir "$NV")" ] \
+  || fail "fixture precondition: the deferring tick should still have created the cache dir"
+[ ! -f "$(keeper_last_attempt_file "$NV")" ] \
+  || fail "a deferring host claimed an attempt it never made — the banner will cry wolf forever"
+[ -z "$(staleness_banner "$NV" 900)" ] \
+  || fail "deferring host must stay silent, got: $(staleness_banner "$NV" 900)"
+
 # --- a scan whose scanners complained is not recorded as complete (#42) ---
 # 700+ consecutive ticks on the maintainer's host logged `Too many open files`
 # from vault-scan.sh and then `scan complete`, so last_scan advanced on a
@@ -74,6 +94,18 @@ grep -q 'scan complete' "$FOUT" \
   && fail "a faulted scan reported itself complete; got: $(cat "$FOUT")"
 [ -f "$(keeper_last_scan_file "$SV")" ] \
   && fail "a faulted scan recorded last_scan, so the staleness banner will lie"
+# ...and withholding it has to reach the consumer. This host faults on its very first
+# tick, so it has no previous last_scan to age out; before the attempt file existed the
+# banner had nothing to distinguish it from a fresh install and stayed silent. The gate
+# was honest and no reader could hear it.
+[ -f "$(keeper_last_attempt_file "$SV")" ] \
+  || fail "a faulted tick recorded no attempt, so the banner cannot tell it from a fresh install"
+FBANNER="$(staleness_banner "$SV" 900)"
+[ -n "$FBANNER" ] || fail "a host whose only scans faulted still looks healthy to the banner"
+case "$FBANNER" in
+  *"never completed"*) : ;;
+  *) fail "banner did not name the real state: $FBANNER" ;;
+esac
 
 # --- a faulted tick must not touch the snapshot or Pending.md (#42, panel) ---
 # The first cut of the scan-fault gate sat BELOW surfacing_pending_transition, so a
@@ -364,5 +396,31 @@ grep -q 'scan complete' "$MOUT" \
   && fail "a tick with no fault buffer reported itself complete: $(cat "$MOUT")"
 [ -f "$(keeper_last_scan_file "$MV")" ] \
   && fail "a tick with no fault buffer recorded last_scan"
+
+# --- an unwritable cache dir degrades the tick, it does not abort it ---
+# keeper_record_attempt is the first write after the ownership gate, so calling it
+# unchecked under `set -e` would kill the run there — above the scan, the base view AND
+# the digest — and a host with a full or unwritable cache dir would lose the
+# Librarian.md it can still produce. ENOSPC is the same correlated failure class as the
+# mktemp case above, so it takes the same route: fold into SCAN_FAULT, say so, keep the
+# digest, withhold last_scan.
+UV="$TMP/unwritablevault"; mkdir -p "$UV/Inbox"
+printf -- '---\ntags: [x]\n---\nbody\n' > "$UV/n.md"
+UCFG="$TMP/unwritable.local.md"; sed "s|^vault_path: .*|vault_path: $UV|" "$CFG" > "$UCFG"
+UCACHE="$(keeper_cache_dir "$UV")"; mkdir -p "$UCACHE"; chmod 555 "$UCACHE"
+UOUT="$TMP/unwritable.out"
+set +e
+OBSIDIAN_LOCAL_MD="$UCFG" VAULTKEEPER_HOST="ml-1" \
+  bash "${ROOT_DIR}/scripts/vaultkeeper-tick.sh" >"$UOUT" 2>&1
+URC=$?
+set -e
+chmod 755 "$UCACHE"
+[ "$URC" -eq 0 ] || fail "an unwritable cache dir aborted the tick (rc=$URC); got: $(cat "$UOUT")"
+[ -f "$UV/Librarian.md" ] \
+  || fail "the digest was lost when the cache dir was unwritable; got: $(cat "$UOUT")"
+grep -q 'scan INCOMPLETE' "$UOUT" \
+  || fail "an unaccountable scan did not name itself incomplete; got: $(cat "$UOUT")"
+grep -q 'scan complete' "$UOUT" \
+  && fail "a scan it could not account for reported itself complete: $(cat "$UOUT")"
 
 echo "PASS: vaultkeeper-tick"
