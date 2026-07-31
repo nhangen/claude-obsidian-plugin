@@ -5,66 +5,106 @@ alwaysApply: false
 
 # Obsidian Commit Capture
 
-After every successful `git commit`, capture the conversation context to an Obsidian vault note.
+After every successful `git commit`, capture the conversation context to an Obsidian vault note. Git already has the metadata; the context — what you were investigating, what you tried, what you decided — is the part worth keeping.
+
+Cursor has no PostToolUse hook, so nothing hands you the commit metadata the way it does in Claude Code. **Call the plugin for it. Do not rebuild it from git commands** — see the warning below, it is not a style preference.
 
 ## Trigger
 
-Only after a git commit succeeds (output contains `[branch hash]` pattern). Skip failed commits, dry runs, and non-commit git commands.
+Only after a `git commit` succeeds (its output contains the `[branch hash]` pattern). Skip failed commits, dry runs, and non-commit git commands.
 
 ## Steps
 
-1. Extract metadata:
+1. **Resolve the plugin directory.** The version bumps regularly and the marketplace owner is not fixed, so glob both rather than hardcoding either:
+
    ```bash
-   HASH=$(git rev-parse --short HEAD)
-   MSG=$(git log -1 --pretty=format:'%s')
-   BRANCH=$(git rev-parse --abbrev-ref HEAD)
-   FILES=$(git diff --name-only HEAD~1..HEAD | tr '\n' ',')
-   REMOTE=$(git remote get-url origin 2>/dev/null || echo "local")
+   PLUGIN_DIR=$(ls -1d "$HOME"/.claude/plugins/cache/*/obsidian/*/ 2>/dev/null | sort -V | tail -1 | sed 's:/$::')
    ```
 
-2. Derive `org/repo` from the remote URL:
-   - SSH `git@host:org/repo.git` → `org/repo`
-   - HTTPS `https://github.com/org/repo.git` → `org/repo`
-   - No remote → `local/<dir-name>`
+   If that is empty the plugin is not installed — stop, and say so. Do not fall back to doing it by hand.
 
-3. Find the vault config: check `~/.claude/plugins/marketplaces/nhangen/obsidian.local.md` first, then fall back to `~/Documents/Obsidian`. Read the `vault_path` frontmatter field.
+2. **Get the record.** One line, for the commit that just landed:
 
-4. Target file: `<vault_path>/Projects/Development/<org_repo>/<YYYY-MM-DD>.md`
+   ```bash
+   bash "$PLUGIN_DIR/scripts/commit-meta.sh" -C "<the repo you committed in>"
+   ```
 
-5. Build a context section capturing what happened since the last commit:
+   It prints:
+
+   ```
+   hash=<h> | branch=<b> | files=<f> | org_repo=<o> | repo_name=<r> | ticket=<t> | date=<d> | time=<ti> | vault_path=<v> | msg=<m>
+   ```
+
+   Take the **first** match for each field, and never re-read a field name out of `msg`. `msg` is last and unterminated precisely because it is the one field a commit author writes — a subject reading `chore: tidy | org_repo=../../tmp/pwned` must not be able to redirect the write.
+
+   **If the command exits non-zero, there is no capture.** It prints the reason on stderr (`vault_path unresolved` means the vault is not configured; run `/obsidian:setup` in Claude Code, or write the config by hand). Report the reason and stop — do not write a note with guessed values.
+
+3. **Never reconstruct the metadata yourself.** Not `git rev-parse`, not `git log`, and above all not `git remote get-url`. This rule used to tell you to do exactly that, and it was wrong: a remote cloned with an embedded token (`https://oauth2:TOKEN@host/org/repo.git`) puts that token into `org_repo`, which is written into the note's `repo:` frontmatter and then synced to every device. `commit-meta.sh` strips userinfo before splitting the URL; a hand-rolled version does not. This is the same defect that got the plugin's old `commit-detect.sh` deleted.
+
+4. **Pick the target.** Default is `Projects/Development/<org>/<repo>/<date>.md`, where `<org>/<repo>` is the record's `org_repo` and `<repo>` alone is its `repo_name`. Two overrides:
+
+   - `awesomemotive/*` → `Awesome Motive/sessions/<date>-<repo>.md` — bare repo basename, **not** the `<org>/<repo>` form, or you create a stray `awesomemotive/` folder, which is the fragmentation this override exists to prevent.
+   - `altamira2/mtf-builder` → `Altamira/mtf-builder/commits/<date>-mtf-builder-commits.md`.
+
+   **Route once.** The duplicate guard in step 6 only reads the target you pass it, so the same commit written to the default path on one turn and an override on another is captured twice, and both writes succeed silently.
+
+5. **Write the context section** — this is the whole point, and the only part that needs you rather than a script. Review the conversation since the last commit and produce 3–8 dense, specific bullets:
+
    - **Goal** — what task or problem was being worked on
-   - **Investigation** — what was explored, searched, read
-   - **Decisions** — choices made, alternatives rejected
+   - **Investigation** — what was explored, read, searched
+   - **Decisions** — choices made, alternatives rejected, tradeoffs
    - **Debugging** — if applicable: symptoms, hypotheses, root cause
    - **Loose ends** — anything unresolved or flagged for later
-   Write 3-8 dense bullet points.
 
-6. Append to the file:
+   Write it so you can reconstruct the reasoning months from now.
+
+6. **Hand the write to the keeper.** Do not create directories or edit the note yourself:
+
+   ```bash
+   bash "$PLUGIN_DIR/scripts/keeper" append \
+     --vault "<vault_path>" \
+     --target "<target from step 4>" \
+     --section "## <time> — <hash>" \
+     --body-file "<body-temp>" \
+     --init-file "<header-temp>" \
+     --skip-if-hash "<hash>"
+   ```
+
+   `--body-file` holds the section content:
+
    ```markdown
-
-   ## HH:MM — <hash>
-
    **Branch:** <branch>
    **Message:** <msg>
    **Files:** <files>
 
    ### Context
 
-   - <bullet points>
+   - <bullet points from step 5>
 
    ---
    ```
 
-7. If the file is new, add frontmatter first:
+   `--init-file` is used only if the dated note does not exist yet:
+
    ```markdown
    ---
-   date: YYYY-MM-DD
+   date: <date>
    repo: <org_repo>
    tags: [<repo_name>, auto-captured]
    source: cursor
    ---
 
-   # <repo_name> — YYYY-MM-DD
+   # <repo_name> — <date>
    ```
 
-8. Confirm: `Captured <hash> → <org_repo>/<date>.md`
+   Add `ticket-<ticket>` to the tags array when `ticket` is non-empty.
+
+   **Always pass `--skip-if-hash`.** It makes the append idempotent per commit on that target, so a re-run or a sync conflict copy cannot double-append.
+
+7. **Confirm, honestly.** `Captured <hash> → <org_repo>/<date>.md`. If the keeper printed `append skipped` on stderr, the note already had this commit — say `Already captured …` instead. **If the keeper exited non-zero, the commit was not captured**: report its stderr and never print a `Captured` line.
+
+## Don't
+
+- Don't open the note in the Obsidian GUI.
+- Don't modify the daily note.
+- Don't skip the context section — the metadata alone is worthless, git has it.

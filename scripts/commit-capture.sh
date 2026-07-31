@@ -366,89 +366,11 @@ NOW=$(date '+%H:%M')
 
 # --- Derive org/repo from remote URL ---
 
-# Host-agnostic, and userinfo is stripped before splitting. The old version
-# matched SSH and github.com only, so an HTTPS GitLab remote fell through to
-# local/<repo> — one repo recorded under three org_repo values, hence three
-# capture folders. Stripping userinfo is not cosmetic: a remote carrying a token
-# (https://oauth2:TOKEN@host:8443/org/repo.git) matched the SSH arm and the token
-# survived into org_repo, which is printed and written into a note's `repo:`
-# frontmatter, then synced. See no-secrets-in-logs.
-ORG_REPO=""
-REMOTE_PATH="$REMOTE"
-case "$REMOTE_PATH" in
-  *://*) REMOTE_PATH="${REMOTE_PATH#*://}" ;;
-esac
-# Drop userinfo (anything before an @ that precedes the first /).
-case "$REMOTE_PATH" in
-  *@*)
-    HOSTPART="${REMOTE_PATH%%/*}"
-    case "$HOSTPART" in
-      *@*) REMOTE_PATH="${HOSTPART##*@}${REMOTE_PATH#"$HOSTPART"}" ;;
-    esac
-    ;;
-esac
-# A colon is either an scp-style host:path separator or a port. Decide by what
-# follows it: all digits means port (drop it), anything else means path.
-HOSTPART="${REMOTE_PATH%%/*}"
-REST=""
-case "$REMOTE_PATH" in
-  */*) REST="${REMOTE_PATH#*/}" ;;
-esac
-case "$HOSTPART" in
-  *:*)
-    AFTER_COLON="${HOSTPART##*:}"
-    case "$AFTER_COLON" in
-      ''|*[!0-9]*) ORG_REPO="${AFTER_COLON}${REST:+/$REST}" ;;
-      *)           ORG_REPO="$REST" ;;
-    esac
-    ;;
-  *) ORG_REPO="$REST" ;;
-esac
-ORG_REPO="${ORG_REPO#/}"
-while :; do
-  case "$ORG_REPO" in
-    */) ORG_REPO="${ORG_REPO%/}" ;;
-    *)  break ;;
-  esac
-done
-ORG_REPO="${ORG_REPO%.git}"
-case "$ORG_REPO" in
-  ''|*/|*/*) : ;;
-  *) ORG_REPO="" ;;                       # single segment is not org/repo
-esac
-case "$REMOTE" in
-  ''|local) ORG_REPO="" ;;
-  /*|./*|../*) ORG_REPO="" ;;             # bare local path
-  file://*) ORG_REPO="" ;;
-esac
-# org_repo becomes a directory under the vault, so it must not escape it. A
-# remote of https://host/../../../../tmp/pwned.git derived cleanly into
-# `../../../../tmp/pwned`, with nothing downstream to catch it.
-case "$ORG_REPO" in
-  /*|*..*) ORG_REPO="" ;;
-esac
-case "$ORG_REPO" in
-  ''|*/) ORG_REPO="local/$REPO_NAME" ;;
-esac
-# GitLab subgroups nest arbitrarily deep, so `https://gitlab.com/g/sub1/sub2/repo`
-# derived `g/sub1/sub2/repo` and the note landed four levels under
-# Projects/Development/ where every other repo lands two. The prefix-shaped
-# routing overrides in the capture rule do not anticipate that, and neither does
-# anything that globs `Projects/Development/*/*`.
-#
-# org_repo is always exactly two segments now: everything above the repository is
-# folded into the first, joined with `-`. Collapsing to `<top-group>/<repo>`
-# instead — the other option the issue offered — would make `g/team-a/api` and
-# `g/team-b/api` the same folder, so two repos' notes would interleave in one
-# file. Keeping the repository as the leaf also means `repo_name` below, which
-# reads the last segment, needs no special case.
-case "$ORG_REPO" in
-  */*/*)
-    ORG_LEAF="${ORG_REPO##*/}"
-    ORG_GROUPS="${ORG_REPO%/*}"
-    ORG_REPO="$(printf '%s' "$ORG_GROUPS" | tr '/' '-')/${ORG_LEAF}"
-    ;;
-esac
+# The derivation (host-agnostic, userinfo stripped, subgroups folded, traversal
+# rejected) lives in cc_org_repo so the Cursor and Codex integrations can call
+# the same implementation instead of restating it. See the function for the
+# incident history behind each clause.
+ORG_REPO="$(cc_org_repo "$REMOTE" "$REPO_NAME")"
 # Now that the remote has been parsed, it — not any directory — is what names the
 # repository: a clone is free to sit in a directory called anything, and a worktree
 # always does. The `local/` form means no remote resolved, and there the directory
