@@ -203,8 +203,9 @@ scripts/lib/keeper-save-payload.sh Payload parsing/validation for keeper-save
 scripts/lib/vault-index.sh    Shared INDEX.md read/refresh helpers
 scripts/lib/moc-promote.sh    Retargets inbound wikilinks when an MOC promotion moves notes
 scripts/keeper                CLI entry point for keeper insert/append operations
+scripts/commit-meta.sh        Emits one capture record for an existing commit, for harnesses with no hook
 agents/                       Subagents (vault-organizer for /obsidian reorganize paths)
-integrations/                 External tool integrations
+integrations/                 Cursor + Codex capture docs; they call commit-meta.sh, never git directly
 obsidian.local.md.example     Config template (real config lives at the stable path, gitignored)
 ```
 
