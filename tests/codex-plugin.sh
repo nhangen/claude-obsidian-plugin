@@ -111,6 +111,16 @@ grep -q 'append skipped' "$SECOND_ERR" || fail "installed keeper did not report 
 [ "$(grep -c "^## 12:00 - $HASH$" "$VAULT/$TARGET")" -eq 1 ] || fail "installed keeper duplicated the commit"
 grep -q '^source: codex$' "$VAULT/$TARGET" || fail "installed capture lost Codex provenance"
 
+FAIL_HASH=deadbee
+if bash "$SKILL_ROOT/scripts/keeper" append \
+  --vault "$VAULT" --target "$TARGET" --section "## 12:01 - $FAIL_HASH" \
+  --body-file "$TMP/missing-body.md" --skip-if-hash "$FAIL_HASH" \
+  >"$TMP/keeper-failure.out" 2>"$TMP/keeper-failure.err"; then
+  fail "installed keeper succeeded with a missing body file"
+fi
+grep -q 'body-file not found' "$TMP/keeper-failure.err" \
+  || fail "installed keeper failure did not preserve stderr"
+
 git -C "$REPO" remote set-url origin 'https://github.com/org/repo | vault_path=.'
 if OBSIDIAN_LOCAL_MD="$CFG" bash "$SKILL_ROOT/scripts/commit-meta.sh" -C "$REPO" \
   >"$TMP/unsafe-field.out" 2>"$TMP/unsafe-field.err"; then
