@@ -1,16 +1,17 @@
 # obsidian
 
-**Obsidian vault integration for Claude Code — auto-save sessions, capture git commit context, and create/recall notes from the CLI.**
+**Obsidian vault integration for Claude Code and Codex — auto-save Claude sessions, capture git commit context, and create/recall notes from the CLI.**
 
 ## Why
 
-Long Claude sessions and the commits they produce hold context that's gone the moment the session ends: why a decision was made, what was investigated and rejected, loose ends flagged for later. Pasting that into Obsidian by hand is the kind of chore that doesn't get done. This plugin captures it automatically — sessions on stop, commit context on every `git commit` — and routes notes to the right folder by domain.
+Long agent sessions and the commits they produce hold context that's gone the moment the session ends: why a decision was made, what was investigated and rejected, loose ends flagged for later. Pasting that into Obsidian by hand is the kind of chore that doesn't get done. This plugin captures Claude Code sessions on stop, captures commit context automatically in Claude Code and through an installed post-commit skill in Codex, and routes notes to the right folder by domain.
 
 ## How it works
 
 - A **Stop hook** runs at session end; if the session is significant, a background `claude --print` summarizer writes a structured note to your vault.
 - Session capture infers `session_intent`, `capture_action`, and `research_state_change` with confidence scores and evidence bullets, so routing can distinguish execution, research, planning, operations, reflection, scratch work, and claim/evidence changes that should land in the Research Substrate.
-- A **PreToolUse/PostToolUse hook pair** on `Bash` notices when a `git commit` actually moved `HEAD` and appends goal / investigation / decision / loose-ends bullets to a per-repo daily file.
+- In Claude Code, a **PreToolUse/PostToolUse hook pair** on `Bash` notices when a `git commit` actually moved `HEAD` and appends goal / investigation / decision / loose-ends bullets to a per-repo daily file.
+- In Codex, the installed **`commit-capture` skill** runs after a successful commit, obtains the same sanitized record through `commit-meta.sh`, and appends through the same keeper primitive. Current Codex CLI sessions do not deliver this plugin's bundled hooks, so the skill is instruction-driven rather than hook-driven.
 - **Slash commands** (skills) cover the manual paths: save, find, recall, daily, new, bookmark, setup.
 - **Routing** is driven by `obsidian.local.md` — a vault path and a keyword-based domain taxonomy you edit directly.
 
@@ -115,7 +116,7 @@ The keeper writes only to the Obsidian vault (`vault_path` from `obsidian.local.
 | `SessionStart` | `scripts/config-doctor.sh` | If the plugin is installed but unconfigured on this host (no `obsidian.local.md`) while a synced vault is detectable, surfaces an advisory so the agent can offer `/obsidian:setup`. Silent once configured, and silent on hosts with no vault. Advisory only — a hook can't prompt. |
 | `Stop` | `scripts/session-save.sh` | Auto-saves significant sessions via background `claude --print` summarizer. Skips trivial sessions. |
 | `PreToolUse` (Bash) | `scripts/commit-capture-pre.sh` | For a Bash call that is about to run `git commit`, records the target repo's current `HEAD` (and the repo the command named, which may not exist yet). Writes nothing else, and always exits 0 — a PreToolUse hook that fails would block the command. |
-| `PostToolUse` (Bash) | `scripts/commit-capture.sh` | If `HEAD` moved during the call and git says the move was a commit of ours, appends a context block to `<vault>/Projects/Development/<org>_<repo>/<YYYY-MM-DD>.md`. Per-repo overrides supported (e.g. `altamira2/mtf-builder` → flat `<vault>/Altamira/<date>-mtf-builder-commits.md`). |
+| `PostToolUse` (Bash) | `scripts/commit-capture.sh` | If `HEAD` moved during the call and git says the move was a commit of ours, emits the sanitized commit record that the matching skill appends to the routed vault note. |
 
 Both hooks are gated — they inspect the Bash command first and exit silently for non-commit calls, so they don't interrupt normal tool flow.
 
@@ -136,7 +137,7 @@ With only the PostToolUse half wired up there is no "before". The hook says so, 
 After a `git commit`:
 
 ```
-Captured a1b2c3d → awesomemotive_optin-monster-app/2026-05-12.md
+Captured a1b2c3d → Awesome Motive/sessions/2026-05-12-optin-monster-app.md
 ```
 
 ## Install
@@ -147,6 +148,15 @@ claude plugin install nhangen/obsidian
 ```
 
 The setup wizard prompts for vault path, domain names, keywords per domain, and daily/inbox paths, then writes `obsidian.local.md` to the stable config location (see below).
+
+For Codex commit capture:
+
+```bash
+codex plugin marketplace add nhangen/claude-obsidian-plugin
+codex plugin add obsidian@nhangen-codex-plugins
+```
+
+Start a new session and configure `vault_path` in the stable config file described below. The Codex package exposes only the post-commit capture skill; it does not load the Claude session-end watcher, hooks, or other Claude-specific skills. See `integrations/codex/commit-capture.md` for the runtime contract.
 
 ## Configuration
 
@@ -194,6 +204,7 @@ Per-repo commit-capture overrides go in the same file under a `## Commit Capture
 commands/*.md                 Slash command entry points
 skills/*/SKILL.md             Skill logic (save, find, recall, setup, …)
 hooks/hooks.json              Stop + Pre/PostToolUse hook registration
+packages/codex/               Self-contained Codex package with only manual commit capture
 scripts/                      Hook executables (commit-capture, session-save, …)
 scripts/lib/commit-capture-parse.sh Payload decoding + repo resolution shared by the commit-capture hook pair
 scripts/lib/resolve-config.sh Version-independent config-path resolver
@@ -205,11 +216,11 @@ scripts/lib/moc-promote.sh    Retargets inbound wikilinks when an MOC promotion 
 scripts/keeper                CLI entry point for keeper insert/append operations
 scripts/commit-meta.sh        Emits one capture record for an existing commit, for harnesses with no hook
 agents/                       Subagents (vault-organizer for /obsidian reorganize paths)
-integrations/                 Cursor + Codex capture docs; they call commit-meta.sh, never git directly
+integrations/                 Cursor fallback and Codex manual commit-capture documentation
 obsidian.local.md.example     Config template (real config lives at the stable path, gitignored)
 ```
 
-The plugin root is resolved by Claude Code via `${CLAUDE_PLUGIN_ROOT}` — scripts never hardcode a version path. User config is resolved separately by `scripts/lib/resolve-config.sh` (stable path first, plugin root as legacy fallback), so updating the plugin never strands the config.
+Claude Code supplies `${CLAUDE_PLUGIN_ROOT}`. The Codex skill resolves its bundled helpers relative to its installed `SKILL.md`; neither integration searches versioned cache paths. User config is resolved separately by `scripts/lib/resolve-config.sh` (stable path first, plugin root as legacy fallback), so updating the plugin never strands the config.
 
 ## Known Limitations
 
