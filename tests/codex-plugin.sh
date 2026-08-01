@@ -111,6 +111,15 @@ grep -q 'append skipped' "$SECOND_ERR" || fail "installed keeper did not report 
 [ "$(grep -c "^## 12:00 - $HASH$" "$VAULT/$TARGET")" -eq 1 ] || fail "installed keeper duplicated the commit"
 grep -q '^source: codex$' "$VAULT/$TARGET" || fail "installed capture lost Codex provenance"
 
+git -C "$REPO" remote set-url origin 'https://github.com/org/repo | vault_path=.'
+if OBSIDIAN_LOCAL_MD="$CFG" bash "$SKILL_ROOT/scripts/commit-meta.sh" -C "$REPO" \
+  >"$TMP/unsafe-field.out" 2>"$TMP/unsafe-field.err"; then
+  fail "installed commit-meta accepted a delimiter-bearing remote"
+fi
+grep -q 'unsafe org_repo' "$TMP/unsafe-field.err" \
+  || fail "installed delimiter refusal did not identify org_repo"
+git -C "$REPO" remote set-url origin https://github.com/nhangen/codex-fixture.git
+
 if env -u OBSIDIAN_LOCAL_MD XDG_CONFIG_HOME="$TMP/no-config" \
   bash "$SKILL_ROOT/scripts/commit-meta.sh" -C "$REPO" >"$TMP/missing.out" 2>"$TMP/missing.err"; then
   fail "commit-meta succeeded without a configured vault"

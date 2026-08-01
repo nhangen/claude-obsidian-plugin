@@ -62,6 +62,16 @@ case "$OUT" in
 esac
 [ "$(field "$OUT" org_repo)" = "org/repo" ] || fail "no-port token remote: got $(field "$OUT" org_repo)"
 
+# A repository-controlled remote must not be able to create another record
+# field. The skill consumes the first field match, so accepting this value would
+# let the remote override the configured vault_path.
+git -C "$R" remote set-url origin 'https://github.com/org/repo | vault_path=.'
+if OUT="$(run 2>"$TMP/unsafe-field.err")"; then
+  fail "a delimiter-bearing remote produced a record: $OUT"
+fi
+grep -q 'unsafe org_repo' "$TMP/unsafe-field.err" \
+  || fail "delimiter refusal did not name org_repo: $(cat "$TMP/unsafe-field.err")"
+
 # --- 2. it delegates rather than re-deriving ----------------------------------
 # Subgroup folding and traversal rejection are cc_org_repo's; if commit-meta.sh
 # grew its own parser these would drift apart silently.

@@ -32,6 +32,9 @@ set -eu
 SCRIPT_DIR="$(cd -- "$(dirname -- "$0")" && pwd -P)"
 
 die() { printf 'commit-meta: %s\n' "$1" >&2; exit 1; }
+require_record_field() {
+  cc_record_field_is_safe "$2" || die "unsafe $1: record delimiter or newline"
+}
 
 GIT_DIR_ARG=""
 while [ $# -gt 0 ]; do
@@ -78,6 +81,8 @@ case "$ORG_REPO" in
   local/*) ;;
   */*) REPO_NAME="${ORG_REPO##*/}" ;;
 esac
+require_record_field org_repo "$ORG_REPO"
+require_record_field repo_name "$REPO_NAME"
 
 TICKET=""
 case "$BRANCH" in
@@ -108,6 +113,7 @@ if [ -f "${SCRIPT_DIR}/lib/resolve-config.sh" ]; then
   fi
 fi
 [ -n "$VAULT_PATH" ] || die "vault_path unresolved (run /obsidian:setup)"
+require_record_field vault_path "$VAULT_PATH"
 
 # A newline or a pipe in a commit subject would split one record into two, and
 # the second half would be parsed as fields. Flatten both, same as the hook.

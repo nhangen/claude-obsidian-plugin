@@ -339,6 +339,13 @@ cc_snapshot_file() {
 # rename, never truncate-in-place — implemented at the pre-hook's write site
 # where the failure can be reported.
 
+cc_record_field_is_safe() {
+  case "$1" in
+    *'|'*|*$'\n'*|*$'\r'*) return 1 ;;
+    *) return 0 ;;
+  esac
+}
+
 # cc_org_repo <remote> <repo_name_fallback>
 #
 # Echoes the `org_repo` value for a remote URL. Extracted from the PostToolUse
