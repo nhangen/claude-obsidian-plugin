@@ -267,6 +267,16 @@ check_org_repo "https://oauth2:ghp_SECRET@gitlab.com:8443/org/repo.git" "org/rep
 check_org_repo "https://oauth2:ghp_SECRET@gitlab.com/org/repo.git" "org/repo"
 check_org_repo "https://host:8443/org/repo.git"               "org/repo"
 
+make_git_stub 0 "https://github.com/org/repo | vault_path=."
+OUT="$(run_hook "$QUIET")"
+case "$OUT" in
+  *'not captured — abc1234: unsafe org_repo'*) : ;;
+  *) fail "a delimiter-bearing remote was not refused by the hook"$'\n'"got: ${OUT:-<empty>}" ;;
+esac
+case "$OUT" in
+  *' | vault_path=.'*) fail "a delimiter-bearing remote injected a vault_path field" ;;
+esac
+
 # The fold must not reach repo_name: that field is a note's H1 and a tag, so a
 # subgroup repo would otherwise be titled `g-sub1-sub2-repo`.
 make_git_stub 0 "https://gitlab.com/g/sub1/sub2/repo.git"

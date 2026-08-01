@@ -1,0 +1,4 @@
+interface:
+  display_name: "Obsidian Commit Capture"
+  short_description: "Capture Codex commit context in Obsidian"
+  default_prompt: "Use $commit-capture to save the latest successful commit and its conversation context to Obsidian."

@@ -1,0 +1,22 @@
+{
+  "name": "obsidian",
+  "version": "1.22.0",
+  "description": "Safe Obsidian commit-context capture for Codex.",
+  "author": {
+    "name": "nhangen"
+  },
+  "homepage": "https://github.com/nhangen/claude-obsidian-plugin",
+  "repository": "https://github.com/nhangen/claude-obsidian-plugin",
+  "license": "MIT",
+  "keywords": ["obsidian", "notes", "vault", "commit-capture", "codex"],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Obsidian Commit Capture",
+    "shortDescription": "Capture Codex commit context in Obsidian",
+    "longDescription": "Preserve the goal, investigation, decisions, and loose ends behind each successful Codex git commit in an Obsidian vault.",
+    "developerName": "nhangen",
+    "category": "Productivity",
+    "capabilities": ["Write"],
+    "defaultPrompt": "Use $commit-capture to save the latest successful commit and its conversation context to Obsidian."
+  }
+}

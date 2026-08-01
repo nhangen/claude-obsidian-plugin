@@ -1,0 +1,205 @@
+#!/usr/bin/env bash
+# keeper — deterministic, zero-AI write primitives for the Obsidian vault keeper.
+#
+# The keeper's "hands": mechanical writes that need no judgment (append a section
+# to a known target). Routing/dedup judgment stays in the vault-librarian agent
+# (the "brain"). Callers — the commit-capture hook-skill, the librarian's APPEND
+# step, cost-sensitive scripts — go through this one implementation so vault
+# writes are consistent without dispatching a subagent for mechanical work.
+#
+# Portable: no realpath, no flock, no bash-only traps — sources/runs clean under
+# bash and zsh (the substrate libs deliberately avoid those; see vault-index.sh).
+
+set -euo pipefail
+
+# Resolve the script dir ONCE at top level: inside a function zsh sets $0 to the
+# function name (bash keeps the script path), so $0 is only reliable out here.
+KEEPER_DIR="$(cd "$(dirname "$0")" && pwd -P)"
+
+keeper_die() { printf 'keeper: %s\n' "$*" >&2; exit 1; }
+
+# Resolve + validate a vault path. Echoes the absolute vault root or dies.
+# Arg: the --vault value (may be empty → fall back to resolve-config.sh).
+keeper_resolve_vault() {
+  local v="$1"
+  if [ -z "$v" ]; then
+    local cfg
+    cfg="$(bash "$KEEPER_DIR/lib/resolve-config.sh" 2>/dev/null || true)"
+    [ -n "$cfg" ] && [ -f "$cfg" ] && v="$(grep '^vault_path:' "$cfg" | sed 's/vault_path: //')"
+  fi
+  [ -n "$v" ] || keeper_die "--vault required (or configure via /obsidian:setup)"
+  [ -d "$v" ] || keeper_die "vault is not a directory: $v"
+  ( cd "$v" && pwd -P )
+}
+
+# Reject an absolute or '..'-bearing target (portable; no realpath).
+keeper_guard_target() {
+  case "$1" in
+    /*) keeper_die "--target must be vault-relative, not absolute: $1" ;;
+  esac
+  case "/$1/" in
+    *"/../"*) keeper_die "--target must not contain a '..' component: $1" ;;
+  esac
+}
+
+# append a timestamped section to a dated note, creating it on absence.
+cmd_append() {
+  local vault="" target="" date="" section="" body_file="" init_file="" skip_hash="" skip_given=0
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --vault)     vault="${2:-}";     shift 2 ;;
+      --target)    target="${2:-}";    shift 2 ;;
+      --date)      date="${2:-}";      shift 2 ;;
+      --section)   section="${2:-}";   shift 2 ;;
+      --body-file) body_file="${2:-}"; shift 2 ;;
+      --init-file) init_file="${2:-}"; shift 2 ;;
+      --skip-if-hash) skip_hash="${2:-}"; skip_given=1; shift 2 ;;
+      *) keeper_die "append: unknown arg: $1" ;;
+    esac
+  done
+
+  local vault_abs; vault_abs="$(keeper_resolve_vault "$vault")"
+
+  # exactly one of --target / --date
+  if [ -n "$target" ] && [ -n "$date" ]; then keeper_die "append: pass --target OR --date, not both"; fi
+  if [ -z "$target" ] && [ -z "$date" ]; then keeper_die "append: --target or --date required"; fi
+  [ -n "$date" ] && target="Daily/$date.md"
+  keeper_guard_target "$target"
+
+  local full parent
+  full="$vault_abs/$target"
+  parent="$(dirname "$full")"
+
+  # Idempotency, read from the vault rather than from a host-local marker (#62).
+  # The old commit-capture gate kept its key under XDG_STATE_HOME, which never
+  # syncs, so it could not see the note it was protecting: two hosts committing
+  # to the same repo each captured, and so did one host re-running after a
+  # Syncthing conflict copy. The note is the shared record; ask it.
+  #
+  # Section headings only. A context bullet legitimately names other commits'
+  # shas ("reverts deadbee"), so matching anywhere in the file would drop that
+  # commit's own record instead of its duplicate.
+  if [ "$skip_given" = 1 ]; then
+    case "$skip_hash" in
+      '') keeper_die "append: --skip-if-hash requires a value" ;;
+      *[!0-9a-fA-F]*) keeper_die "append: --skip-if-hash must be a hex sha: $skip_hash" ;;
+      *)
+        if [ -f "$full" ] && grep -qE "^#{1,6}[[:space:]].*[[:space:]]${skip_hash}[[:space:]]*\$" "$full"; then
+          printf 'keeper: append skipped — %s already has a section for %s\n' "$target" "$skip_hash" >&2
+          printf '%s\n' "$full"
+          return 0
+        fi
+        ;;
+    esac
+  fi
+
+  mkdir -p "$parent"
+
+  if [ ! -f "$full" ]; then
+    if [ -n "$init_file" ]; then
+      [ -f "$init_file" ] || keeper_die "append: --init-file not found: $init_file"
+      cat "$init_file" > "$full"
+    else
+      : > "$full"
+    fi
+  fi
+
+  [ -n "$section" ] || section="## $(date +%H:%M) — entry"
+
+  local body
+  if [ -n "$body_file" ]; then
+    [ -f "$body_file" ] || keeper_die "append: --body-file not found: $body_file"
+    body="$(cat "$body_file")"
+  else
+    body="$(cat)"
+  fi
+
+  printf '\n%s\n\n%s\n' "$section" "$body" >> "$full"
+  printf '%s\n' "$full"
+}
+
+# write a pre-resolved new note + INDEX link (+ optional daily Session Links).
+# Refuses to overwrite an existing target — the caller owns dedup/collision.
+cmd_insert() {
+  local vault="" target="" body_file="" title="" sldate=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --vault)              vault="${2:-}";     shift 2 ;;
+      --target)             target="${2:-}";    shift 2 ;;
+      --body-file)          body_file="${2:-}"; shift 2 ;;
+      --title)              title="${2:-}";     shift 2 ;;
+      --session-link-date)  sldate="${2:-}";    shift 2 ;;
+      *) keeper_die "insert: unknown arg: $1" ;;
+    esac
+  done
+
+  local vault_abs; vault_abs="$(keeper_resolve_vault "$vault")"
+  [ -n "$target" ]    || keeper_die "insert: --target required"
+  [ -n "$body_file" ] || keeper_die "insert: --body-file required"
+  [ -f "$body_file" ] || keeper_die "insert: --body-file not found: $body_file"
+  keeper_guard_target "$target"
+  if [ -n "$sldate" ]; then
+    case "$sldate" in
+      [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]) : ;;
+      *) keeper_die "insert: --session-link-date must be YYYY-MM-DD: $sldate" ;;
+    esac
+  fi
+
+  local full folder
+  full="$vault_abs/$target"
+  folder="$(dirname "$full")"
+  [ -e "$full" ] && keeper_die "insert: target already exists (refusing to overwrite): $target"
+  mkdir -p "$folder"
+  cat "$body_file" > "$full"
+
+  # title defaults to the filename stem (date prefix kept) so the wikilink
+  # resolves to the file — the librarian's filename-based INDEX convention.
+  [ -n "$title" ] || title="$(basename "$target" .md)"
+
+  # Folder INDEX: vault_index_apply is the single link writer — it derives the
+  # resolvable target and dedups. Hand-appending here too meant a --title that
+  # differed from the stem produced two entries, the title one resolving to
+  # nothing. Keep stderr: apply's coverage report is the only signal that the
+  # slice is under-indexed.
+  local idx="$folder/INDEX.md"
+  [ -f "$idx" ] || printf '# %s Index\n' "$(basename "$folder")" > "$idx"
+  . "$KEEPER_DIR/lib/note-hash.sh"
+  . "$KEEPER_DIR/lib/vault-index.sh"
+  vault_index_apply "$folder" "$idx" >/dev/null || true
+
+  # Optional: link the note into Daily/<date> under ## Session Links.
+  if [ -n "$sldate" ]; then
+    local daily="$vault_abs/Daily/$sldate.md"
+    mkdir -p "$vault_abs/Daily"
+    [ -f "$daily" ] || printf -- '---\ndate: %s\ntags: [daily]\n---\n\n# %s\n' "$sldate" "$sldate" > "$daily"
+    grep -q '^## Session Links' "$daily" || printf '\n## Session Links\n' >> "$daily"
+    # Link the note by its vault-relative path so it resolves from Daily/, with
+    # the human title as an alias. Dedup on the path: two different notes can
+    # share a title, and keying on title text dropped the second one's link.
+    local ltarget link
+    # Same target derivation as the folder INDEX (vault root = nearest .obsidian
+    # ancestor), so the two links can't disagree about where the root is when
+    # --vault points below it.
+    ltarget="$(vault_link_target "$folder" "$(basename "$target" .md)")"
+    link="- [[$ltarget]]"
+    [ "$title" = "$(basename "$target" .md)" ] || link="- [[$ltarget|$title]]"
+    if ! grep -qF -- "[[$ltarget]]" "$daily" && ! grep -qF -- "[[$ltarget|" "$daily"; then
+      awk -v link="$link" '{print} /^## Session Links/ && !d {print link; d=1}' \
+        "$daily" > "$daily.ktmp" && mv "$daily.ktmp" "$daily"
+    fi
+  fi
+
+  printf '%s\n' "$full"
+}
+
+main() {
+  [ $# -ge 1 ] || keeper_die "usage: keeper <append|insert> --vault <path> ... (see docs)"
+  local sub="$1"; shift
+  case "$sub" in
+    append) cmd_append "$@" ;;
+    insert) cmd_insert "$@" ;;
+    *) keeper_die "unknown subcommand: $sub (expected: append or insert)" ;;
+  esac
+}
+
+main "$@"

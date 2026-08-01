@@ -379,6 +379,14 @@ case "$ORG_REPO" in
   local/*) ;;
   */*) REPO_NAME="${ORG_REPO##*/}" ;;
 esac
+if ! cc_record_field_is_safe "$ORG_REPO"; then
+  say "not captured — ${HASH}: unsafe org_repo (record delimiter or newline)"
+  exit 0
+fi
+if ! cc_record_field_is_safe "$REPO_NAME"; then
+  say "not captured — ${HASH}: unsafe repo_name (record delimiter or newline)"
+  exit 0
+fi
 
 # --- Extract ticket number from branch ---
 
@@ -460,6 +468,10 @@ fi
 # emitting the record would burn the capture. Say so on stderr instead.
 if [ -z "$VAULT_PATH" ]; then
   say "not captured — ${HASH}: vault_path unresolved (run /obsidian:setup)"
+  exit 0
+fi
+if ! cc_record_field_is_safe "$VAULT_PATH"; then
+  say "not captured — ${HASH}: unsafe vault_path (record delimiter or newline)"
   exit 0
 fi
 

@@ -1,15 +1,15 @@
 {
   "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
   "name": "nhangen",
-  "description": "nhangen's Claude Code plugins",
+  "description": "nhangen's agent plugins",
   "owner": {
     "name": "nhangen"
   },
   "plugins": [
     {
       "name": "obsidian",
-      "description": "Obsidian vault integration for Claude Code. Auto-capture git commit context, query past work with /recall, export conversations, create/retrieve notes, and auto-organize content.",
-      "version": "1.16.4",
+      "description": "Obsidian vault integration with automatic commit-context capture for Claude Code and an installed safe capture skill for Codex.",
+      "version": "1.22.0",
       "author": {
         "name": "nhangen"
       },
