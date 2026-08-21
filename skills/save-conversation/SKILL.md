@@ -1,7 +1,7 @@
 ---
 name: save-conversation
 description: Exports the current Claude conversation to the Obsidian vault. Triggers on phrases like "save this to Obsidian", "export to obsidian", "document this session", "save our conversation", "write this up", "put this in obsidian". Formats the conversation as structured markdown, determines the correct project folder from context, and saves with a timestamped filename. Optionally opens the note in the Obsidian GUI.
-version: 1.2.0
+version: 1.3.0
 ---
 
 # Save Conversation to Obsidian
@@ -16,6 +16,76 @@ directly. The keeper is the sole writer; this skill resolves the target and
 passes a `resolved: true` payload so the keeper writes it as-is without
 re-routing or re-deduping. The one exception is MOC-promotion *file moves*, which
 remain native (structural reorg is the vault-organizer's domain, not a note-write).
+
+## Fast Path (routine execution/project saves)
+
+Use this path when **all** guards hold; otherwise drop to the full procedure below.
+The fast path calls the same validators and the same keeper CLI as the full
+procedure — nothing is skipped, only the reading of the detail sections. Three
+full-procedure steps are intentionally not restated here because they cannot
+change a routine execution save: the VAULT.md conventions read (step 1), the
+staleness banner, and `auto_open` handling (step 13) are covered by the notes
+below; when in doubt, use the full procedure.
+
+**Guards (any hit → full procedure):**
+- A topic hint was provided
+- 2+ taxonomy domains matched the keyword scan (needs the Cross-Domain Tiebreaker)
+- No taxonomy domain matched (route per Routing Logic / confirm Inbox with the user)
+- Same-day dedup score ≥ threshold (needs append vs new prompt)
+- Session was research/planning/reflection, or tested an active research claim
+  (state your one-line evidence for this call; if borderline, use the full procedure)
+- `#bookmark` markers or >30-min gaps present (Chapter Segmentation)
+- Target folder would be `Inbox/` (ambiguous — needs confirmation)
+
+**Steps:**
+```bash
+CONFIG="$(bash "${CLAUDE_PLUGIN_ROOT}/scripts/lib/resolve-config.sh")"
+# read vault_path and dedup_jaccard_threshold from $CONFIG:
+VAULT="$(grep '^vault_path:' "$CONFIG" | head -1 | sed 's/^vault_path:[[:space:]]*//')"
+THRESHOLD="$(awk '/^dedup_jaccard_threshold:/ {print $2}' "$CONFIG")"
+THRESHOLD="${THRESHOLD:-0.4}"
+# route: single keyword match against ## Project Taxonomy in $CONFIG → <target-folder>
+. "${CLAUDE_PLUGIN_ROOT}/scripts/lib/allowlist-validate.sh"
+allowlist_validate "<target-folder>" || exit 0   # refusal printed to stderr — surface it;
+                                                 # a refusal naming /obsidian:setup is a config fault
+. "${CLAUDE_PLUGIN_ROOT}/scripts/lib/dedup-scan.sh"
+dedup_same_day "<vault_path>/<target-folder>" "$(date +%Y-%m-%d)" "<slug>" "$THRESHOLD"
+# no output above → proceed
+```
+
+Build the body from the frontmatter template in **Output Format** below
+(`session_intent: execution`, `capture_action: project_note`,
+`research_state_change: none`), then write through the keeper:
+
+```
+op: insert
+resolved: true
+target: <target-folder>/<YYYY-MM-DD-title>.md
+title: <YYYY-MM-DD-title>
+session_link_date: <today YYYY-MM-DD>
+---
+<frontmatter + body per Output Format>
+```
+
+If `<target>` already exists (same-minute double save), append `-2`, `-3`, etc.
+and recheck until the path is free.
+
+Validate with `kspayload_validate <payload-file>` (source
+`${CLAUDE_PLUGIN_ROOT}/scripts/lib/keeper-save-payload.sh`) — on failure,
+surface the stderr line and stop; do **not** run the CLI. Extract the body
+with `kspayload_body`, run `bash "${CLAUDE_PLUGIN_ROOT}/scripts/ask-staleness.sh"`
+and surface any ⚠ line it prints, then run the keeper CLI directly:
+
+```bash
+bash "${CLAUDE_PLUGIN_ROOT}/scripts/keeper" insert --vault "$VAULT" \
+  --target "<target-folder>/<YYYY-MM-DD-title>.md" \
+  --body-file "<body-temp>" --title "<YYYY-MM-DD-title>" \
+  --session-link-date "<today YYYY-MM-DD>"
+```
+
+Relay the committed path, honor `auto_open` from `$CONFIG` (step 13), then run
+the MOC-Promotion Prompt check (step 14) — those post-save steps apply on the
+fast path too.
 
 ## Config
 
