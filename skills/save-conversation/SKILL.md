@@ -1,7 +1,7 @@
 ---
 name: save-conversation
 description: Exports the current Claude conversation to the Obsidian vault. Triggers on phrases like "save this to Obsidian", "export to obsidian", "document this session", "save our conversation", "write this up", "put this in obsidian". Formats the conversation as structured markdown, determines the correct project folder from context, and saves with a timestamped filename. Optionally opens the note in the Obsidian GUI.
-version: 1.2.0
+version: 1.3.0
 ---
 
 # Save Conversation to Obsidian
@@ -16,6 +16,60 @@ directly. The keeper is the sole writer; this skill resolves the target and
 passes a `resolved: true` payload so the keeper writes it as-is without
 re-routing or re-deduping. The one exception is MOC-promotion *file moves*, which
 remain native (structural reorg is the vault-organizer's domain, not a note-write).
+
+## Fast Path (routine execution/project saves)
+
+Use this path when **all** guards hold; otherwise drop to the full procedure below.
+The fast path calls the same validators and the same keeper CLI as the full
+procedure — nothing is skipped, only the reading of the detail sections.
+
+**Guards (any hit → full procedure):**
+- A topic hint was provided
+- 2+ taxonomy domains matched the keyword scan (needs the Cross-Domain Tiebreaker)
+- Same-day dedup score ≥ threshold (needs append vs new prompt)
+- Session was research/planning/reflection, or tested an active research claim
+  (needs intent scoring care / substrate filing)
+- `#bookmark` markers or >30-min gaps present (Chapter Segmentation)
+- Target folder would be `Inbox/` (ambiguous — needs confirmation)
+
+**Steps:**
+```bash
+CONFIG="$(bash "${CLAUDE_PLUGIN_ROOT}/scripts/lib/resolve-config.sh")"
+# route: single keyword match against ## Project Taxonomy in $CONFIG → <target-folder>
+. "${CLAUDE_PLUGIN_ROOT}/scripts/lib/allowlist-validate.sh"
+allowlist_validate "<target-folder>" || exit 0   # refusal already printed
+. "${CLAUDE_PLUGIN_ROOT}/scripts/lib/dedup-scan.sh"
+dedup_same_day "<vault_path>/<target-folder>" "$(date +%Y-%m-%d)" "<slug>" "${dedup_jaccard_threshold:-0.4}"
+# no output above → proceed
+```
+
+Build the body from the frontmatter template in **Output Format** below
+(`session_intent: execution`, `capture_action: project_note`,
+`research_state_change: none`), then write through the keeper:
+
+```
+op: insert
+resolved: true
+target: <target-folder>/<YYYY-MM-DD-title>.md
+title: <YYYY-MM-DD-title>
+session_link_date: <today YYYY-MM-DD>
+---
+<frontmatter + body per Output Format>
+```
+
+Validate with `kspayload_validate <payload-file>` (source
+`${CLAUDE_PLUGIN_ROOT}/scripts/lib/keeper-save-payload.sh`), extract the body
+with `kspayload_body`, then run the keeper CLI directly:
+
+```bash
+bash "${CLAUDE_PLUGIN_ROOT}/scripts/keeper" insert --vault "$VAULT" \
+  --target "<target-folder>/<YYYY-MM-DD-title>.md" \
+  --body-file "<body-temp>" --title "<YYYY-MM-DD-title>" \
+  --session-link-date "<today YYYY-MM-DD>"
+```
+
+Relay the committed path. Then run the MOC-Promotion Prompt check (step 14) —
+that post-save step applies on the fast path too.
 
 ## Config
 
