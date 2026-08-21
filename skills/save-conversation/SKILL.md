@@ -21,25 +21,35 @@ remain native (structural reorg is the vault-organizer's domain, not a note-writ
 
 Use this path when **all** guards hold; otherwise drop to the full procedure below.
 The fast path calls the same validators and the same keeper CLI as the full
-procedure — nothing is skipped, only the reading of the detail sections.
+procedure — nothing is skipped, only the reading of the detail sections. Three
+full-procedure steps are intentionally not restated here because they cannot
+change a routine execution save: the VAULT.md conventions read (step 1), the
+staleness banner, and `auto_open` handling (step 13) are covered by the notes
+below; when in doubt, use the full procedure.
 
 **Guards (any hit → full procedure):**
 - A topic hint was provided
 - 2+ taxonomy domains matched the keyword scan (needs the Cross-Domain Tiebreaker)
+- No taxonomy domain matched (route per Routing Logic / confirm Inbox with the user)
 - Same-day dedup score ≥ threshold (needs append vs new prompt)
 - Session was research/planning/reflection, or tested an active research claim
-  (needs intent scoring care / substrate filing)
+  (state your one-line evidence for this call; if borderline, use the full procedure)
 - `#bookmark` markers or >30-min gaps present (Chapter Segmentation)
 - Target folder would be `Inbox/` (ambiguous — needs confirmation)
 
 **Steps:**
 ```bash
 CONFIG="$(bash "${CLAUDE_PLUGIN_ROOT}/scripts/lib/resolve-config.sh")"
+# read vault_path and dedup_jaccard_threshold from $CONFIG:
+VAULT="$(grep '^vault_path:' "$CONFIG" | head -1 | sed 's/^vault_path:[[:space:]]*//')"
+THRESHOLD="$(awk '/^dedup_jaccard_threshold:/ {print $2}' "$CONFIG")"
+THRESHOLD="${THRESHOLD:-0.4}"
 # route: single keyword match against ## Project Taxonomy in $CONFIG → <target-folder>
 . "${CLAUDE_PLUGIN_ROOT}/scripts/lib/allowlist-validate.sh"
-allowlist_validate "<target-folder>" || exit 0   # refusal already printed
+allowlist_validate "<target-folder>" || exit 0   # refusal printed to stderr — surface it;
+                                                 # a refusal naming /obsidian:setup is a config fault
 . "${CLAUDE_PLUGIN_ROOT}/scripts/lib/dedup-scan.sh"
-dedup_same_day "<vault_path>/<target-folder>" "$(date +%Y-%m-%d)" "<slug>" "${dedup_jaccard_threshold:-0.4}"
+dedup_same_day "<vault_path>/<target-folder>" "$(date +%Y-%m-%d)" "<slug>" "$THRESHOLD"
 # no output above → proceed
 ```
 
@@ -57,9 +67,14 @@ session_link_date: <today YYYY-MM-DD>
 <frontmatter + body per Output Format>
 ```
 
+If `<target>` already exists (same-minute double save), append `-2`, `-3`, etc.
+and recheck until the path is free.
+
 Validate with `kspayload_validate <payload-file>` (source
-`${CLAUDE_PLUGIN_ROOT}/scripts/lib/keeper-save-payload.sh`), extract the body
-with `kspayload_body`, then run the keeper CLI directly:
+`${CLAUDE_PLUGIN_ROOT}/scripts/lib/keeper-save-payload.sh`) — on failure,
+surface the stderr line and stop; do **not** run the CLI. Extract the body
+with `kspayload_body`, run `bash "${CLAUDE_PLUGIN_ROOT}/scripts/ask-staleness.sh"`
+and surface any ⚠ line it prints, then run the keeper CLI directly:
 
 ```bash
 bash "${CLAUDE_PLUGIN_ROOT}/scripts/keeper" insert --vault "$VAULT" \
@@ -68,8 +83,9 @@ bash "${CLAUDE_PLUGIN_ROOT}/scripts/keeper" insert --vault "$VAULT" \
   --session-link-date "<today YYYY-MM-DD>"
 ```
 
-Relay the committed path. Then run the MOC-Promotion Prompt check (step 14) —
-that post-save step applies on the fast path too.
+Relay the committed path, honor `auto_open` from `$CONFIG` (step 13), then run
+the MOC-Promotion Prompt check (step 14) — those post-save steps apply on the
+fast path too.
 
 ## Config
 
