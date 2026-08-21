@@ -23,10 +23,6 @@ need 'Inbox/'
 need 'No taxonomy domain matched'
 need 'kspayload_validate <payload-file>'
 need 'ask-staleness.sh'
-# vault_path and the dedup threshold must be sourced from $CONFIG, not bare vars
-grep -q "vault_path.*CONFIG\|CONFIG.*vault_path" "$F" || fail "missing: vault_path from \$CONFIG"
-grep -qE 'dedup_jaccard_threshold:[[:space:]]*\$|dedup_jaccard_threshold.*"\$CONFIG"|\$\{dedup_jaccard_threshold:-0\.4\}' "$F" || true
-grep -q -- '--vault "$VAULT"' "$F" || fail "missing: keeper insert --vault"
 # fail-closed ordering inside the Fast Path: allowlist_validate must precede
 # both kspayload_validate and the keeper insert call
 FP="$(awk '/^## Fast Path/{f=1} f && /^## Config/{exit} f' "$F")"
@@ -39,4 +35,13 @@ echo "$FP" | grep -q 'scripts/keeper" insert' || fail "fast path missing keeper 
 [ "$(echo "$FP" | grep -n 'kspayload_validate' | head -1 | cut -d: -f1)" -lt \
   "$(echo "$FP" | grep -n 'scripts/keeper" insert' | head -1 | cut -d: -f1)" ] \
   || fail "gate ordering: kspayload_validate must precede keeper insert"
+# config sourcing must be real assignments inside the fast-path block, not
+# comments or bare variable references: $VAULT and the dedup threshold both
+# have to derive from $CONFIG
+echo "$FP" | grep -qE '^VAULT=.*vault_path.*"\$CONFIG"' \
+  || fail "fast path must assign VAULT from \$CONFIG vault_path"
+echo "$FP" | grep -qE '^THRESHOLD=.*dedup_jaccard_threshold.*"\$CONFIG"' \
+  || fail "fast path must read dedup_jaccard_threshold from \$CONFIG"
+echo "$FP" | grep -q -- '--vault "\$VAULT"' \
+  || fail "keeper insert must consume the sourced \$VAULT"
 echo "PASS: sole-brain-save-conversation"
