@@ -12,4 +12,7 @@ VAULT="$(grep '^vault_path:' "$CONFIG" | head -1 | sed 's/vault_path: *//')"
 [ -n "$VAULT" ] || exit 0
 INTERVAL="$(grep '^keeper_interval_secs:' "$CONFIG" | head -1 | sed 's/.*: *//')"
 INTERVAL="${INTERVAL:-900}"
-staleness_banner "$VAULT" "$INTERVAL"
+# Do not let the check's own failure read as a clean bill of health: every
+# consumer keys off stdout alone ("if it prints a line, show it"), and this
+# script's set -e would otherwise exit 1 with nothing printed (#94).
+staleness_banner "$VAULT" "$INTERVAL" || printf '⚠ could not determine index freshness\n'

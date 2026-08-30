@@ -32,4 +32,29 @@ case "$(run)" in
   *) fail "entrypoint did not surface the never-completed state: $(run)" ;;
 esac
 
+# A degraded state file must reach the user through the real entrypoint too. An
+# empty last_scan (what ENOSPC leaves: `>` truncates on open, then fails on
+# write) used to read as "never scanned" here, and an empty last_attempt as
+# "nothing has tried" — silence, which every consumer treats as healthy (#94).
+: > "$(keeper_last_scan_file "$V")"
+case "$(run)" in
+  *unreadable*) : ;;
+  *) fail "an empty last_scan did not surface through the entrypoint: $(run)" ;;
+esac
+rm -f "$(keeper_last_scan_file "$V")"
+: > "$(keeper_last_attempt_file "$V")"
+case "$(run)" in
+  *unreadable*) : ;;
+  *) fail "an empty last_attempt did not surface through the entrypoint: $(run)" ;;
+esac
+
+# The entrypoint must not let its own failure pass as a clean bill of health:
+# it runs under set -e with staleness_banner as its last command, so an abort
+# there exits 1 with no stdout — and stdout is the only channel the consumers
+# read ("if it prints a line, show it"). Pinned by inspection because nothing
+# reachable through this script can make the banner abort any more; that is the
+# property, and the guard is what preserves it.
+grep -q 'staleness_banner .*||' "${ROOT_DIR}/scripts/ask-staleness.sh" \
+  || fail "ask-staleness.sh no longer guards the banner call; a failed check would print nothing"
+
 echo "PASS: ask-staleness"
