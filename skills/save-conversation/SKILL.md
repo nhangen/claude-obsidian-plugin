@@ -340,9 +340,9 @@ Before writing a new note in the resolved target folder, check whether a same-da
 1. Source the shared scanner and call it:
 
        . "${CLAUDE_PLUGIN_ROOT}/scripts/lib/dedup-scan.sh"
-       dedup_same_day "<vault>/<target-folder>" "$(date +%Y-%m-%d)" "<proposed-slug>" "${dedup_jaccard_threshold:-0.4}"
+       dedup_same_day "<vault>/<target-folder>" "$(date +%Y-%m-%d)" "<proposed-slug>"
 
-   `dedup_same_day` globs today's notes in the folder, scores each slug's token Jaccard against the proposed slug (via the single `tokenize_slug`), and echoes `path<TAB>score` for the best match at or above the threshold, or nothing.
+   `dedup_same_day` globs today's notes in the folder, scores each slug's token Jaccard against the proposed slug (via the single `tokenize_slug`), and echoes `path<TAB>score` for the best match at or above the threshold, or nothing. Pass no threshold: the scanner reads the vault's `dedup_jaccard_threshold` itself and falls back to `0.4`. (A fourth argument still overrides it, as the fast path above does.)
 2. If it echoed a match, prompt the user (append vs new), as below.
 3. **If the highest score is ≥ 0.4**, treat as a likely match and prompt the user:
    > Same-day note already exists: `<existing-path>` (similarity: `<score>`).
@@ -372,7 +372,7 @@ Before writing a new note in the resolved target folder, check whether a same-da
 
 ### Threshold
 
-`0.4` is the default. Override per-vault by setting `dedup_jaccard_threshold: 0.5` (or any float 0.0–1.0) in `obsidian.local.md` frontmatter. Set to `0.0` to always prompt; set to `1.0` to disable the check.
+`0.4` is the default. Override per-vault by setting `dedup_jaccard_threshold: 0.5` (or any float 0.0–1.0) in `obsidian.local.md` frontmatter. Set to `0.0` to always prompt; set to `1.0` to disable the check. `dedup_same_day` resolves the setting itself, so every call site inherits it; a value that is not a float in that range is reported on stderr and the `0.4` default is used.
 
 ### Why
 

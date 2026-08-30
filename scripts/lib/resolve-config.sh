@@ -40,6 +40,22 @@ resolve_obsidian_config() {
   return 1
 }
 
+# Read a scalar `key: value` out of the resolved config's frontmatter. Echoes
+# the trimmed value; returns 1 when no config resolves or the key is absent, so
+# a caller can tell "unset" (use my default) from "set". Config keys documented
+# in a SKILL and written by setup were otherwise read by whichever call site
+# remembered to (#103) — dedup_jaccard_threshold reached none of its three.
+obsidian_config_value() {
+  local key="$1" cfg v
+  cfg="$(resolve_obsidian_config "${2:-${CLAUDE_PLUGIN_ROOT:-}}")" || return 1
+  v="$(awk -v k="$key" '
+    index($0, k ":") == 1 {
+      sub(/^[^:]*:[[:space:]]*/, ""); sub(/[[:space:]]+$/, ""); print; exit
+    }' "$cfg")"
+  [ -n "$v" ] || return 1
+  printf '%s\n' "$v"
+}
+
 # CLI mode: when executed directly (not sourced), print the resolved config
 # path on stdout and exit non-zero if none exists. `--stable` prints the
 # canonical stable path regardless of existence (used by the setup wizard to
