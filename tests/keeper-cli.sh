@@ -85,6 +85,37 @@ bash "$KEEPER" append --vault "$V" --target "Notes/prose.md" \
 grep -q '^## 12:05 — deadbee' "$V/Notes/prose.md" \
   || fail "a sha mentioned in body prose was read as an existing section, dropping the record"
 
+# 17b. the sha may sit anywhere in the heading. Commit capture writes it at the
+#      START ("## <sha> — msg"), and an end-anchored match never fired for that
+#      shape, so the only guard against a double capture was dead (#101).
+printf 'first capture\n' > "$TMP/lead.md"
+bash "$KEEPER" append --vault "$V" --target "Notes/lead.md" \
+  --section '## 7ac9556 — repair the two guards (PR #357)' --body-file "$TMP/lead.md" >/dev/null
+LEAD_BEFORE="$(cat "$V/Notes/lead.md")"
+bash "$KEEPER" append --vault "$V" --target "Notes/lead.md" \
+  --section '## 7ac9556 — repair the two guards (PR #357)' --body-file "$TMP/dup.md" \
+  --skip-if-hash 7ac9556 >/dev/null 2>&1
+[ "$(cat "$V/Notes/lead.md")" = "$LEAD_BEFORE" ] \
+  || fail "a sha at the start of the heading was not seen, so the commit was captured twice"
+
+# 17c. the sha is compared case-insensitively — the validator accepts [0-9a-fA-F],
+#      so a caller passing an uppercase sha must still hit its own section.
+bash "$KEEPER" append --vault "$V" --target "Notes/lead.md" \
+  --section '## 7AC9556 — same commit, uppercase' --body-file "$TMP/dup.md" \
+  --skip-if-hash 7AC9556 >/dev/null 2>&1
+[ "$(cat "$V/Notes/lead.md")" = "$LEAD_BEFORE" ] \
+  || fail "an uppercase --skip-if-hash missed the lowercase section it names"
+
+# 17d. the boundary is real: a heading naming a LONGER sha that merely starts
+#      with this one is a different commit and must not suppress it.
+printf 'longer sha section\n' > "$TMP/long.md"
+bash "$KEEPER" append --vault "$V" --target "Notes/boundary.md" \
+  --section '## abc12345 — a different commit' --body-file "$TMP/long.md" >/dev/null
+bash "$KEEPER" append --vault "$V" --target "Notes/boundary.md" \
+  --section '## abc1234 — the commit we mean' --body-file "$TMP/b.md" --skip-if-hash abc1234 >/dev/null
+grep -q '^## abc1234 — the commit we mean' "$V/Notes/boundary.md" \
+  || fail "a heading for a longer sha with the same prefix suppressed a distinct commit"
+
 # 18. a malformed --skip-if-hash fails loudly. Silently treating an unusable
 #     value as "no guard" turns a typo into a duplicate note, which is the
 #     failure this flag exists to prevent.
@@ -187,6 +218,35 @@ grep -qxF -- '- [[Notes/plain]]' "$V/Notes/INDEX.md" || fail "default title (no 
 # I8: insert path-traversal guard
 bash "$KEEPER" insert --vault "$V" --target "../evil.md" --body-file "$TMP/note.md" 2>/dev/null && fail "insert path traversal must fail"
 [ -f "$TMP/evil.md" ] && fail "insert traversal wrote outside the vault"
+
+# I9: a healthy insert raises no link warning — the warning below must mean
+#     something when it appears.
+bash "$KEEPER" insert --vault "$V" --target "Notes/quiet.md" \
+  --body-file "$TMP/note.md" >/dev/null 2>"$TMP/quiet.err"
+grep -q 'keeper: warning' "$TMP/quiet.err" \
+  && fail "insert warned about a link it did write:"$'\n'"$(cat "$TMP/quiet.err")"
+
+# I10: when the INDEX link cannot be written, insert says so. The note is
+#      committed before the link step, so swallowing the failure with `|| true`
+#      let the CLI print the path and exit 0 on a note nothing links to (#104).
+if [ "$(id -u)" = "0" ]; then
+  printf 'skip: unlinkable-INDEX assertion (running as root ignores 0444)\n' >&2
+else
+  mkdir -p "$V/Locked"
+  printf '# Locked Index\n' > "$V/Locked/INDEX.md"
+  chmod 444 "$V/Locked/INDEX.md"
+  set +e
+  bash "$KEEPER" insert --vault "$V" --target "Locked/2026-06-29-orphan.md" \
+    --body-file "$TMP/note.md" >"$TMP/lock.out" 2>"$TMP/lock.err"
+  LOCK_RC=$?
+  set -e
+  chmod 644 "$V/Locked/INDEX.md"
+  [ "$LOCK_RC" = "0" ] \
+    || fail "the note itself committed, so insert must still exit 0; rc=$LOCK_RC"
+  [ -f "$V/Locked/2026-06-29-orphan.md" ] || fail "insert did not write the note"
+  grep -q 'not linked from' "$TMP/lock.err" \
+    || fail "insert reported success on an unlinked note; stderr was:"$'\n'"$(cat "$TMP/lock.err")"
+fi
 
 # 14. zsh portability — both subcommands clean under zsh (insert sources the substrate libs)
 if command -v zsh >/dev/null 2>&1; then

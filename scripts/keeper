@@ -42,6 +42,23 @@ keeper_guard_target() {
   esac
 }
 
+# Does any section heading in $1 name the sha $2? Heading-only (a context bullet
+# legitimately names other commits' shas) and position-independent: writers put
+# the sha at the head of the line ("## <sha> — msg") as often as at the end, and
+# an end-anchored match never fired for them (#101).
+#
+# awk, not a grep pipeline: `grep -E '^#' | grep -q` lets -q's early exit SIGPIPE
+# the first grep, which `set -o pipefail` then reports as a failed match.
+# Boundaries are hex-class rather than \b — BSD grep/awk do not carry \b — and
+# the compare is case-folded because the validator accepts [0-9a-fA-F].
+keeper_heading_has_sha() {
+  awk -v sha="$2" '
+    BEGIN { sha = tolower(sha); pat = "(^|[^0-9a-f])" sha "([^0-9a-f]|$)" }
+    $1 ~ /^##?#?#?#?#?$/ && NF > 1 && tolower($0) ~ pat { found = 1; exit }
+    END { exit(found ? 0 : 1) }
+  ' "$1"
+}
+
 # append a timestamped section to a dated note, creating it on absence.
 cmd_append() {
   local vault="" target="" date="" section="" body_file="" init_file="" skip_hash="" skip_given=0
@@ -84,7 +101,7 @@ cmd_append() {
       '') keeper_die "append: --skip-if-hash requires a value" ;;
       *[!0-9a-fA-F]*) keeper_die "append: --skip-if-hash must be a hex sha: $skip_hash" ;;
       *)
-        if [ -f "$full" ] && grep -qE "^#{1,6}[[:space:]].*[[:space:]]${skip_hash}[[:space:]]*\$" "$full"; then
+        if [ -f "$full" ] && keeper_heading_has_sha "$full" "$skip_hash"; then
           printf 'keeper: append skipped — %s already has a section for %s\n' "$target" "$skip_hash" >&2
           printf '%s\n' "$full"
           return 0
@@ -165,7 +182,23 @@ cmd_insert() {
   [ -f "$idx" ] || printf '# %s Index\n' "$(basename "$folder")" > "$idx"
   . "$KEEPER_DIR/lib/note-hash.sh"
   . "$KEEPER_DIR/lib/vault-index.sh"
-  vault_index_apply "$folder" "$idx" >/dev/null || true
+  # `|| true` alone made a failed link indistinguishable from a written one
+  # (#104): the note is committed before this runs, so insert still printed the
+  # path and exited 0 while nothing in the vault pointed at the note. Keep the
+  # exit status (the note IS written — failing here would tell the caller the
+  # opposite), but say on stderr what is missing.
+  #
+  # Check the link, not just apply's rc: a coverage defect is reported on
+  # apply's stderr and still returns 0, so rc by itself would miss the common
+  # shape (an unwritable INDEX.md).
+  local link_rc=0 stem
+  vault_index_apply "$folder" "$idx" >/dev/null || link_rc=$?
+  stem="$(basename "$target" .md)"
+  if ! vault_index_has_link "$idx" "$stem" "$(vault_index_dup_leaves "$folder")"; then
+    printf 'keeper: warning — %s is written but is not linked from %s%s\n' \
+      "$target" "${idx#"$vault_abs"/}" \
+      "$([ "$link_rc" -eq 0 ] || printf ' (INDEX step failed, rc=%s)' "$link_rc")" >&2
+  fi
 
   # Optional: link the note into Daily/<date> under ## Session Links.
   if [ -n "$sldate" ]; then
