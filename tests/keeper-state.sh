@@ -150,4 +150,72 @@ else
   chmod 755 "$(keeper_cache_dir "$VAULT")"
 fi
 
+# --- a deferring host speaks from the vault's evidence (#95) -----------------
+#
+# Keeper state is per-host and never synced, and only the elected owner scans,
+# so a deferring host has neither a scan nor an attempt — and stayed silent
+# whether the owner was healthy or had faulted on every tick since install. On
+# a two-host vault that host is usually where /obsidian:ask is run.
+. "${ROOT_DIR}/scripts/lib/keeper-lease.sh"
+DEF="$TMP/deferring"; mkdir -p "$DEF"
+[ -z "$(keeper_last_scan "$DEF")" ] && [ -z "$(keeper_last_attempt "$DEF")" ] \
+  || fail "fixture precondition: the deferring host must have no local state"
+
+# A vault no host has ever claimed is not a fault: the keeper has never run
+# anywhere, and this host has nothing to report.
+[ -z "$(staleness_banner "$DEF" 900)" ] \
+  || fail "warned about a vault the keeper has never run on: $(staleness_banner "$DEF" 900)"
+
+# With a live claim and no digest at all, no host has ever completed a scan.
+keeper_claim_write "$DEF/.vaultkeeper" "ml-1"
+NODIGEST="$(staleness_banner "$DEF" 900 "ml-1,mbp")"
+case "$NODIGEST" in
+  *"no host has produced"*) : ;;
+  *) fail "a claimed vault with no digest reported nothing: ${NODIGEST:-<empty>}" ;;
+esac
+case "$NODIGEST" in
+  *"ml-1"*) : ;;
+  *) fail "the vault-sourced banner did not name the elected owner: $NODIGEST" ;;
+esac
+
+# The owner stamps scan_status: INCOMPLETE into Librarian.md on every faulted
+# tick. That is the signal the deferring host was blind to.
+printf '# Librarian\n\nlast_scan: %s\nscan_status: INCOMPLETE\n' "$(now_epoch)" > "$DEF/Librarian.md"
+FAULTING="$(staleness_banner "$DEF" 900 "ml-1,mbp")"
+case "$FAULTING" in
+  *faulted*ml-1*) : ;;
+  *) fail "the owner's faulting scans were invisible to the deferring host: ${FAULTING:-<empty>}" ;;
+esac
+
+# A healthy owner must stay quiet here — a banner that always fires carries no
+# information, which is the failure mode the obvious hoist-the-attempt fix has.
+printf '# Librarian\n\nlast_scan: %s\n' "$(now_epoch)" > "$DEF/Librarian.md"
+[ -z "$(staleness_banner "$DEF" 900 "ml-1,mbp")" ] \
+  || fail "warned on a vault the owner is scanning fine: $(staleness_banner "$DEF" 900 "ml-1,mbp")"
+
+# A digest nobody refreshes is what a dead owner leaves: it never gets to stamp
+# INCOMPLETE. Same 2x grace the local branch allows.
+printf '# Librarian\n\nlast_scan: 1000\n' > "$DEF/Librarian.md"
+STALE_DIGEST="$(staleness_banner "$DEF" 900 "ml-1,mbp")"
+case "$STALE_DIGEST" in
+  *"last maintained"*) : ;;
+  *) fail "a digest no host has refreshed reported nothing: ${STALE_DIGEST:-<empty>}" ;;
+esac
+
+# An unparseable digest is a state to report, not one to fall silent on — and
+# the arithmetic on it must not abort the caller.
+printf '# Librarian\n\nlast_scan: not-a-number\n' > "$DEF/Librarian.md"
+BADDIGEST="$(staleness_banner "$DEF" 900 "ml-1,mbp")" \
+  || fail "an unreadable digest aborted staleness_banner"
+case "$BADDIGEST" in
+  *unreadable*) : ;;
+  *) fail "an unreadable digest produced no warning: ${BADDIGEST:-<empty>}" ;;
+esac
+
+# This host's own state still wins when it has any: the vault fallback is for
+# hosts with nothing local to speak from, not a second opinion over one.
+keeper_record_scan "$DEF"
+[ -z "$(staleness_banner "$DEF" 900 "ml-1,mbp")" ] \
+  || fail "a host with a fresh local scan was overruled by the vault digest"
+
 echo "PASS: keeper-state"

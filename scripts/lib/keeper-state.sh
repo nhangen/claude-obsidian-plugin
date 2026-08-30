@@ -2,6 +2,10 @@
 # keeper-state.sh — non-synced per-host state: cache dir, prior-scan snapshot,
 # last_scan, last_attempt, cold-start detection, staleness banner. Requires
 # note-hash.sh.
+#
+# The banner also reads two *synced* artifacts, but only where the host has no
+# local state to speak from (#95): Librarian.md, whose shape surfacing.sh owns,
+# and the lease dir, whose shape keeper-lease.sh owns.
 
 keeper_vault_id() {
   local out
@@ -84,6 +88,62 @@ keeper_last_attempt_file() { printf '%s/last_attempt\n' "$(keeper_cache_dir "$1"
 keeper_record_attempt()    { keeper_write_ts "$(keeper_last_attempt_file "$1")"; }
 keeper_last_attempt()      { keeper_read_ts "$(keeper_last_attempt_file "$1")" || true; }
 
+# What the vault itself says about the index, for a host with no local state of
+# its own. Only the elected owner scans, and keeper state is per-host and never
+# synced, so a deferring host has neither a scan nor an attempt and used to stay
+# silent unconditionally — whether the owner was healthy or had faulted on every
+# tick since install (#95). On a two-host vault the deferring host is usually
+# where /obsidian:ask is being run.
+#
+# It reads the evidence that *is* synced rather than manufacturing local
+# evidence: hoisting keeper_record_attempt above the ownership gate makes a
+# deferring host claim an attempt it never makes and warn forever, on a vault
+# the owner is scanning perfectly well (tests/vaultkeeper-tick.sh pins that).
+#
+# Echoes a banner line, or nothing when the vault reports a healthy scan.
+keeper_vault_health() {
+  local vault="$1" interval="$2" prio="${3:-}" digest="$1/Librarian.md"
+  local lease="$1/.vaultkeeper" owner="" suffix="" status last now
+
+  # No claim by any host means the keeper has never run anywhere — not a fault,
+  # and not this host's to report. A vault nobody has ever pointed the keeper at
+  # must stay quiet.
+  [ -d "$lease" ] || return 0
+  set -- "$lease"/.keeper-claim-*
+  [ -e "$1" ] || return 0
+
+  # Name the owner when the caller has sourced keeper-lease.sh; election is that
+  # file's business, and a banner is not worth a second implementation of it.
+  if command -v keeper_elect >/dev/null 2>&1; then
+    owner="$(keeper_elect "$lease" "$prio" "$(( interval * 2 ))" || true)"
+  fi
+  [ -n "$owner" ] && suffix=" (owner: $owner)"
+
+  if [ ! -f "$digest" ]; then
+    printf '⚠ no host has produced an index digest for this vault%s\n' "$suffix"
+    return 0
+  fi
+  status="$(grep '^scan_status:' "$digest" 2>/dev/null | head -1 | sed 's/^scan_status:[[:space:]]*//')"
+  if [ "$status" = "INCOMPLETE" ]; then
+    printf '⚠ the last index scan faulted%s — see Librarian.md\n' "$suffix"
+    return 0
+  fi
+  # A digest nobody has refreshed is the shape a dead owner leaves: it never
+  # gets to stamp INCOMPLETE. Same 2x grace the local branch allows, which also
+  # covers replication lag.
+  last="$(grep '^last_scan:' "$digest" 2>/dev/null | head -1 | sed 's/^last_scan:[[:space:]]*//')"
+  case "$last" in
+    ''|*[!0-9]*)
+      printf '⚠ the index digest for this vault is unreadable%s\n' "$suffix"
+      return 0
+      ;;
+  esac
+  now="$(now_epoch)"
+  if [ "$(( now - last ))" -gt "$(( interval * 2 ))" ]; then
+    printf '⚠ index last maintained %ss ago%s\n' "$(( now - last ))" "$suffix"
+  fi
+}
+
 # The banner is the only place a user hears that the index is not being
 # maintained. It used to return silently when last_scan was absent, which is
 # indistinguishable from a fresh successful scan — and absent is exactly what a
@@ -97,8 +157,11 @@ keeper_last_attempt()      { keeper_read_ts "$(keeper_last_attempt_file "$1")" |
 # was scanning perfectly well. A banner that always fires carries no information, which
 # is a worse failure than the silence #52 removed. The attempt file is written below
 # that gate, so only a host that actually scans has one.
+# $3 (optional) is the configured host priority, forwarded to the election that
+# names the owner in a vault-sourced line; without it the banner still fires,
+# just unattributed.
 staleness_banner() {
-  local vault="$1" interval="$2" last attempted now scan_rc=0 att_rc=0
+  local vault="$1" interval="$2" prio="${3:-}" last attempted now scan_rc=0 att_rc=0
   last="$(keeper_read_ts "$(keeper_last_scan_file "$vault")")" || scan_rc=$?
   if [ "$scan_rc" = "2" ]; then
     # Empty or non-numeric. Neither "healthy" nor "never scanned" is a claim
@@ -110,7 +173,9 @@ staleness_banner() {
   fi
   if [ "$scan_rc" != "0" ]; then
     attempted="$(keeper_read_ts "$(keeper_last_attempt_file "$vault")")" || att_rc=$?
-    [ "$att_rc" = "1" ] && return 0
+    # Nothing has tried from this host. That is not evidence of health — on a
+    # deferring host it is the normal state — so ask the vault (#95).
+    [ "$att_rc" = "1" ] && { keeper_vault_health "$vault" "$interval" "$prio"; return 0; }
     if [ "$att_rc" != "0" ]; then
       printf '⚠ index last_attempt is unreadable on this host\n'
       return 0
