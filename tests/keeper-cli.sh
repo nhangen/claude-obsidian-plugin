@@ -46,6 +46,35 @@ grep -qE '^## [0-9]{2}:[0-9]{2} — entry' "$V/Notes/y.md" || fail "default sect
 printf 'stdin body\n' | bash "$KEEPER" append --vault "$V" --target "Notes/s.md" --section '## s — t' >/dev/null
 grep -q '^stdin body' "$V/Notes/s.md" || fail "stdin body not appended"
 
+# 6b. a bare --section title is written as a heading, not a paragraph. Plain
+#     text is invisible to Obsidian's outline, and — because the --skip-if-hash
+#     gate reads headings — a section written flat cannot be found by the sha
+#     dedup either, so the same commit captures twice (#100).
+printf 'flat body\n' > "$TMP/flat.md"
+bash "$KEEPER" append --vault "$V" --target "Notes/flat.md" \
+  --section 'Some title 1234abc' --body-file "$TMP/flat.md" >/dev/null
+grep -qxF -- '## Some title 1234abc' "$V/Notes/flat.md" \
+  || fail "a bare --section title was not promoted to a heading:"$'\n'"$(cat "$V/Notes/flat.md")"
+FLAT_BEFORE="$(cat "$V/Notes/flat.md")"
+bash "$KEEPER" append --vault "$V" --target "Notes/flat.md" \
+  --section 'Some title 1234abc' --body-file "$TMP/flat.md" --skip-if-hash 1234abc >/dev/null 2>&1
+[ "$(cat "$V/Notes/flat.md")" = "$FLAT_BEFORE" ] \
+  || fail "a section written from a bare title was not seen by the sha gate"
+
+# 6c. a --section that already carries its own hashes keeps the level it chose;
+#     keeper must not double-prefix it.
+bash "$KEEPER" append --vault "$V" --target "Notes/level.md" \
+  --section '#### deep section' --body-file "$TMP/b.md" >/dev/null
+grep -qxF -- '#### deep section' "$V/Notes/level.md" \
+  || fail "an explicit heading level was rewritten:"$'\n'"$(cat "$V/Notes/level.md")"
+
+# 6d. a whitespace-only --section falls back to the default heading rather than
+#     emitting an empty one.
+bash "$KEEPER" append --vault "$V" --target "Notes/blank.md" --section '   ' \
+  --body-file "$TMP/b.md" >/dev/null
+grep -qE '^## [0-9]{2}:[0-9]{2} — entry' "$V/Notes/blank.md" \
+  || fail "a blank --section did not fall back to the default heading:"$'\n'"$(cat "$V/Notes/blank.md")"
+
 # --- --skip-if-hash: the append is idempotent per commit sha ---
 #
 # The capture gate this replaces lived in a host-local state dir while the vault

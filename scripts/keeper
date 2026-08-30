@@ -121,7 +121,20 @@ cmd_append() {
     fi
   fi
 
+  # --section names a section, so it is written as a heading (#100). Callers
+  # that pass a bare title ("Some title") had it land as a paragraph: content
+  # intact, but absent from Obsidian's outline, and invisible to the
+  # heading-shaped --skip-if-hash gate above, which would then let the same
+  # commit be captured twice. A value that already carries its own `#` prefix
+  # is kept verbatim, so a caller can choose the level.
+  case "$section" in *[![:space:]]*) : ;; *) section="" ;; esac   # blanks == none
   [ -n "$section" ] || section="## $(date +%H:%M) — entry"
+  section="${section#"${section%%[![:space:]]*}"}"                # trim indent
+  case "$section" in
+    '#'[[:space:]]*|'##'[[:space:]]*|'###'[[:space:]]*|\
+    '####'[[:space:]]*|'#####'[[:space:]]*|'######'[[:space:]]*) : ;;
+    *) section="## $section" ;;
+  esac
 
   local body
   if [ -n "$body_file" ]; then
