@@ -344,7 +344,7 @@ Before writing a new note in the resolved target folder, check whether a same-da
 
    `dedup_same_day` globs today's notes in the folder, scores each slug's token Jaccard against the proposed slug (via the single `tokenize_slug`), and echoes `path<TAB>score` for the best match at or above the threshold, or nothing. Pass no threshold: the scanner reads the vault's `dedup_jaccard_threshold` itself and falls back to `0.4`. (A fourth argument still overrides it, as the fast path above does.)
 2. If it echoed a match, prompt the user (append vs new), as below.
-3. **If the highest score is ≥ 0.4**, treat as a likely match and prompt the user:
+3. **If step 1 echoed a match**, treat it as a likely match and prompt the user. (Do not re-test the score against `0.4`: the scanner has already applied the vault's threshold, and re-gating on the default here is what made a lowered `dedup_jaccard_threshold` a no-op even once it reached the scanner.)
    > Same-day note already exists: `<existing-path>` (similarity: `<score>`).
    > - **append** → add `## HH:MM — <new-topic>` section to the existing file
    > - **new** → write the proposed new file anyway
@@ -367,12 +367,12 @@ Before writing a new note in the resolved target folder, check whether a same-da
    etc. and recheck until the path is free, then pass the free path's folder as
    `folder_hint`. (Collisions only happen when two saves run within the same
    minute against the same slug.)
-6. **No match (highest < 0.4)**: skip the prompt and proceed with the keeper
-   INSERT (step 11, new file).
+6. **No match (step 1 echoed nothing)**: skip the prompt and proceed with the
+   keeper INSERT (step 11, new file).
 
 ### Threshold
 
-`0.4` is the default. Override per-vault by setting `dedup_jaccard_threshold: 0.5` (or any float 0.0–1.0) in `obsidian.local.md` frontmatter. Set to `0.0` to always prompt; set to `1.0` to disable the check. `dedup_same_day` resolves the setting itself, so every call site inherits it; a value that is not a float in that range is reported on stderr and the `0.4` default is used.
+`0.4` is the default. Override per-vault by setting `dedup_jaccard_threshold: 0.5` (or any float 0.0–1.0) in `obsidian.local.md` frontmatter. Set to `0.0` to prompt on any same-day note; `1.0` prompts only on an identical slug. `dedup_same_day` resolves the setting itself, so every call site inherits it; a value that is not a float in that range is reported on stderr and the `0.4` default is used.
 
 ### Why
 

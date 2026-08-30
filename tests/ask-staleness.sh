@@ -70,6 +70,20 @@ esac
 printf '# Librarian\n\nlast_scan: %s\n' "$(now_epoch)" > "$D/Librarian.md"
 [ -z "$(drun)" ] || fail "warned on a vault the owner is scanning fine: $(drun)"
 
+# The optional config keys are exactly that. /obsidian:setup's template does not
+# write keeper_interval_secs, and an unmatched grep is a failed pipeline under
+# this script's pipefail — so on a default install the check aborted before the
+# banner ever ran, printing nothing, which every consumer reads as healthy.
+MIN="$TMP/minimal.local.md"
+printf -- '---\nvault_path: %s\n---\n' "$D" > "$MIN"
+MINOUT="$(OBSIDIAN_LOCAL_MD="$MIN" bash "${ROOT_DIR}/scripts/ask-staleness.sh")" \
+  || fail "a config with only vault_path aborted the freshness check"
+printf '# Librarian\n\nlast_scan: %s\nscan_status: INCOMPLETE\n' "$(now_epoch)" > "$D/Librarian.md"
+case "$(OBSIDIAN_LOCAL_MD="$MIN" bash "${ROOT_DIR}/scripts/ask-staleness.sh")" in
+  *faulted*) : ;;
+  *) fail "a faulting scan stayed silent on a config without the optional keys" ;;
+esac
+
 # The entrypoint must not let its own failure pass as a clean bill of health:
 # it runs under set -e with staleness_banner as its last command, so an abort
 # there exits 1 with no stdout — and stdout is the only channel the consumers

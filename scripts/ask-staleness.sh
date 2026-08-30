@@ -11,13 +11,18 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "${ROOT}/lib/resolve-config.sh"
 
 CONFIG="$(resolve_obsidian_config "${CLAUDE_PLUGIN_ROOT:-${ROOT%/scripts}}")" || exit 0
-VAULT="$(grep '^vault_path:' "$CONFIG" | head -1 | sed 's/vault_path: *//')"
+# Every one of these is an unmatched-grep away from a failed pipeline under this
+# script's pipefail, and an abort here prints nothing — which every consumer
+# reads as a healthy index (#94). keeper_interval_secs is the live case: the
+# setup wizard's config template does not write it, so on a default install the
+# freshness check aborted one line before the guard meant to protect it, and the
+# `[ -n "$VAULT" ]` test below was dead code.
+cfg_val() { grep "^$1:" "$CONFIG" | head -1 | sed "s/^$1:[[:space:]]*//" || true; }
+VAULT="$(cfg_val vault_path)"
 [ -n "$VAULT" ] || exit 0
-INTERVAL="$(grep '^keeper_interval_secs:' "$CONFIG" | head -1 | sed 's/.*: *//')"
+INTERVAL="$(cfg_val keeper_interval_secs)"
 INTERVAL="${INTERVAL:-900}"
-# `|| true`: the key is optional, and an unmatched grep is a failed pipeline
-# under this script's pipefail — which would abort the freshness check itself.
-PRIORITY="$(grep '^keeper_host_priority:' "$CONFIG" | head -1 | sed 's/.*: *//' | tr ' ' ',' || true)"
+PRIORITY="$(cfg_val keeper_host_priority | tr ' ' ',')"
 # Do not let the check's own failure read as a clean bill of health: every
 # consumer keys off stdout alone ("if it prints a line, show it"), and this
 # script's set -e would otherwise exit 1 with nothing printed (#94).

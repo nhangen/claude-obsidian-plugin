@@ -207,7 +207,11 @@ cmd_insert() {
   local link_rc=0 stem
   vault_index_apply "$folder" "$idx" >/dev/null || link_rc=$?
   stem="$(basename "$target" .md)"
-  if ! vault_index_has_link "$idx" "$stem" "$(vault_index_dup_leaves "$folder")"; then
+  # No dup_leaves argument: $stem is a bare basename, so vault_index_has_link
+  # returns before it consults that set (the leaf IS the rel). Passing it meant
+  # a second full recursive sweep of the folder per insert, duplicating the one
+  # vault_index_apply just did.
+  if ! vault_index_has_link "$idx" "$stem"; then
     printf 'keeper: warning — %s is written but is not linked from %s%s\n' \
       "$target" "${idx#"$vault_abs"/}" \
       "$([ "$link_rc" -eq 0 ] || printf ' (INDEX step failed, rc=%s)' "$link_rc")" >&2

@@ -31,6 +31,17 @@ echo "$hit" | grep -q '2026-06-28' && fail "other-day file wrongly matched"
 dedup_same_day "$TMP/f" 2026-06-29 zzz-no-such-topic 0.4 >/dev/null
 echo "ok: bare no-match dedup_same_day survived set -e" >/dev/null
 
+# The documented endpoints must be reachable. `0.0` means "prompt on any
+# same-day note" — it was unreachable while the best-so-far comparison was
+# folded into the threshold test and seeded at 0.00, so a zero-overlap slug
+# scored 0.00 and lost to the seed.
+mkdir -p "$TMP/zero"
+: > "$TMP/zero/2026-06-29-totally-different-subject.md"
+[ -n "$(dedup_same_day "$TMP/zero" 2026-06-29 unrelated-words-here 0.0)" ] \
+  || fail "dedup_jaccard_threshold 0.0 must prompt on any same-day note"
+[ -z "$(dedup_same_day "$TMP/zero" 2026-06-29 unrelated-words-here 0.4)" ] \
+  || fail "0.0 reachability must not make the default threshold match everything"
+
 # --- the per-vault threshold override actually reaches the scanner (#103) ---
 # `keeper-cli` vs `keeper-gui` scores 0.33: below the 0.4 default, above a
 # vault that lowered the bar. A config override that never arrives is invisible

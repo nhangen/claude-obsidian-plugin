@@ -71,7 +71,13 @@ dedup_same_day() {
     [ -n "$f" ] || continue
     base="$(basename "$f" .md)"; base="${base#"$date"-}"
     score="$(jaccard "$slug" "$base")"
-    if awk -v s="$score" -v t="$threshold" -v b="$best_score" 'BEGIN{exit !(s>=t && s>b)}'; then
+    # Two tests, not one. Folding "beats the best so far" into the threshold
+    # test seeded the comparison with best_score="0.00", so a 0.00 score could
+    # never win — and `dedup_jaccard_threshold: 0.0` is documented as "always
+    # prompt". That endpoint was unreachable, which went unnoticed while the
+    # override reached no call site at all (#103).
+    if awk -v s="$score" -v t="$threshold" 'BEGIN{exit !(s>=t)}' \
+       && { [ -z "$best_path" ] || awk -v s="$score" -v b="$best_score" 'BEGIN{exit !(s>b)}'; }; then
       best_score="$score"; best_path="$f"
     fi
   done < <(find "$folder" -maxdepth 1 -type f -name "$date-*.md" 2>/dev/null)
