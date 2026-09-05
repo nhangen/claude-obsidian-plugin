@@ -57,9 +57,19 @@ dedup_threshold_valid() {
 
 dedup_threshold() {
   local v="${OBSIDIAN_DEDUP_JACCARD_THRESHOLD:-}"
-  if [ -z "$v" ] && [ -n "$_ds_lib_dir" ] && [ -f "$_ds_lib_dir/resolve-config.sh" ]; then
-    . "$_ds_lib_dir/resolve-config.sh"
-    v="$(obsidian_config_value dedup_jaccard_threshold || true)"
+  if [ -z "$v" ]; then
+    if [ -n "$_ds_lib_dir" ] && [ -f "$_ds_lib_dir/resolve-config.sh" ]; then
+      . "$_ds_lib_dir/resolve-config.sh"
+      v="$(obsidian_config_value dedup_jaccard_threshold || true)"
+    else
+      # Silence here reads as "the vault set no threshold", so a vault that set
+      # 0.0 would run at 0.4 — the twin-note failure #103 exists to prevent —
+      # with nothing said. The unusable-value path below is loud; this half has
+      # to be too. Same wording as allowlist-validate.sh and vault-scan.sh: the
+      # install is broken, not the config.
+      printf 'dedup_same_day: cannot read the vault threshold — %s/resolve-config.sh is missing; the install is broken, not the config. Using %s\n' \
+        "${_ds_lib_dir:-<lib dir unresolved>}" "$DEDUP_JACCARD_DEFAULT" >&2
+    fi
   fi
   if [ -z "$v" ]; then printf '%s\n' "$DEDUP_JACCARD_DEFAULT"; return 0; fi
   if dedup_threshold_valid "$v"; then printf '%s\n' "$v"; return 0; fi

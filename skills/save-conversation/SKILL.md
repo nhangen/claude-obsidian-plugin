@@ -43,7 +43,13 @@ CONFIG="$(bash "${CLAUDE_PLUGIN_ROOT}/scripts/lib/resolve-config.sh")"
 # One reader for config scalars: it bounds itself to the frontmatter and strips
 # YAML quotes, which hand-rolled greps here did not.
 . "${CLAUDE_PLUGIN_ROOT}/scripts/lib/resolve-config.sh"
-VAULT="$(obsidian_config_value vault_path)"
+VAULT="$(obsidian_config_value vault_path)" || exit 0   # no vault_path → a config
+                                                        # fault; say so rather than
+                                                        # scanning /<target-folder>,
+                                                        # where find's 2>/dev/null
+                                                        # makes "no output" mean
+                                                        # "no duplicate" and the
+                                                        # agent files a twin note
 # route: single keyword match against ## Project Taxonomy in $CONFIG → <target-folder>
 . "${CLAUDE_PLUGIN_ROOT}/scripts/lib/allowlist-validate.sh"
 allowlist_validate "<target-folder>" || exit 0   # refusal printed to stderr — surface it;

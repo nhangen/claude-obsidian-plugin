@@ -220,9 +220,27 @@ cmd_insert() {
   # Optional: link the note into Daily/<date> under ## Session Links.
   if [ -n "$sldate" ]; then
     local daily="$vault_abs/Daily/$sldate.md"
-    mkdir -p "$vault_abs/Daily"
-    [ -f "$daily" ] || printf -- '---\ndate: %s\ntags: [daily]\n---\n\n# %s\n' "$sldate" "$sldate" > "$daily"
-    grep -q '^## Session Links' "$daily" || printf '\n## Session Links\n' >> "$daily"
+    # Every write below is guarded, not just the swap at the end. Bare under
+    # `set -e` these abort the whole insert AFTER the note has committed, with
+    # nothing on stderr — and a caller reads a non-zero exit as "not captured",
+    # so a capture that did happen is reported as lost and the retry then dies
+    # on "target already exists". The note is written; a daily link that cannot
+    # be made is a warning, not a failure.
+    local sl_warn="keeper: warning — $target is written but Daily/$sldate.md"
+    if ! mkdir -p "$vault_abs/Daily" 2>/dev/null; then
+      printf '%s could not be created; no session link\n' "$sl_warn" >&2
+      printf '%s\n' "$full"; return 0
+    fi
+    if [ ! -f "$daily" ] \
+       && ! printf -- '---\ndate: %s\ntags: [daily]\n---\n\n# %s\n' "$sldate" "$sldate" > "$daily" 2>/dev/null; then
+      printf '%s could not be created; no session link\n' "$sl_warn" >&2
+      printf '%s\n' "$full"; return 0
+    fi
+    if ! grep -q '^## Session Links' "$daily" \
+       && ! printf '\n## Session Links\n' >> "$daily" 2>/dev/null; then
+      printf '%s is unwritable; no session link\n' "$sl_warn" >&2
+      printf '%s\n' "$full"; return 0
+    fi
     # Link the note by its vault-relative path so it resolves from Daily/, with
     # the human title as an alias. Dedup on the path: two different notes can
     # share a title, and keying on title text dropped the second one's link.

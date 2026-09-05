@@ -50,14 +50,28 @@ obsidian_config_value() {
   cfg="$(resolve_obsidian_config "${2:-${CLAUDE_PLUGIN_ROOT:-}}")" || return 1
   # Bounded to the frontmatter block: the body of a config is prose that can
   # legitimately open a line with `vault_path:` inside an example, and the
-  # first such line would otherwise win. Surrounding quotes are stripped, so a
-  # YAML-quoted scalar ("0.2") reads as the number the writer meant.
+  # first such line would otherwise win.
+  #
+  # Three shapes of YAML noise are removed, because the hand-rolled readers
+  # this function replaces each removed a different subset and so disagreed
+  # about the same config: a trailing ` # comment`, surrounding quotes, and
+  # surrounding whitespace. The comment strip requires whitespace before the
+  # `#` — a bare one is part of the value, so a vault at /notes/#inbox keeps
+  # its name — and is skipped inside a quoted scalar, where `#` is literal.
   v="$(awk -v k="$key" '
     NR == 1 { fm = ($0 ~ /^---[[:space:]]*$/); if (fm) next }
     fm && $0 ~ /^---[[:space:]]*$/ { exit }
     index($0, k ":") == 1 {
-      sub(/^[^:]*:[[:space:]]*/, ""); sub(/[[:space:]]+$/, "")
-      if ($0 ~ /^".*"$/ || $0 ~ /^'"'"'.*'"'"'$/) { $0 = substr($0, 2, length($0) - 2) }
+      sub(/^[^:]*:[[:space:]]*/, "")
+      if ($0 ~ /^"[^"]*"/ || $0 ~ /^'"'"'[^'"'"']*'"'"'/) {
+        q = substr($0, 1, 1)
+        rest = substr($0, 2)
+        close_at = index(rest, q)
+        $0 = substr(rest, 1, close_at - 1)
+      } else {
+        sub(/[[:space:]]+#.*$/, "")
+        sub(/[[:space:]]+$/, "")
+      }
       print; exit
     }' "$cfg")"
   [ -n "$v" ] || return 1

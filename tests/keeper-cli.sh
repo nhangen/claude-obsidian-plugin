@@ -310,6 +310,27 @@ else
   STRAY="$(find "$V/Daily" -maxdepth 1 -name '*ktmp*' | wc -l | tr -d ' ')"
   [ "$STRAY" = "0" ] \
     || fail "$STRAY stray temp file(s) left in Daily/ after a failed session link"
+
+  # I11b: the same, for the day that has NO daily note yet — the shape the
+  # fixture above skips, and the one where the unguarded writes lived. Creating
+  # the note, appending the section and swapping are three separate writes;
+  # guarding only the last still aborts the insert after the note committed,
+  # which a caller reads as "not captured" for a capture that happened.
+  chmod 555 "$V/Daily"
+  set +e
+  bash "$KEEPER" insert --vault "$V" --target "Notes/2026-07-02-no-daily-yet.md" \
+    --body-file "$TMP/note.md" --title "No Daily Yet" --session-link-date 2026-07-02 \
+    >"$TMP/nodaily.out" 2>"$TMP/nodaily.err"
+  NODAILY_RC=$?
+  set -e
+  chmod 755 "$V/Daily"
+  [ "$NODAILY_RC" = "0" ] \
+    || fail "insert exited $NODAILY_RC after committing the note; a caller reads that as 'not captured'"
+  [ -f "$V/Notes/2026-07-02-no-daily-yet.md" ] || fail "insert did not write the note"
+  grep -qF "$V/Notes/2026-07-02-no-daily-yet.md" "$TMP/nodaily.out" \
+    || fail "insert printed no path for a note it committed"
+  grep -q 'no session link' "$TMP/nodaily.err" \
+    || fail "an uncreatable daily note was silent:"$'\n'"$(cat "$TMP/nodaily.err")"
 fi
 
 # 14. zsh portability — both subcommands clean under zsh (insert sources the substrate libs)

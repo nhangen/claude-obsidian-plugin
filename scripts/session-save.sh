@@ -20,7 +20,11 @@ if [ "$AUTO_SAVE" = "false" ]; then
   exit 0
 fi
 
-VAULT_PATH=$(grep '^vault_path:' "$CONFIG_FILE" | head -1 | sed 's/^vault_path:[[:space:]]*//')
+# The shared reader: this hook is the autosave path, and a config with a
+# trailing comment or quoted path parsed to a directory that does not exist,
+# which the guard below turns into a silent exit 0 — the session is simply
+# never saved, with nothing said.
+VAULT_PATH=$(OBSIDIAN_LOCAL_MD="$CONFIG_FILE" obsidian_config_value vault_path || true)
 if [ -z "$VAULT_PATH" ] || [ ! -d "$VAULT_PATH" ]; then
   exit 0
 fi

@@ -98,6 +98,27 @@ dedup_same_day "$TMP/t" 2026-06-29 keeper-cli '"0.2"' >/dev/null 2>"$TMP/quoted.
 grep -q 'unusable threshold argument' "$TMP/quoted.err" \
   || fail "a quoted threshold argument was passed through to awk:"$'\n'"$(cat "$TMP/quoted.err")"
 
+# An out-of-range value is unusable in the same way a non-numeric one is: 10
+# would disable the check, 0.4 is looser than the vault asked for, and either
+# way the config is wrong and the user should hear about it.
+OOR="$(OBSIDIAN_DEDUP_JACCARD_THRESHOLD=10 dedup_same_day "$TMP/t" 2026-06-29 keeper-cli 2>"$TMP/oor.err")"
+grep -q 'unusable dedup_jaccard_threshold' "$TMP/oor.err" \
+  || fail "an out-of-range threshold was accepted silently:"$'\n'"$(cat "$TMP/oor.err")"
+
+# The library resolves the vault threshold through its sibling resolve-config.sh.
+# If that file is missing the install is broken, not the config — and staying
+# quiet there means a vault that set 0.0 runs at 0.4, which is exactly the
+# twin-note failure #103 exists to prevent.
+ORPHAN="$TMP/orphan-lib"; mkdir -p "$ORPHAN"
+cp "$ROOT_DIR/scripts/lib/dedup-scan.sh" "$ORPHAN/"
+ORPHAN_ERR="$(HOME="$TMP/nohome" XDG_CONFIG_HOME="$TMP/noconfig" CLAUDE_PLUGIN_ROOT="" \
+  OBSIDIAN_LOCAL_MD="" OBSIDIAN_DEDUP_JACCARD_THRESHOLD="" \
+  bash -c ". '$ORPHAN/dedup-scan.sh'; dedup_same_day '$TMP/t' 2026-06-29 keeper-cli" 2>&1 >/dev/null)"
+case "$ORPHAN_ERR" in
+  *resolve-config.sh*) : ;;
+  *) fail "a missing resolve-config.sh sibling fell back to the default in silence: ${ORPHAN_ERR:-<empty>}" ;;
+esac
+
 # zsh cleanliness
 if command -v zsh >/dev/null 2>&1; then
   zsh -c ". '$ROOT_DIR/scripts/lib/dedup-scan.sh'; tokenize_slug a-2026-bb" >/dev/null 2>"$TMP/zerr" || { cat "$TMP/zerr" >&2; fail "dedup-scan broke under zsh"; }
