@@ -191,8 +191,14 @@ cmd_insert() {
   # differed from the stem produced two entries, the title one resolving to
   # nothing. Keep stderr: apply's coverage report is the only signal that the
   # slice is under-indexed.
-  local idx="$folder/INDEX.md"
-  [ -f "$idx" ] || printf '# %s Index\n' "$(basename "$folder")" > "$idx"
+  local idx="$folder/INDEX.md" iprep=1
+  # Guarded for the same reason as the Daily/ writes below: the note committed
+  # above, so aborting here under `set -e` reports "not captured" for a capture
+  # that happened. An INDEX.md that cannot be created (ENOSPC, or a directory
+  # sitting on the name) is a link failure, and a link failure is a warning.
+  if [ ! -f "$idx" ]; then
+    printf '# %s Index\n' "$(basename "$folder")" > "$idx" 2>/dev/null || iprep=0
+  fi
   . "$KEEPER_DIR/lib/note-hash.sh"
   . "$KEEPER_DIR/lib/vault-index.sh"
   # `|| true` alone made a failed link indistinguishable from a written one
@@ -205,13 +211,13 @@ cmd_insert() {
   # apply's stderr and still returns 0, so rc by itself would miss the common
   # shape (an unwritable INDEX.md).
   local link_rc=0 stem
-  vault_index_apply "$folder" "$idx" >/dev/null || link_rc=$?
+  [ "$iprep" = 1 ] && { vault_index_apply "$folder" "$idx" >/dev/null || link_rc=$?; }
   stem="$(basename "$target" .md)"
   # No dup_leaves argument: $stem is a bare basename, so vault_index_has_link
   # returns before it consults that set (the leaf IS the rel). Passing it meant
   # a second full recursive sweep of the folder per insert, duplicating the one
   # vault_index_apply just did.
-  if ! vault_index_has_link "$idx" "$stem"; then
+  if [ "$iprep" = 0 ] || ! vault_index_has_link "$idx" "$stem"; then
     printf 'keeper: warning — %s is written but is not linked from %s%s\n' \
       "$target" "${idx#"$vault_abs"/}" \
       "$([ "$link_rc" -eq 0 ] || printf ' (INDEX step failed, rc=%s)' "$link_rc")" >&2

@@ -327,10 +327,37 @@ else
   [ "$NODAILY_RC" = "0" ] \
     || fail "insert exited $NODAILY_RC after committing the note; a caller reads that as 'not captured'"
   [ -f "$V/Notes/2026-07-02-no-daily-yet.md" ] || fail "insert did not write the note"
-  grep -qF "$V/Notes/2026-07-02-no-daily-yet.md" "$TMP/nodaily.out" \
-    || fail "insert printed no path for a note it committed"
+  # The vault-relative suffix, not "$V/...": $TMPDIR is a symlink on macOS
+  # (/var -> /private/var) and keeper resolves it, so the absolute forms never
+  # match there and this arm failed on every run.
+  grep -qF "Notes/2026-07-02-no-daily-yet.md" "$TMP/nodaily.out" \
+    || fail "insert printed no path for a note it committed:"$'\n'"$(cat "$TMP/nodaily.out")"
   grep -q 'no session link' "$TMP/nodaily.err" \
     || fail "an uncreatable daily note was silent:"$'\n'"$(cat "$TMP/nodaily.err")"
+fi
+
+# I10b: the INDEX creation write is the third bare write after the note
+# commits. `[ -f "$idx" ] || printf ... > "$idx"` aborts under `set -e` when
+# INDEX.md cannot be created -- an INDEX.md that is a directory is the cheap
+# reproduction, ENOSPC the real one -- so insert exits 1 having written the
+# note, which callers read as "not captured". Same invariant as I10 and I11b.
+if [ "$(id -u)" = "0" ]; then
+  printf 'skip: unwritable-INDEX assertion (running as root)\n' >&2
+else
+  mkdir -p "$V/Blocked"
+  mkdir -p "$V/Blocked/INDEX.md"
+  set +e
+  bash "$KEEPER" insert --vault "$V" --target "Blocked/2026-07-03-blocked-index.md" \
+    --body-file "$TMP/note.md" --title "Blocked Index" \
+    >"$TMP/blockidx.out" 2>"$TMP/blockidx.err"
+  BLOCKIDX_RC=$?
+  set -e
+  [ "$BLOCKIDX_RC" = "0" ] \
+    || fail "the note committed, so insert must still exit 0 with an unusable INDEX; rc=$BLOCKIDX_RC"$'\n'"$(cat "$TMP/blockidx.err")"
+  [ -f "$V/Blocked/2026-07-03-blocked-index.md" ] || fail "insert did not write the note"
+  grep -q 'keeper: warning' "$TMP/blockidx.err" \
+    || fail "an unusable INDEX.md was silent:"$'\n'"$(cat "$TMP/blockidx.err")"
+  rmdir "$V/Blocked/INDEX.md" 2>/dev/null || true
 fi
 
 # 14. zsh portability — both subcommands clean under zsh (insert sources the substrate libs)
