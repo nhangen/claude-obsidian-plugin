@@ -35,13 +35,23 @@ echo "$FP" | grep -q 'scripts/keeper" insert' || fail "fast path missing keeper 
 [ "$(echo "$FP" | grep -n 'kspayload_validate' | head -1 | cut -d: -f1)" -lt \
   "$(echo "$FP" | grep -n 'scripts/keeper" insert' | head -1 | cut -d: -f1)" ] \
   || fail "gate ordering: kspayload_validate must precede keeper insert"
-# config sourcing must be real assignments inside the fast-path block, not
-# comments or bare variable references: $VAULT and the dedup threshold both
-# have to derive from $CONFIG
-echo "$FP" | grep -qE '^VAULT=.*vault_path.*"\$CONFIG"' \
-  || fail "fast path must assign VAULT from \$CONFIG vault_path"
-echo "$FP" | grep -qE '^THRESHOLD=.*dedup_jaccard_threshold.*"\$CONFIG"' \
-  || fail "fast path must read dedup_jaccard_threshold from \$CONFIG"
+# Config sourcing must be a real assignment inside the fast-path block, not a
+# comment or a bare variable reference: $VAULT has to come from the config, and
+# it now comes through obsidian_config_value — the one reader that bounds
+# itself to the frontmatter and strips YAML quotes, rather than a grep/sed of
+# $CONFIG open-coded here.
+echo "$FP" | grep -qE '^VAULT="\$\(obsidian_config_value vault_path\)"' \
+  || fail "fast path must assign VAULT via obsidian_config_value vault_path"
+echo "$FP" | grep -q 'resolve-config.sh"$' \
+  || fail "fast path must source resolve-config.sh to get obsidian_config_value"
+# The threshold is the scanner's to resolve (#103). Re-parsing it here is what
+# let the two disagree, so the fast path must NOT hand-roll it.
+echo "$FP" | grep -qE '^THRESHOLD=' \
+  && fail "fast path re-parses the threshold; dedup_same_day resolves it now"
+echo "$FP" | grep -qE 'dedup_same_day "[^"]*" "\$\(date \+%Y-%m-%d\)" "<slug>"$' \
+  || fail "fast path must call dedup_same_day without a threshold argument"
+echo "$FP" | grep -q '<vault_path>/' \
+  && fail "fast path left an unexpanded <vault_path> placeholder in a real command"
 echo "$FP" | grep -q -- '--vault "\$VAULT"' \
   || fail "keeper insert must consume the sourced \$VAULT"
 echo "PASS: sole-brain-save-conversation"

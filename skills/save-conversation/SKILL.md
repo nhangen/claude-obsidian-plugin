@@ -40,16 +40,18 @@ below; when in doubt, use the full procedure.
 **Steps:**
 ```bash
 CONFIG="$(bash "${CLAUDE_PLUGIN_ROOT}/scripts/lib/resolve-config.sh")"
-# read vault_path and dedup_jaccard_threshold from $CONFIG:
-VAULT="$(grep '^vault_path:' "$CONFIG" | head -1 | sed 's/^vault_path:[[:space:]]*//')"
-THRESHOLD="$(awk '/^dedup_jaccard_threshold:/ {print $2}' "$CONFIG")"
-THRESHOLD="${THRESHOLD:-0.4}"
+# One reader for config scalars: it bounds itself to the frontmatter and strips
+# YAML quotes, which hand-rolled greps here did not.
+. "${CLAUDE_PLUGIN_ROOT}/scripts/lib/resolve-config.sh"
+VAULT="$(obsidian_config_value vault_path)"
 # route: single keyword match against ## Project Taxonomy in $CONFIG → <target-folder>
 . "${CLAUDE_PLUGIN_ROOT}/scripts/lib/allowlist-validate.sh"
 allowlist_validate "<target-folder>" || exit 0   # refusal printed to stderr — surface it;
                                                  # a refusal naming /obsidian:setup is a config fault
 . "${CLAUDE_PLUGIN_ROOT}/scripts/lib/dedup-scan.sh"
-dedup_same_day "<vault_path>/<target-folder>" "$(date +%Y-%m-%d)" "<slug>" "$THRESHOLD"
+# No threshold argument: dedup_same_day reads the vault's
+# dedup_jaccard_threshold itself and falls back to 0.4.
+dedup_same_day "$VAULT/<target-folder>" "$(date +%Y-%m-%d)" "<slug>"
 # no output above → proceed
 ```
 

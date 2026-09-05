@@ -48,6 +48,13 @@ DEDUP_JACCARD_DEFAULT="0.4"
 #
 # An unusable value warns and falls back rather than reaching awk, where a
 # non-numeric threshold compares as 0 and matches the first note it sees.
+# A float in 0.0-1.0. Anything else compares as 0 inside awk and matches the
+# first note in the folder, so every path into dedup_same_day is checked — the
+# argument one included, since a caller can pass a quoted or malformed value.
+dedup_threshold_valid() {
+  printf '%s' "$1" | grep -qE '^(0(\.[0-9]+)?|1(\.0+)?|\.[0-9]+)$'
+}
+
 dedup_threshold() {
   local v="${OBSIDIAN_DEDUP_JACCARD_THRESHOLD:-}"
   if [ -z "$v" ] && [ -n "$_ds_lib_dir" ] && [ -f "$_ds_lib_dir/resolve-config.sh" ]; then
@@ -55,9 +62,7 @@ dedup_threshold() {
     v="$(obsidian_config_value dedup_jaccard_threshold || true)"
   fi
   if [ -z "$v" ]; then printf '%s\n' "$DEDUP_JACCARD_DEFAULT"; return 0; fi
-  if printf '%s' "$v" | grep -qE '^(0(\.[0-9]+)?|1(\.0+)?|\.[0-9]+)$'; then
-    printf '%s\n' "$v"; return 0
-  fi
+  if dedup_threshold_valid "$v"; then printf '%s\n' "$v"; return 0; fi
   printf 'dedup_same_day: unusable dedup_jaccard_threshold %s — using %s\n' \
     "$v" "$DEDUP_JACCARD_DEFAULT" >&2
   printf '%s\n' "$DEDUP_JACCARD_DEFAULT"
@@ -65,6 +70,11 @@ dedup_threshold() {
 
 dedup_same_day() {
   local folder="$1" date="$2" slug="$3" threshold="${4:-}"
+  if [ -n "$threshold" ] && ! dedup_threshold_valid "$threshold"; then
+    printf 'dedup_same_day: unusable threshold argument %s — using %s\n' \
+      "$threshold" "$DEDUP_JACCARD_DEFAULT" >&2
+    threshold=""
+  fi
   [ -n "$threshold" ] || threshold="$(dedup_threshold)"
   local f base score best_path="" best_score="0.00"
   while IFS= read -r f; do

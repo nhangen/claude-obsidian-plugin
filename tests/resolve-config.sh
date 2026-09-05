@@ -75,4 +75,28 @@ GOT=$(env XDG_CONFIG_HOME="$XDG" bash "$RESOLVER" --stable)
 [ "$GOT" = "$STABLE" ] || fail "case6 (--stable): got '$GOT' want '$STABLE'"
 PASS_COUNT=$((PASS_COUNT + 1))
 
-printf '%d/6 cases passed\n' "$PASS_COUNT"
+# ----- Case 7: obsidian_config_value reads frontmatter scalars -----
+# The reader dedup_same_day and ask-staleness both go through. It is bounded to
+# the frontmatter block (a config's prose can open a line with `vault_path:` in
+# an example) and strips YAML quotes, so a quoted number reads as the number.
+. "$RESOLVER"
+CV="$XDG/cfgvalue.md"
+mkdir -p "$(dirname "$CV")"
+printf -- '---\nvault_path: /vaults/main\ndedup_jaccard_threshold: "0.2"\nspaced:   0.5   \n---\n\nProse below the frontmatter:\nvault_path: /decoy\n' > "$CV"
+export OBSIDIAN_LOCAL_MD="$CV"
+[ "$(obsidian_config_value vault_path)" = "/vaults/main" ] \
+  || fail "case7: prose below the frontmatter answered ahead of it: '$(obsidian_config_value vault_path)'"
+[ "$(obsidian_config_value dedup_jaccard_threshold)" = "0.2" ] \
+  || fail "case7: a quoted scalar kept its quotes: '$(obsidian_config_value dedup_jaccard_threshold)'"
+[ "$(obsidian_config_value spaced)" = "0.5" ] \
+  || fail "case7: surrounding whitespace was not trimmed: '$(obsidian_config_value spaced)'"
+set +e; obsidian_config_value definitely_absent >/dev/null; RC=$?; set -e
+[ "$RC" -eq 1 ] || fail "case7: an absent key must return 1, got $RC"
+# A config with no frontmatter at all still reads, rather than going silent.
+printf 'vault_path: /nofm\n' > "$CV"
+[ "$(obsidian_config_value vault_path)" = "/nofm" ] \
+  || fail "case7: a config without frontmatter markers read as empty"
+unset OBSIDIAN_LOCAL_MD
+PASS_COUNT=$((PASS_COUNT + 1))
+
+printf '%d/7 cases passed\n' "$PASS_COUNT"

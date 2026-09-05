@@ -234,8 +234,25 @@ cmd_insert() {
     link="- [[$ltarget]]"
     [ "$title" = "$(basename "$target" .md)" ] || link="- [[$ltarget|$title]]"
     if ! grep -qF -- "[[$ltarget]]" "$daily" && ! grep -qF -- "[[$ltarget|" "$daily"; then
-      awk -v link="$link" '{print} /^## Session Links/ && !d {print link; d=1}' \
-        "$daily" > "$daily.ktmp" && mv "$daily.ktmp" "$daily"
+      # Stage and swap through the shared helper, which cleans the temp file up
+      # when the replace fails. `> "$daily.ktmp" && mv` left a stray .ktmp in
+      # the user's Daily/ folder on an unwritable note, and since the note
+      # itself committed above, the obvious retry then died on
+      # "target already exists". Warn and keep exit 0, like the INDEX link.
+      local dtmp
+      if dtmp="$(mktemp "$vault_abs/Daily/.ktmp-XXXXXX")"; then
+        if awk -v link="$link" '{print} /^## Session Links/ && !d {print link; d=1}' \
+             "$daily" > "$dtmp" && keeper_swap_or_clean "$dtmp" "$daily"; then
+          :
+        else
+          rm -f "$dtmp" 2>/dev/null || true
+          printf 'keeper: warning — %s is written but could not be linked into Daily/%s.md\n' \
+            "$target" "$sldate" >&2
+        fi
+      else
+        printf 'keeper: warning — %s is written but Daily/ is unwritable; no session link\n' \
+          "$target" >&2
+      fi
     fi
   fi
 

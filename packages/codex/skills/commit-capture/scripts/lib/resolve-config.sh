@@ -48,9 +48,17 @@ resolve_obsidian_config() {
 obsidian_config_value() {
   local key="$1" cfg v
   cfg="$(resolve_obsidian_config "${2:-${CLAUDE_PLUGIN_ROOT:-}}")" || return 1
+  # Bounded to the frontmatter block: the body of a config is prose that can
+  # legitimately open a line with `vault_path:` inside an example, and the
+  # first such line would otherwise win. Surrounding quotes are stripped, so a
+  # YAML-quoted scalar ("0.2") reads as the number the writer meant.
   v="$(awk -v k="$key" '
+    NR == 1 { fm = ($0 ~ /^---[[:space:]]*$/); if (fm) next }
+    fm && $0 ~ /^---[[:space:]]*$/ { exit }
     index($0, k ":") == 1 {
-      sub(/^[^:]*:[[:space:]]*/, ""); sub(/[[:space:]]+$/, ""); print; exit
+      sub(/^[^:]*:[[:space:]]*/, ""); sub(/[[:space:]]+$/, "")
+      if ($0 ~ /^".*"$/ || $0 ~ /^'"'"'.*'"'"'$/) { $0 = substr($0, 2, length($0) - 2) }
+      print; exit
     }' "$cfg")"
   [ -n "$v" ] || return 1
   printf '%s\n' "$v"

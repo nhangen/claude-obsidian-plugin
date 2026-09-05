@@ -54,7 +54,10 @@ printf -- '---\nvault_path: %s\ndedup_jaccard_threshold: 0.2\n---\n' "$TMP" > "$
 
 # Scrub the resolver's inputs for this one: the developer running the suite may
 # well have a real config, and the default-path assertion must not read it.
+# OBSIDIAN_LOCAL_MD and the env override are scrubbed too: either one set in
+# the developer's shell answers ahead of every path this case is pinning.
 [ -z "$(HOME="$TMP/nohome" XDG_CONFIG_HOME="$TMP/noconfig" CLAUDE_PLUGIN_ROOT="" \
+        OBSIDIAN_LOCAL_MD="" OBSIDIAN_DEDUP_JACCARD_THRESHOLD="" \
         dedup_same_day "$TMP/t" 2026-06-29 keeper-cli)" ] \
   || fail "with no config the arg-less call must use the 0.4 default"
 
@@ -80,6 +83,20 @@ grep -q 'unusable dedup_jaccard_threshold' "$TMP/bad.err" \
 printf -- '---\ndedup_jaccard_threshold: 1.0\n---\n' > "$TMP/off.md"
 [ -z "$(OBSIDIAN_LOCAL_MD="$TMP/off.md" dedup_same_day "$TMP/t" 2026-06-29 keeper-cli-plan)" ] \
   || fail "dedup_jaccard_threshold: 1.0 must disable the check"
+
+# An explicitly passed threshold is validated too. It bypasses dedup_threshold
+# entirely, and a non-numeric or quoted value compares as 0 inside awk — which
+# matches the first note in the folder rather than nothing.
+ARGBAD="$(dedup_same_day "$TMP/t" 2026-06-29 nothing-alike-at-all "not-a-number" 2>"$TMP/argbad.err")"
+[ -z "$ARGBAD" ] \
+  || fail "a non-numeric threshold argument matched a note: [$ARGBAD]"
+grep -q 'unusable threshold argument' "$TMP/argbad.err" \
+  || fail "a non-numeric threshold argument was swallowed:"$'\n'"$(cat "$TMP/argbad.err")"
+# A quoted float is rejected the same way and falls back to the resolved
+# default, rather than reaching awk as a 0 that matches anything.
+dedup_same_day "$TMP/t" 2026-06-29 keeper-cli '"0.2"' >/dev/null 2>"$TMP/quoted.err"
+grep -q 'unusable threshold argument' "$TMP/quoted.err" \
+  || fail "a quoted threshold argument was passed through to awk:"$'\n'"$(cat "$TMP/quoted.err")"
 
 # zsh cleanliness
 if command -v zsh >/dev/null 2>&1; then

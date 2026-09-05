@@ -224,14 +224,20 @@ bash "$KEEPER" insert --vault "$V" --target "Decisions/2026-06-29-dup.md" \
 grep -qxF -- '- [[Decisions/2026-06-29-dup|Other Note]]' "$DLY" \
   || fail "second same-titled note lost its Session Links entry:"$'\n'"$(cat "$DLY")"
 
-# I4b: re-linking the SAME note is still idempotent (dedup is per path, not per title).
-bash "$KEEPER" insert --vault "$V" --target "Decisions/2026-06-29-again.md" \
-  --body-file "$TMP/note.md" --title "Again" --session-link-date 2026-06-29 >/dev/null
-bash "$KEEPER" insert --vault "$V" --target "Decisions/2026-06-29-again.md" \
-  --body-file "$TMP/note.md" --title "Again" --session-link-date 2026-06-29 2>/dev/null \
-  && fail "insert must refuse to overwrite; I4b cannot test dedup this way"
-[ "$(grep -cF -- '[[Decisions/2026-06-29-again' "$DLY")" = "1" ] \
-  || fail "Session Links entry duplicated for one note"
+# I4b: the Session Links dedup is per path. A second insert of the same note
+#      cannot test it — the overwrite guard rejects that before the link step
+#      ever runs, so the assertion passed on the early abort rather than on the
+#      dedup. Seed the link into the daily note instead, which is the state a
+#      Syncthing round-trip or a hand-edit leaves, and let the insert reach the
+#      branch.
+awk '{print} /^## Session Links/ && !d {print "- [[Decisions/2026-06-29-seeded|Seeded]]"; d=1}' \
+  "$DLY" > "$DLY.seed" && mv "$DLY.seed" "$DLY"
+[ "$(grep -cF -- '[[Decisions/2026-06-29-seeded' "$DLY")" = "1" ] \
+  || fail "fixture precondition: the seeded link should appear exactly once"
+bash "$KEEPER" insert --vault "$V" --target "Decisions/2026-06-29-seeded.md" \
+  --body-file "$TMP/note.md" --title "Seeded" --session-link-date 2026-06-29 >/dev/null
+[ "$(grep -cF -- '[[Decisions/2026-06-29-seeded' "$DLY")" = "1" ] \
+  || fail "Session Links entry duplicated for a note the daily note already linked:"$'\n'"$(grep -F 'seeded' "$DLY")"
 
 # I5: malformed --session-link-date rejected
 bash "$KEEPER" insert --vault "$V" --target "Decisions/z.md" --body-file "$TMP/note.md" --session-link-date "2026/06/29" 2>/dev/null && fail "malformed session-link-date must fail"
@@ -275,6 +281,35 @@ else
   [ -f "$V/Locked/2026-06-29-orphan.md" ] || fail "insert did not write the note"
   grep -q 'not linked from' "$TMP/lock.err" \
     || fail "insert reported success on an unlinked note; stderr was:"$'\n'"$(cat "$TMP/lock.err")"
+fi
+
+# I11: a Daily/ note that cannot be replaced leaves no stray temp file behind,
+#      and says so. `> "$daily.ktmp" && mv` left a .ktmp in the user's Daily/
+#      folder on failure — and since the note itself commits first, the obvious
+#      retry then died on "target already exists" rather than re-linking.
+if [ "$(id -u)" = "0" ]; then
+  printf 'skip: unwritable-daily assertion (running as root ignores 0444)\n' >&2
+else
+  # The directory, not the file: rename(2) needs write permission on the
+  # directory, so a 0444 daily note is still replaceable and nothing fails.
+  LOCKDAY="$V/Daily/2026-07-01.md"
+  printf -- '---\ndate: 2026-07-01\n---\n\n## Session Links\n' > "$LOCKDAY"
+  chmod 555 "$V/Daily"
+  set +e
+  bash "$KEEPER" insert --vault "$V" --target "Notes/2026-07-01-locked-daily.md" \
+    --body-file "$TMP/note.md" --title "Locked Daily" --session-link-date 2026-07-01 \
+    >"$TMP/lockday.out" 2>"$TMP/lockday.err"
+  LOCKDAY_RC=$?
+  set -e
+  chmod 755 "$V/Daily"
+  [ "$LOCKDAY_RC" = "0" ] \
+    || fail "the note committed, so insert must still exit 0; rc=$LOCKDAY_RC"
+  [ -f "$V/Notes/2026-07-01-locked-daily.md" ] || fail "insert did not write the note"
+  grep -qE 'could not be linked into Daily|Daily/ is unwritable' "$TMP/lockday.err" \
+    || fail "an unlinkable daily note was silent:"$'\n'"$(cat "$TMP/lockday.err")"
+  STRAY="$(find "$V/Daily" -maxdepth 1 -name '*ktmp*' | wc -l | tr -d ' ')"
+  [ "$STRAY" = "0" ] \
+    || fail "$STRAY stray temp file(s) left in Daily/ after a failed session link"
 fi
 
 # 14. zsh portability — both subcommands clean under zsh (insert sources the substrate libs)
