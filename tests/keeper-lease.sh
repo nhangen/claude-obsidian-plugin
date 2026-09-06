@@ -88,4 +88,22 @@ grep -q "QUARANTINE"$'\t'"_vaultkeeper.sync-conflict" <<<"$OUT3" || fail "_vault
 [ "$(find "$V3/.vaultkeeper-quarantine" -name '*_vaultkeeper.sync-conflict*' 2>/dev/null | wc -l | tr -d ' ')" = "1" ] \
   || fail "_vaultkeeper .base conflict not preserved in quarantine"
 
+# keeper_live_hosts under zsh, against a claim dir holding zero claims. Same
+# defect keeper_vault_health carried: an unquoted glob aborts under zsh NOMATCH,
+# and `for ... in <glob>` is not exempt. keeper_elect calls this, so an empty
+# claim dir takes out election too. These libs are documented bash+zsh clean.
+if command -v zsh >/dev/null 2>&1; then
+  EMPTY_L="$TMP/zsh-empty-lease"; mkdir -p "$EMPTY_L"
+  set +e
+  ZLOUT="$(zsh -c ". '$ROOT_DIR/scripts/lib/note-hash.sh'; . '$ROOT_DIR/scripts/lib/keeper-lease.sh'; keeper_live_hosts '$EMPTY_L' 900" 2>"$TMP/zlh.err")"
+  ZLRC=$?
+  set -e
+  [ "$ZLRC" = "0" ] \
+    || fail "keeper_live_hosts aborted under zsh on a claim dir with no claims; rc=$ZLRC: $(cat "$TMP/zlh.err")"
+  [ -z "$ZLOUT" ] \
+    || fail "keeper_live_hosts should list nothing with no claims, printed: $ZLOUT"
+  grep -q 'no matches found' "$TMP/zlh.err" \
+    && fail "keeper_live_hosts still trips zsh NOMATCH on the claim glob"
+fi
+
 echo "PASS: keeper-lease"

@@ -14,8 +14,11 @@ keeper_claim_write() {
 keeper_live_hosts() {
   local dir="$1" max_age="${2:-}" now c host ts
   now="$(now_epoch)"
-  for c in "$dir"/.keeper-claim-*; do
-    [ -e "$c" ] || continue
+  # find, not a glob: zsh's NOMATCH aborts on an unmatched pattern and applies
+  # to `for ... in <glob>` like any other expansion, so an empty claim dir would
+  # take out keeper_elect with it. Matches keeper_vault_health's approach.
+  while IFS= read -r c; do
+    [ -n "$c" ] || continue
     host="${c##*/.keeper-claim-}"
     if [ -n "$max_age" ]; then
       ts="$(cat "$c" 2>/dev/null)"
@@ -23,7 +26,9 @@ keeper_live_hosts() {
       [ "$(( now - ts ))" -le "$max_age" ] || continue
     fi
     printf '%s\n' "$host"
-  done
+  done <<EOF
+$(find "$dir" -maxdepth 1 -name '.keeper-claim-*' 2>/dev/null)
+EOF
 }
 
 keeper_elect() {
