@@ -54,7 +54,8 @@ keeper_guard_target() {
 keeper_heading_has_sha() {
   awk -v sha="$2" '
     BEGIN { sha = tolower(sha); pat = "(^|[^0-9a-f])" sha "([^0-9a-f]|$)" }
-    $1 ~ /^##?#?#?#?#?$/ && NF > 1 && tolower($0) ~ pat { found = 1; exit }
+    /^```/ || /^~~~/ { in_fence = !in_fence; next }
+    !in_fence && $1 ~ /^##?#?#?#?#?$/ && NF > 1 && tolower($0) ~ pat { found = 1; exit }
     END { exit(found ? 0 : 1) }
   ' "$1"
 }
@@ -264,7 +265,7 @@ cmd_insert() {
       # itself committed above, the obvious retry then died on
       # "target already exists". Warn and keep exit 0, like the INDEX link.
       local dtmp
-      if dtmp="$(mktemp "$vault_abs/Daily/.ktmp-XXXXXX")"; then
+      if dtmp="$(mktemp "$vault_abs/Daily/.Daily-XXXXXX")"; then
         if awk -v link="$link" '{print} /^## Session Links/ && !d {print link; d=1}' \
              "$daily" > "$dtmp" && keeper_swap_or_clean "$dtmp" "$daily"; then
           :

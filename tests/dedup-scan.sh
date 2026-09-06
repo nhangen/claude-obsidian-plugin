@@ -104,6 +104,17 @@ grep -q 'unusable threshold argument' "$TMP/quoted.err" \
 OOR="$(OBSIDIAN_DEDUP_JACCARD_THRESHOLD=10 dedup_same_day "$TMP/t" 2026-06-29 keeper-cli 2>"$TMP/oor.err")"
 grep -q 'unusable dedup_jaccard_threshold' "$TMP/oor.err" \
   || fail "an out-of-range threshold was accepted silently:"$'\n'"$(cat "$TMP/oor.err")"
+OOR_FLOAT="$(OBSIDIAN_DEDUP_JACCARD_THRESHOLD=1.5 dedup_same_day "$TMP/t" 2026-06-29 keeper-cli 2>"$TMP/oor_f.err")"
+grep -q 'unusable dedup_jaccard_threshold' "$TMP/oor_f.err" \
+  || fail "a threshold > 1 was accepted silently:"$'\n'"$(cat "$TMP/oor_f.err")"
+OOR_NEG="$(OBSIDIAN_DEDUP_JACCARD_THRESHOLD=-0.5 dedup_same_day "$TMP/t" 2026-06-29 keeper-cli 2>"$TMP/oor_neg.err")"
+grep -q 'unusable dedup_jaccard_threshold' "$TMP/oor_neg.err" \
+  || fail "a negative threshold was accepted silently:"$'\n'"$(cat "$TMP/oor_neg.err")"
+
+# A leading-dot threshold (.5) is valid and must be accepted without warning.
+LEADING_DOT="$(OBSIDIAN_DEDUP_JACCARD_THRESHOLD=.5 dedup_same_day "$TMP/t" 2026-06-29 keeper-cli 2>"$TMP/dot.err")"
+[ ! -s "$TMP/dot.err" ] \
+  || fail "a leading-dot threshold (.5) was incorrectly rejected:"$'\n'"$(cat "$TMP/dot.err")"
 
 # The library resolves the vault threshold through its sibling resolve-config.sh.
 # If that file is missing the install is broken, not the config — and staying

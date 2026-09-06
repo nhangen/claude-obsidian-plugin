@@ -87,10 +87,17 @@ esac
 # The entrypoint must not let its own failure pass as a clean bill of health:
 # it runs under set -e with staleness_banner as its last command, so an abort
 # there exits 1 with no stdout — and stdout is the only channel the consumers
-# read ("if it prints a line, show it"). Pinned by inspection because nothing
-# reachable through this script can make the banner abort any more; that is the
-# property, and the guard is what preserves it.
-grep -q 'staleness_banner .*||' "${ROOT_DIR}/scripts/ask-staleness.sh" \
-  || fail "ask-staleness.sh no longer guards the banner call; a failed check would print nothing"
+# read ("if it prints a line, show it").
+FLIB="$TMP/fault-lib"; mkdir -p "$FLIB/lib"
+cp "${ROOT_DIR}/scripts/"*.sh "$FLIB/" 2>/dev/null || true
+cp "${ROOT_DIR}/scripts/lib/"*.sh "$FLIB/lib/"
+cat >> "$FLIB/lib/keeper-state.sh" <<'EOF'
+staleness_banner() { return 1; }
+EOF
+FAIL_BANNER="$(OBSIDIAN_LOCAL_MD="$MIN" bash "$FLIB/ask-staleness.sh")"
+case "$FAIL_BANNER" in
+  *"could not determine index freshness"*) : ;;
+  *) fail "a failed staleness_banner did not print the fallback banner; got: ${FAIL_BANNER:-<empty>}" ;;
+esac
 
 echo "PASS: ask-staleness"

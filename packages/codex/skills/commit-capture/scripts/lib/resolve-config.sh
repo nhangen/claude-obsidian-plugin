@@ -59,7 +59,7 @@ obsidian_config_value() {
   # `#` — a bare one is part of the value, so a vault at /notes/#inbox keeps
   # its name — and is skipped inside a quoted scalar, where `#` is literal.
   v="$(awk -v k="$key" '
-    NR == 1 { fm = ($0 ~ /^---[[:space:]]*$/); if (fm) next }
+    NR == 1 { if ($0 ~ /^---[[:space:]]*$/) { fm = 1; next } else { exit } }
     fm && $0 ~ /^---[[:space:]]*$/ { exit }
     index($0, k ":") == 1 {
       sub(/^[^:]*:[[:space:]]*/, "")

@@ -109,8 +109,14 @@ keeper_vault_health() {
   # and not this host's to report. A vault nobody has ever pointed the keeper at
   # must stay quiet.
   [ -d "$lease" ] || return 0
-  set -- "$lease"/.keeper-claim-*
-  [ -e "$1" ] || return 0
+  local has_claim=0 c
+  for c in "$lease"/.keeper-claim-*; do
+    if [ -e "$c" ]; then
+      has_claim=1
+      break
+    fi
+  done
+  [ "$has_claim" -eq 1 ] || return 0
 
   # Name the owner when the caller has sourced keeper-lease.sh; election is that
   # file's business, and a banner is not worth a second implementation of it.

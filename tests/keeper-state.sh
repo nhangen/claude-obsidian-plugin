@@ -218,4 +218,18 @@ keeper_record_scan "$DEF"
 [ -z "$(staleness_banner "$DEF" 900 "ml-1,mbp")" ] \
   || fail "a host with a fresh local scan was overruled by the vault digest"
 
+# When keeper-lease.sh is not sourced (keeper_elect not in scope), keeper_vault_health
+# still reports the health state without attributing the owner name.
+UNATTR_V="$TMP/unattr-vault"; mkdir -p "$UNATTR_V"
+keeper_claim_write "$UNATTR_V/.vaultkeeper" "ml-1"
+printf '# Librarian\n\nlast_scan: %s\nscan_status: INCOMPLETE\n' "$(now_epoch)" > "$UNATTR_V/Librarian.md"
+UNATTR_OUT="$(bash -c ". '$ROOT_DIR/scripts/lib/keeper-state.sh'; keeper_vault_health '$UNATTR_V' 900")"
+case "$UNATTR_OUT" in
+  *"last index scan faulted"*) : ;;
+  *) fail "unattributed keeper_vault_health failed to report faulted scan: ${UNATTR_OUT:-<empty>}" ;;
+esac
+case "$UNATTR_OUT" in
+  *owner:*) fail "unattributed keeper_vault_health unexpectedly included owner suffix: $UNATTR_OUT" ;;
+esac
+
 echo "PASS: keeper-state"
