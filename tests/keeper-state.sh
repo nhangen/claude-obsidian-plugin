@@ -232,4 +232,25 @@ case "$UNATTR_OUT" in
   *owner:*) fail "unattributed keeper_vault_health unexpectedly included owner suffix: $UNATTR_OUT" ;;
 esac
 
+# keeper_vault_health under zsh, with a lease dir holding zero claims. This is
+# the arm the glob rewrite needed and did not have: the UNATTR_V arm above runs
+# under bash, where an unmatched glob stays a literal and [ -e ] is simply
+# false, so it passes with the fix fully reverted. zsh's NOMATCH aborts instead,
+# and it applies to `for ... in <glob>` exactly as to any other expansion --
+# which is why swapping `set --` for a `for` loop did not fix anything. The
+# function must stay quiet on a vault nobody has pointed the keeper at.
+if command -v zsh >/dev/null 2>&1; then
+  EMPTY_V="$TMP/zsh-empty-vault"; mkdir -p "$EMPTY_V/.vaultkeeper"
+  set +e
+  ZOUT="$(zsh -c ". '$ROOT_DIR/scripts/lib/keeper-state.sh'; keeper_vault_health '$EMPTY_V' 900" 2>"$TMP/zvh.err")"
+  ZRC=$?
+  set -e
+  [ "$ZRC" = "0" ] \
+    || fail "keeper_vault_health aborted under zsh on a lease dir with no claims; rc=$ZRC: $(cat "$TMP/zvh.err")"
+  [ -z "$ZOUT" ] \
+    || fail "keeper_vault_health should stay quiet with no claims, printed: $ZOUT"
+  grep -q 'no matches found' "$TMP/zvh.err" \
+    && fail "keeper_vault_health still trips zsh NOMATCH on the claim glob"
+fi
+
 echo "PASS: keeper-state"

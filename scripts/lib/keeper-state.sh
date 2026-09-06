@@ -109,14 +109,12 @@ keeper_vault_health() {
   # and not this host's to report. A vault nobody has ever pointed the keeper at
   # must stay quiet.
   [ -d "$lease" ] || return 0
-  local has_claim=0 c
-  for c in "$lease"/.keeper-claim-*; do
-    if [ -e "$c" ]; then
-      has_claim=1
-      break
-    fi
-  done
-  [ "$has_claim" -eq 1 ] || return 0
+  # find, not a glob: zsh's NOMATCH aborts on an unmatched pattern, and it
+  # applies to `for ... in <glob>` exactly as to any other expansion -- so
+  # neither `set -- <glob>` nor a for-loop survives an empty lease dir there.
+  # These libs are documented bash+zsh clean (see scripts/keeper's header).
+  [ -n "$(find "$lease" -maxdepth 1 -name '.keeper-claim-*' -print -quit 2>/dev/null)" ] \
+    || return 0
 
   # Name the owner when the caller has sourced keeper-lease.sh; election is that
   # file's business, and a banner is not worth a second implementation of it.
