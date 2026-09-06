@@ -40,6 +40,44 @@ resolve_obsidian_config() {
   return 1
 }
 
+# Read a scalar `key: value` out of the resolved config's frontmatter. Echoes
+# the trimmed value; returns 1 when no config resolves or the key is absent, so
+# a caller can tell "unset" (use my default) from "set". Config keys documented
+# in a SKILL and written by setup were otherwise read by whichever call site
+# remembered to (#103) — dedup_jaccard_threshold reached none of its three.
+obsidian_config_value() {
+  local key="$1" cfg v
+  cfg="$(resolve_obsidian_config "${2:-${CLAUDE_PLUGIN_ROOT:-}}")" || return 1
+  # Bounded to the frontmatter block: the body of a config is prose that can
+  # legitimately open a line with `vault_path:` inside an example, and the
+  # first such line would otherwise win.
+  #
+  # Three shapes of YAML noise are removed, because the hand-rolled readers
+  # this function replaces each removed a different subset and so disagreed
+  # about the same config: a trailing ` # comment`, surrounding quotes, and
+  # surrounding whitespace. The comment strip requires whitespace before the
+  # `#` — a bare one is part of the value, so a vault at /notes/#inbox keeps
+  # its name — and is skipped inside a quoted scalar, where `#` is literal.
+  v="$(awk -v k="$key" '
+    NR == 1 { fm = ($0 ~ /^---[[:space:]]*$/); if (fm) next }
+    fm && $0 ~ /^---[[:space:]]*$/ { exit }
+    index($0, k ":") == 1 {
+      sub(/^[^:]*:[[:space:]]*/, "")
+      if ($0 ~ /^"[^"]*"/ || $0 ~ /^'"'"'[^'"'"']*'"'"'/) {
+        q = substr($0, 1, 1)
+        rest = substr($0, 2)
+        close_at = index(rest, q)
+        $0 = substr(rest, 1, close_at - 1)
+      } else {
+        sub(/[[:space:]]+#.*$/, "")
+        sub(/[[:space:]]+$/, "")
+      }
+      print; exit
+    }' "$cfg")"
+  [ -n "$v" ] || return 1
+  printf '%s\n' "$v"
+}
+
 # CLI mode: when executed directly (not sourced), print the resolved config
 # path on stdout and exit non-zero if none exists. `--stable` prints the
 # canonical stable path regardless of existence (used by the setup wizard to

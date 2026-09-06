@@ -36,7 +36,10 @@ keeper append --vault <path> --date <YYYY-MM-DD> ...   # --date → Daily/<date>
 - **`--target`** note path relative to the vault, OR **`--date`** which resolves
   to `Daily/<date>.md`. Exactly one required.
 - **`--section`** the heading line (e.g. `## 14:30 — Topic`). Optional; default
-  `## <HH:MM> — entry`.
+  `## <HH:MM> — entry`. A value with no `#` prefix is promoted to `## <value>`:
+  a section written as a paragraph is absent from Obsidian's outline and from
+  the heading-shaped `--skip-if-hash` gate (#100). An explicit prefix (`###`)
+  is kept, so the caller picks the level.
 - **`--body-file`** file holding the section body (use a file, not an argv blob,
   so multi-line markdown survives). Stdin if omitted.
 - **`--init-file`** content written ONLY when the target does not yet exist (the

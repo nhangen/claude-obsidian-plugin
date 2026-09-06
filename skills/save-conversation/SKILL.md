@@ -40,16 +40,24 @@ below; when in doubt, use the full procedure.
 **Steps:**
 ```bash
 CONFIG="$(bash "${CLAUDE_PLUGIN_ROOT}/scripts/lib/resolve-config.sh")"
-# read vault_path and dedup_jaccard_threshold from $CONFIG:
-VAULT="$(grep '^vault_path:' "$CONFIG" | head -1 | sed 's/^vault_path:[[:space:]]*//')"
-THRESHOLD="$(awk '/^dedup_jaccard_threshold:/ {print $2}' "$CONFIG")"
-THRESHOLD="${THRESHOLD:-0.4}"
+# One reader for config scalars: it bounds itself to the frontmatter and strips
+# YAML quotes, which hand-rolled greps here did not.
+. "${CLAUDE_PLUGIN_ROOT}/scripts/lib/resolve-config.sh"
+VAULT="$(obsidian_config_value vault_path)" || exit 0   # no vault_path → a config
+                                                        # fault; say so rather than
+                                                        # scanning /<target-folder>,
+                                                        # where find's 2>/dev/null
+                                                        # makes "no output" mean
+                                                        # "no duplicate" and the
+                                                        # agent files a twin note
 # route: single keyword match against ## Project Taxonomy in $CONFIG → <target-folder>
 . "${CLAUDE_PLUGIN_ROOT}/scripts/lib/allowlist-validate.sh"
 allowlist_validate "<target-folder>" || exit 0   # refusal printed to stderr — surface it;
                                                  # a refusal naming /obsidian:setup is a config fault
 . "${CLAUDE_PLUGIN_ROOT}/scripts/lib/dedup-scan.sh"
-dedup_same_day "<vault_path>/<target-folder>" "$(date +%Y-%m-%d)" "<slug>" "$THRESHOLD"
+# No threshold argument: dedup_same_day reads the vault's
+# dedup_jaccard_threshold itself and falls back to 0.4.
+dedup_same_day "$VAULT/<target-folder>" "$(date +%Y-%m-%d)" "<slug>"
 # no output above → proceed
 ```
 
@@ -340,11 +348,11 @@ Before writing a new note in the resolved target folder, check whether a same-da
 1. Source the shared scanner and call it:
 
        . "${CLAUDE_PLUGIN_ROOT}/scripts/lib/dedup-scan.sh"
-       dedup_same_day "<vault>/<target-folder>" "$(date +%Y-%m-%d)" "<proposed-slug>" "${dedup_jaccard_threshold:-0.4}"
+       dedup_same_day "<vault>/<target-folder>" "$(date +%Y-%m-%d)" "<proposed-slug>"
 
-   `dedup_same_day` globs today's notes in the folder, scores each slug's token Jaccard against the proposed slug (via the single `tokenize_slug`), and echoes `path<TAB>score` for the best match at or above the threshold, or nothing.
+   `dedup_same_day` globs today's notes in the folder, scores each slug's token Jaccard against the proposed slug (via the single `tokenize_slug`), and echoes `path<TAB>score` for the best match at or above the threshold, or nothing. Pass no threshold: the scanner reads the vault's `dedup_jaccard_threshold` itself and falls back to `0.4`. (A fourth argument still overrides it, as the fast path above does.)
 2. If it echoed a match, prompt the user (append vs new), as below.
-3. **If the highest score is ≥ 0.4**, treat as a likely match and prompt the user:
+3. **If step 1 echoed a match**, treat it as a likely match and prompt the user. (Do not re-test the score against `0.4`: the scanner has already applied the vault's threshold, and re-gating on the default here is what made a lowered `dedup_jaccard_threshold` a no-op even once it reached the scanner.)
    > Same-day note already exists: `<existing-path>` (similarity: `<score>`).
    > - **append** → add `## HH:MM — <new-topic>` section to the existing file
    > - **new** → write the proposed new file anyway
@@ -367,12 +375,12 @@ Before writing a new note in the resolved target folder, check whether a same-da
    etc. and recheck until the path is free, then pass the free path's folder as
    `folder_hint`. (Collisions only happen when two saves run within the same
    minute against the same slug.)
-6. **No match (highest < 0.4)**: skip the prompt and proceed with the keeper
-   INSERT (step 11, new file).
+6. **No match (step 1 echoed nothing)**: skip the prompt and proceed with the
+   keeper INSERT (step 11, new file).
 
 ### Threshold
 
-`0.4` is the default. Override per-vault by setting `dedup_jaccard_threshold: 0.5` (or any float 0.0–1.0) in `obsidian.local.md` frontmatter. Set to `0.0` to always prompt; set to `1.0` to disable the check.
+`0.4` is the default. Override per-vault by setting `dedup_jaccard_threshold: 0.5` (or any float 0.0–1.0) in `obsidian.local.md` frontmatter. Set to `0.0` to prompt on any same-day note; `1.0` prompts only on an identical slug. `dedup_same_day` resolves the setting itself, so every call site inherits it; a value that is not a float in that range is reported on stderr and the `0.4` default is used.
 
 ### Why
 

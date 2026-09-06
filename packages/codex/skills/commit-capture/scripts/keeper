@@ -42,6 +42,23 @@ keeper_guard_target() {
   esac
 }
 
+# Does any section heading in $1 name the sha $2? Heading-only (a context bullet
+# legitimately names other commits' shas) and position-independent: writers put
+# the sha at the head of the line ("## <sha> — msg") as often as at the end, and
+# an end-anchored match never fired for them (#101).
+#
+# awk, not a grep pipeline: `grep -E '^#' | grep -q` lets -q's early exit SIGPIPE
+# the first grep, which `set -o pipefail` then reports as a failed match.
+# Boundaries are hex-class rather than \b — BSD grep/awk do not carry \b — and
+# the compare is case-folded because the validator accepts [0-9a-fA-F].
+keeper_heading_has_sha() {
+  awk -v sha="$2" '
+    BEGIN { sha = tolower(sha); pat = "(^|[^0-9a-f])" sha "([^0-9a-f]|$)" }
+    $1 ~ /^##?#?#?#?#?$/ && NF > 1 && tolower($0) ~ pat { found = 1; exit }
+    END { exit(found ? 0 : 1) }
+  ' "$1"
+}
+
 # append a timestamped section to a dated note, creating it on absence.
 cmd_append() {
   local vault="" target="" date="" section="" body_file="" init_file="" skip_hash="" skip_given=0
@@ -84,7 +101,7 @@ cmd_append() {
       '') keeper_die "append: --skip-if-hash requires a value" ;;
       *[!0-9a-fA-F]*) keeper_die "append: --skip-if-hash must be a hex sha: $skip_hash" ;;
       *)
-        if [ -f "$full" ] && grep -qE "^#{1,6}[[:space:]].*[[:space:]]${skip_hash}[[:space:]]*\$" "$full"; then
+        if [ -f "$full" ] && keeper_heading_has_sha "$full" "$skip_hash"; then
           printf 'keeper: append skipped — %s already has a section for %s\n' "$target" "$skip_hash" >&2
           printf '%s\n' "$full"
           return 0
@@ -104,7 +121,20 @@ cmd_append() {
     fi
   fi
 
+  # --section names a section, so it is written as a heading (#100). Callers
+  # that pass a bare title ("Some title") had it land as a paragraph: content
+  # intact, but absent from Obsidian's outline, and invisible to the
+  # heading-shaped --skip-if-hash gate above, which would then let the same
+  # commit be captured twice. A value that already carries its own `#` prefix
+  # is kept verbatim, so a caller can choose the level.
+  case "$section" in *[![:space:]]*) : ;; *) section="" ;; esac   # blanks == none
   [ -n "$section" ] || section="## $(date +%H:%M) — entry"
+  section="${section#"${section%%[![:space:]]*}"}"                # trim indent
+  case "$section" in
+    '#'[[:space:]]*|'##'[[:space:]]*|'###'[[:space:]]*|\
+    '####'[[:space:]]*|'#####'[[:space:]]*|'######'[[:space:]]*) : ;;
+    *) section="## $section" ;;
+  esac
 
   local body
   if [ -n "$body_file" ]; then
@@ -161,18 +191,62 @@ cmd_insert() {
   # differed from the stem produced two entries, the title one resolving to
   # nothing. Keep stderr: apply's coverage report is the only signal that the
   # slice is under-indexed.
-  local idx="$folder/INDEX.md"
-  [ -f "$idx" ] || printf '# %s Index\n' "$(basename "$folder")" > "$idx"
+  local idx="$folder/INDEX.md" iprep=1
+  # Guarded for the same reason as the Daily/ writes below: the note committed
+  # above, so aborting here under `set -e` reports "not captured" for a capture
+  # that happened. An INDEX.md that cannot be created (ENOSPC, or a directory
+  # sitting on the name) is a link failure, and a link failure is a warning.
+  if [ ! -f "$idx" ]; then
+    printf '# %s Index\n' "$(basename "$folder")" > "$idx" 2>/dev/null || iprep=0
+  fi
   . "$KEEPER_DIR/lib/note-hash.sh"
   . "$KEEPER_DIR/lib/vault-index.sh"
-  vault_index_apply "$folder" "$idx" >/dev/null || true
+  # `|| true` alone made a failed link indistinguishable from a written one
+  # (#104): the note is committed before this runs, so insert still printed the
+  # path and exited 0 while nothing in the vault pointed at the note. Keep the
+  # exit status (the note IS written — failing here would tell the caller the
+  # opposite), but say on stderr what is missing.
+  #
+  # Check the link, not just apply's rc: a coverage defect is reported on
+  # apply's stderr and still returns 0, so rc by itself would miss the common
+  # shape (an unwritable INDEX.md).
+  local link_rc=0 stem
+  [ "$iprep" = 1 ] && { vault_index_apply "$folder" "$idx" >/dev/null || link_rc=$?; }
+  stem="$(basename "$target" .md)"
+  # No dup_leaves argument: $stem is a bare basename, so vault_index_has_link
+  # returns before it consults that set (the leaf IS the rel). Passing it meant
+  # a second full recursive sweep of the folder per insert, duplicating the one
+  # vault_index_apply just did.
+  if [ "$iprep" = 0 ] || ! vault_index_has_link "$idx" "$stem"; then
+    printf 'keeper: warning — %s is written but is not linked from %s%s\n' \
+      "$target" "${idx#"$vault_abs"/}" \
+      "$([ "$link_rc" -eq 0 ] || printf ' (INDEX step failed, rc=%s)' "$link_rc")" >&2
+  fi
 
   # Optional: link the note into Daily/<date> under ## Session Links.
   if [ -n "$sldate" ]; then
     local daily="$vault_abs/Daily/$sldate.md"
-    mkdir -p "$vault_abs/Daily"
-    [ -f "$daily" ] || printf -- '---\ndate: %s\ntags: [daily]\n---\n\n# %s\n' "$sldate" "$sldate" > "$daily"
-    grep -q '^## Session Links' "$daily" || printf '\n## Session Links\n' >> "$daily"
+    # Every write below is guarded, not just the swap at the end. Bare under
+    # `set -e` these abort the whole insert AFTER the note has committed, with
+    # nothing on stderr — and a caller reads a non-zero exit as "not captured",
+    # so a capture that did happen is reported as lost and the retry then dies
+    # on "target already exists". The note is written; a daily link that cannot
+    # be made is a warning, not a failure.
+    local sl_warn="keeper: warning — $target is written but Daily/$sldate.md"
+    if ! mkdir -p "$vault_abs/Daily" 2>/dev/null; then
+      printf '%s could not be created; no session link\n' "$sl_warn" >&2
+      printf '%s\n' "$full"; return 0
+    fi
+    if [ ! -f "$daily" ] \
+       && ! printf -- '---\ndate: %s\ntags: [daily]\n---\n\n# %s\n' "$sldate" "$sldate" > "$daily" 2>/dev/null; then
+      printf '%s could not be created; no session link\n' "$sl_warn" >&2
+      printf '%s\n' "$full"; return 0
+    fi
+    if ! grep -q '^## Session Links' "$daily" \
+       && ! printf '\n## Session Links\n' >> "$daily" 2>/dev/null; then
+      printf '%s is unwritable; no session link\n' "$sl_warn" >&2
+      printf '%s\n' "$full"; return 0
+    fi
     # Link the note by its vault-relative path so it resolves from Daily/, with
     # the human title as an alias. Dedup on the path: two different notes can
     # share a title, and keying on title text dropped the second one's link.
@@ -184,8 +258,25 @@ cmd_insert() {
     link="- [[$ltarget]]"
     [ "$title" = "$(basename "$target" .md)" ] || link="- [[$ltarget|$title]]"
     if ! grep -qF -- "[[$ltarget]]" "$daily" && ! grep -qF -- "[[$ltarget|" "$daily"; then
-      awk -v link="$link" '{print} /^## Session Links/ && !d {print link; d=1}' \
-        "$daily" > "$daily.ktmp" && mv "$daily.ktmp" "$daily"
+      # Stage and swap through the shared helper, which cleans the temp file up
+      # when the replace fails. `> "$daily.ktmp" && mv` left a stray .ktmp in
+      # the user's Daily/ folder on an unwritable note, and since the note
+      # itself committed above, the obvious retry then died on
+      # "target already exists". Warn and keep exit 0, like the INDEX link.
+      local dtmp
+      if dtmp="$(mktemp "$vault_abs/Daily/.ktmp-XXXXXX")"; then
+        if awk -v link="$link" '{print} /^## Session Links/ && !d {print link; d=1}' \
+             "$daily" > "$dtmp" && keeper_swap_or_clean "$dtmp" "$daily"; then
+          :
+        else
+          rm -f "$dtmp" 2>/dev/null || true
+          printf 'keeper: warning — %s is written but could not be linked into Daily/%s.md\n' \
+            "$target" "$sldate" >&2
+        fi
+      else
+        printf 'keeper: warning — %s is written but Daily/ is unwritable; no session link\n' \
+          "$target" >&2
+      fi
     fi
   fi
 

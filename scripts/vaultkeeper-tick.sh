@@ -204,5 +204,13 @@ if [ -n "$SCAN_FAULT" ]; then
 fi
 
 printf '%s\n' "$CAND" | surfacing_pending_transition "$VAULT"
-keeper_record_scan "$VAULT"
+# Guarded for the same reason as keeper_record_attempt above, and because
+# keeper-state.sh documents this call as checked: bare under `set -e` a failed
+# write aborts the tick here, after every shared write has already landed, so
+# the run reads as a crash rather than as the one thing it could not record.
+# The scan did complete; only the receipt is missing, and the banner's own
+# unreadable-state branch covers a host that cannot write its state.
+if ! keeper_record_scan "$VAULT"; then
+  printf 'vaultkeeper: scan complete but last_scan could not be recorded (cache dir unwritable)\n' >&2
+fi
 echo "vaultkeeper: scan complete ($HOST)"

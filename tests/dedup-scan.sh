@@ -31,6 +31,94 @@ echo "$hit" | grep -q '2026-06-28' && fail "other-day file wrongly matched"
 dedup_same_day "$TMP/f" 2026-06-29 zzz-no-such-topic 0.4 >/dev/null
 echo "ok: bare no-match dedup_same_day survived set -e" >/dev/null
 
+# The documented endpoints must be reachable. `0.0` means "prompt on any
+# same-day note" — it was unreachable while the best-so-far comparison was
+# folded into the threshold test and seeded at 0.00, so a zero-overlap slug
+# scored 0.00 and lost to the seed.
+mkdir -p "$TMP/zero"
+: > "$TMP/zero/2026-06-29-totally-different-subject.md"
+[ -n "$(dedup_same_day "$TMP/zero" 2026-06-29 unrelated-words-here 0.0)" ] \
+  || fail "dedup_jaccard_threshold 0.0 must prompt on any same-day note"
+[ -z "$(dedup_same_day "$TMP/zero" 2026-06-29 unrelated-words-here 0.4)" ] \
+  || fail "0.0 reachability must not make the default threshold match everything"
+
+# --- the per-vault threshold override actually reaches the scanner (#103) ---
+# `keeper-cli` vs `keeper-gui` scores 0.33: below the 0.4 default, above a
+# vault that lowered the bar. A config override that never arrives is invisible
+# in the result, which is how every call site ran at 0.4 while the vault said
+# otherwise.
+mkdir -p "$TMP/t"
+: > "$TMP/t/2026-06-29-keeper-gui.md"
+CFG="$TMP/obsidian.local.md"
+printf -- '---\nvault_path: %s\ndedup_jaccard_threshold: 0.2\n---\n' "$TMP" > "$CFG"
+
+# Scrub the resolver's inputs for this one: the developer running the suite may
+# well have a real config, and the default-path assertion must not read it.
+# OBSIDIAN_LOCAL_MD and the env override are scrubbed too: either one set in
+# the developer's shell answers ahead of every path this case is pinning.
+[ -z "$(HOME="$TMP/nohome" XDG_CONFIG_HOME="$TMP/noconfig" CLAUDE_PLUGIN_ROOT="" \
+        OBSIDIAN_LOCAL_MD="" OBSIDIAN_DEDUP_JACCARD_THRESHOLD="" \
+        dedup_same_day "$TMP/t" 2026-06-29 keeper-cli)" ] \
+  || fail "with no config the arg-less call must use the 0.4 default"
+
+hit="$(OBSIDIAN_LOCAL_MD="$CFG" dedup_same_day "$TMP/t" 2026-06-29 keeper-cli)"
+echo "$hit" | grep -q '2026-06-29-keeper-gui.md' \
+  || fail "the vault's dedup_jaccard_threshold override never reached the scanner: [$hit]"
+
+# an explicit argument still wins over the config
+[ -z "$(OBSIDIAN_LOCAL_MD="$CFG" dedup_same_day "$TMP/t" 2026-06-29 keeper-cli 0.4)" ] \
+  || fail "an explicit threshold argument must override the config"
+
+# a config value the scanner cannot use warns and falls back, rather than
+# reaching awk — where a non-numeric threshold compares as 0 and matches the
+# first note in the folder.
+printf -- '---\ndedup_jaccard_threshold: high\n---\n' > "$TMP/bad.md"
+BADOUT="$(OBSIDIAN_LOCAL_MD="$TMP/bad.md" dedup_same_day "$TMP/t" 2026-06-29 keeper-cli 2>"$TMP/bad.err")"
+[ -z "$BADOUT" ] || fail "an unusable threshold matched anyway: [$BADOUT]"
+grep -q 'unusable dedup_jaccard_threshold' "$TMP/bad.err" \
+  || fail "an unusable threshold was swallowed:"$'\n'"$(cat "$TMP/bad.err")"
+
+# a vault that raises the bar suppresses a match the default would have made
+: > "$TMP/t/2026-06-29-keeper-cli-design.md"
+printf -- '---\ndedup_jaccard_threshold: 1.0\n---\n' > "$TMP/off.md"
+[ -z "$(OBSIDIAN_LOCAL_MD="$TMP/off.md" dedup_same_day "$TMP/t" 2026-06-29 keeper-cli-plan)" ] \
+  || fail "dedup_jaccard_threshold: 1.0 must disable the check"
+
+# An explicitly passed threshold is validated too. It bypasses dedup_threshold
+# entirely, and a non-numeric or quoted value compares as 0 inside awk — which
+# matches the first note in the folder rather than nothing.
+ARGBAD="$(dedup_same_day "$TMP/t" 2026-06-29 nothing-alike-at-all "not-a-number" 2>"$TMP/argbad.err")"
+[ -z "$ARGBAD" ] \
+  || fail "a non-numeric threshold argument matched a note: [$ARGBAD]"
+grep -q 'unusable threshold argument' "$TMP/argbad.err" \
+  || fail "a non-numeric threshold argument was swallowed:"$'\n'"$(cat "$TMP/argbad.err")"
+# A quoted float is rejected the same way and falls back to the resolved
+# default, rather than reaching awk as a 0 that matches anything.
+dedup_same_day "$TMP/t" 2026-06-29 keeper-cli '"0.2"' >/dev/null 2>"$TMP/quoted.err"
+grep -q 'unusable threshold argument' "$TMP/quoted.err" \
+  || fail "a quoted threshold argument was passed through to awk:"$'\n'"$(cat "$TMP/quoted.err")"
+
+# An out-of-range value is unusable in the same way a non-numeric one is: 10
+# would disable the check, 0.4 is looser than the vault asked for, and either
+# way the config is wrong and the user should hear about it.
+OOR="$(OBSIDIAN_DEDUP_JACCARD_THRESHOLD=10 dedup_same_day "$TMP/t" 2026-06-29 keeper-cli 2>"$TMP/oor.err")"
+grep -q 'unusable dedup_jaccard_threshold' "$TMP/oor.err" \
+  || fail "an out-of-range threshold was accepted silently:"$'\n'"$(cat "$TMP/oor.err")"
+
+# The library resolves the vault threshold through its sibling resolve-config.sh.
+# If that file is missing the install is broken, not the config — and staying
+# quiet there means a vault that set 0.0 runs at 0.4, which is exactly the
+# twin-note failure #103 exists to prevent.
+ORPHAN="$TMP/orphan-lib"; mkdir -p "$ORPHAN"
+cp "$ROOT_DIR/scripts/lib/dedup-scan.sh" "$ORPHAN/"
+ORPHAN_ERR="$(HOME="$TMP/nohome" XDG_CONFIG_HOME="$TMP/noconfig" CLAUDE_PLUGIN_ROOT="" \
+  OBSIDIAN_LOCAL_MD="" OBSIDIAN_DEDUP_JACCARD_THRESHOLD="" \
+  bash -c ". '$ORPHAN/dedup-scan.sh'; dedup_same_day '$TMP/t' 2026-06-29 keeper-cli" 2>&1 >/dev/null)"
+case "$ORPHAN_ERR" in
+  *resolve-config.sh*) : ;;
+  *) fail "a missing resolve-config.sh sibling fell back to the default in silence: ${ORPHAN_ERR:-<empty>}" ;;
+esac
+
 # zsh cleanliness
 if command -v zsh >/dev/null 2>&1; then
   zsh -c ". '$ROOT_DIR/scripts/lib/dedup-scan.sh'; tokenize_slug a-2026-bb" >/dev/null 2>"$TMP/zerr" || { cat "$TMP/zerr" >&2; fail "dedup-scan broke under zsh"; }

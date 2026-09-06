@@ -93,7 +93,7 @@ deduped.)
 
    If routing confidence is low, do **not** commit silently — append an
    `[ask:where should this go?]` entry to `$VAULT_PATH/Pending.md` and ask the user once.
-2. **Dedup:** call the shared scanner — `dedup_same_day "<vault>/<folder>" "$(date +%Y-%m-%d)" "<slug>"`. If it echoes a `path<TAB>score`, surface that note and ask whether to append rather than file a duplicate — never silently merge.
+2. **Dedup:** call the shared scanner — `dedup_same_day "<vault>/<folder>" "$(date +%Y-%m-%d)" "<slug>"`. Pass no threshold: the scanner reads the vault's `dedup_jaccard_threshold` (default `0.4`) itself. If it echoes a `path<TAB>score`, surface that note and ask whether to append rather than file a duplicate — never silently merge.
 3. Write the note using the matching template in `$VAULT_PATH/Templates/`. Its
    INDEX link is written by step 5 (`vault_index_apply`), not by hand. Link
    session notes to the daily note under `## Session Links`. A domain MOC that

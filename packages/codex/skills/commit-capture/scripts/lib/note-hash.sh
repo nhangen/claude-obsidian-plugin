@@ -27,17 +27,23 @@ note_hash_valid() {
   [[ "$1" =~ ^[0-9]+:[0-9a-f]{64}$ ]]
 }
 
+# BSD stat spells mtime `-f %m`, GNU stat `-c %Y`. Probing by failure does not
+# separate them: GNU stat reads `-f` as "report the FILESYSTEM", so on Linux the
+# BSD probe SUCCEEDS and returns a block of filesystem stats. Every caller then
+# had a non-numeric mtime — vault_index_plan compared it with `-gt` and errored
+# per file, silently falling back to hashing every note it walked. So validate
+# the answer rather than trusting the exit status, and take whichever spelling
+# actually yields an epoch.
 file_mtime() {
   local mt
-  mt="$(stat -f %m "$1" 2>/dev/null)"
-  if [ -z "$mt" ]; then
-    mt="$(stat -c %Y "$1" 2>/dev/null)"
-  fi
-  if [ -z "$mt" ]; then
-    printf 'file_mtime: cannot stat %s\n' "$1" >&2
-    return 1
-  fi
-  printf '%s\n' "$mt"
+  for mt in "$(stat -f %m "$1" 2>/dev/null)" "$(stat -c %Y "$1" 2>/dev/null)"; do
+    case "$mt" in
+      ''|*[!0-9]*) continue ;;
+      *) printf '%s\n' "$mt"; return 0 ;;
+    esac
+  done
+  printf 'file_mtime: cannot stat %s\n' "$1" >&2
+  return 1
 }
 
 now_epoch() {

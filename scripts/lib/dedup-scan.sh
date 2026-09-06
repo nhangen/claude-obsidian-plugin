@@ -32,14 +32,72 @@ jaccard() {
   awk -v i="$inter" -v u="$uni" 'BEGIN{printf "%.2f\n", i/u}'
 }
 
+# Captured at source time — see the note in keeper-bootstrap.sh: zsh has no
+# BASH_SOURCE, and its `$0` only names the sourced file while it is being read.
+_ds_lib_dir="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd)" || _ds_lib_dir=""
+
+DEDUP_JACCARD_DEFAULT="0.4"
+
+# The threshold to score against when the caller passes none. Resolved here
+# rather than at each call site: the per-vault `dedup_jaccard_threshold`
+# override is documented and written by setup, but every caller fell back to
+# the library default instead of reading it, so a vault that set 0.0 silently
+# ran at 0.4 and re-enabled the twin-note failure the check exists to prevent
+# (#103). $OBSIDIAN_DEDUP_JACCARD_THRESHOLD overrides the config, for tests and
+# one-off runs.
+#
+# An unusable value warns and falls back rather than reaching awk, where a
+# non-numeric threshold compares as 0 and matches the first note it sees.
+# A float in 0.0-1.0. Anything else compares as 0 inside awk and matches the
+# first note in the folder, so every path into dedup_same_day is checked — the
+# argument one included, since a caller can pass a quoted or malformed value.
+dedup_threshold_valid() {
+  printf '%s' "$1" | grep -qE '^(0(\.[0-9]+)?|1(\.0+)?|\.[0-9]+)$'
+}
+
+dedup_threshold() {
+  local v="${OBSIDIAN_DEDUP_JACCARD_THRESHOLD:-}"
+  if [ -z "$v" ]; then
+    if [ -n "$_ds_lib_dir" ] && [ -f "$_ds_lib_dir/resolve-config.sh" ]; then
+      . "$_ds_lib_dir/resolve-config.sh"
+      v="$(obsidian_config_value dedup_jaccard_threshold || true)"
+    else
+      # Silence here reads as "the vault set no threshold", so a vault that set
+      # 0.0 would run at 0.4 — the twin-note failure #103 exists to prevent —
+      # with nothing said. The unusable-value path below is loud; this half has
+      # to be too. Same wording as allowlist-validate.sh and vault-scan.sh: the
+      # install is broken, not the config.
+      printf 'dedup_same_day: cannot read the vault threshold — %s/resolve-config.sh is missing; the install is broken, not the config. Using %s\n' \
+        "${_ds_lib_dir:-<lib dir unresolved>}" "$DEDUP_JACCARD_DEFAULT" >&2
+    fi
+  fi
+  if [ -z "$v" ]; then printf '%s\n' "$DEDUP_JACCARD_DEFAULT"; return 0; fi
+  if dedup_threshold_valid "$v"; then printf '%s\n' "$v"; return 0; fi
+  printf 'dedup_same_day: unusable dedup_jaccard_threshold %s — using %s\n' \
+    "$v" "$DEDUP_JACCARD_DEFAULT" >&2
+  printf '%s\n' "$DEDUP_JACCARD_DEFAULT"
+}
+
 dedup_same_day() {
-  local folder="$1" date="$2" slug="$3" threshold="${4:-0.4}"
+  local folder="$1" date="$2" slug="$3" threshold="${4:-}"
+  if [ -n "$threshold" ] && ! dedup_threshold_valid "$threshold"; then
+    printf 'dedup_same_day: unusable threshold argument %s — using %s\n' \
+      "$threshold" "$DEDUP_JACCARD_DEFAULT" >&2
+    threshold=""
+  fi
+  [ -n "$threshold" ] || threshold="$(dedup_threshold)"
   local f base score best_path="" best_score="0.00"
   while IFS= read -r f; do
     [ -n "$f" ] || continue
     base="$(basename "$f" .md)"; base="${base#"$date"-}"
     score="$(jaccard "$slug" "$base")"
-    if awk -v s="$score" -v t="$threshold" -v b="$best_score" 'BEGIN{exit !(s>=t && s>b)}'; then
+    # Two tests, not one. Folding "beats the best so far" into the threshold
+    # test seeded the comparison with best_score="0.00", so a 0.00 score could
+    # never win — and `dedup_jaccard_threshold: 0.0` is documented as "always
+    # prompt". That endpoint was unreachable, which went unnoticed while the
+    # override reached no call site at all (#103).
+    if awk -v s="$score" -v t="$threshold" 'BEGIN{exit !(s>=t)}' \
+       && { [ -z "$best_path" ] || awk -v s="$score" -v b="$best_score" 'BEGIN{exit !(s>b)}'; }; then
       best_score="$score"; best_path="$f"
     fi
   done < <(find "$folder" -maxdepth 1 -type f -name "$date-*.md" 2>/dev/null)
