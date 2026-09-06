@@ -39,6 +39,14 @@ entry = marketplace["plugins"][0]
 assert entry["name"] == "obsidian"
 assert entry["source"] == {"source": "local", "path": "./packages/codex"}
 
+# Vendor parity. The copies under packages/codex are maintained by hand — this
+# branch alone carried seven fixes across that boundary — and the installed
+# keeper is otherwise exercised only through shapes that predate them, so a
+# copy drifting back would go unnoticed without this.
+#
+# It lives HERE, above the `command -v codex` gate below, on purpose: drift is
+# most likely on a machine that has no codex CLI, and a parity check placed
+# after that gate never runs in exactly the environment it is meant to protect.
 for relative in (
     "commit-meta.sh",
     "keeper",
@@ -135,24 +143,5 @@ if env -u OBSIDIAN_LOCAL_MD XDG_CONFIG_HOME="$TMP/no-config" \
   fail "commit-meta succeeded without a configured vault"
 fi
 grep -q 'vault_path unresolved' "$TMP/missing.err" || fail "missing config failure was not truthful"
-
-# The vendored copies are maintained by hand: this PR alone carried six fixes
-# across the boundary. Nothing compared them, and the suite exercises the
-# installed keeper only through shapes that predate those fixes -- so a copy
-# drifting back would have gone unnoticed. Compare the bytes.
-for VENDORED in \
-  scripts/keeper \
-  scripts/lib/note-hash.sh \
-  scripts/lib/resolve-config.sh \
-  scripts/lib/vault-index.sh \
-  scripts/lib/commit-capture-parse.sh
-do
-  SRC="$ROOT_DIR/$VENDORED"
-  DST="$ROOT_DIR/packages/codex/skills/commit-capture/$VENDORED"
-  [ -f "$SRC" ] || fail "vendor parity: $VENDORED is missing from scripts/"
-  [ -f "$DST" ] || fail "vendor parity: $VENDORED is missing from the codex package"
-  cmp -s "$SRC" "$DST" \
-    || fail "vendor parity: packages/codex copy of $VENDORED has drifted from scripts/"
-done
 
 printf 'PASS: installed Codex manual commit-capture package\n'
