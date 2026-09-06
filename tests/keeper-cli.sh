@@ -155,6 +155,24 @@ bash "$KEEPER" append --vault "$V" --target "Notes/fenced.md" \
 [ "$(cat "$V/Notes/fenced.md")" != "$FENCE_BEFORE" ] \
   || fail "a heading inside a code fence suppressed the commit's capture"
 
+# 17f. fence tracking must distinguish the delimiter TYPE. A single boolean
+#      toggled by both ``` and ~~~ mis-tracks a note that mixes them -- which is
+#      exactly what a doc illustrating the capture format looks like -- leaving
+#      an illustrative heading readable as a real capture. The consequence is a
+#      false "already captured": insert exits 0, nothing is written, and there
+#      is no retry, so the commit is lost. 17e above covers only the balanced
+#      ``` case, which is why this survived.
+printf '%s\n' '```markdown' 'an example, shown as text:' '~~~' \
+  '## deadbee — illustrative only, not a real capture' '~~~' '```' \
+  > "$TMP/mixed.md"
+bash "$KEEPER" append --vault "$V" --target "Notes/mixed.md" \
+  --section '## 18:00 — init' --body-file "$TMP/mixed.md" >/dev/null
+MIXED_BEFORE="$(cat "$V/Notes/mixed.md")"
+bash "$KEEPER" append --vault "$V" --target "Notes/mixed.md" \
+  --section '## deadbee — real commit' --body-file "$TMP/b.md" --skip-if-hash deadbee >/dev/null
+[ "$(cat "$V/Notes/mixed.md")" != "$MIXED_BEFORE" ] \
+  || fail 'a heading inside mixed backtick/tilde fences was read as a real capture; the commit was silently dropped'
+
 # 18. a malformed --skip-if-hash fails loudly. Silently treating an unusable
 #     value as "no guard" turns a typo into a duplicate note, which is the
 #     failure this flag exists to prevent.

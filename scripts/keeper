@@ -54,8 +54,18 @@ keeper_guard_target() {
 keeper_heading_has_sha() {
   awk -v sha="$2" '
     BEGIN { sha = tolower(sha); pat = "(^|[^0-9a-f])" sha "([^0-9a-f]|$)" }
-    /^```/ || /^~~~/ { in_fence = !in_fence; next }
-    !in_fence && $1 ~ /^##?#?#?#?#?$/ && NF > 1 && tolower($0) ~ pat { found = 1; exit }
+    # Track the OPEN delimiter, not a bare toggle. A single boolean shared by
+    # ``` and ~~~ mis-reads a note that mixes them -- a doc illustrating this
+    # very format -- and an illustrative heading then scans as a real capture,
+    # which reports a commit as already captured and silently drops it.
+    # CommonMark: a fence closes only on the same char, at least as long.
+    /^(```+|~~~+)/ {
+      run = $0; sub(/[^`~].*$/, "", run); ch = substr(run, 1, 1); n = length(run)
+      if (fence_ch == "") { fence_ch = ch; fence_n = n }
+      else if (ch == fence_ch && n >= fence_n) { fence_ch = ""; fence_n = 0 }
+      next
+    }
+    fence_ch == "" && $1 ~ /^##?#?#?#?#?$/ && NF > 1 && tolower($0) ~ pat { found = 1; exit }
     END { exit(found ? 0 : 1) }
   ' "$1"
 }
