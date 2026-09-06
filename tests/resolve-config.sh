@@ -106,10 +106,11 @@ set +e; obsidian_config_value prose_only_key >/dev/null; RC=$?; set -e
   || fail "case7: a '#' inside the value was treated as a comment: '$(obsidian_config_value hashy)'"
 [ "$(obsidian_config_value quoted_comment)" = "0.3" ] \
   || fail "case7: a quoted scalar with a trailing comment: '$(obsidian_config_value quoted_comment)'"
-# A config with no frontmatter at all still reads, rather than going silent.
+# A config with no frontmatter markers at all must not scan arbitrary prose body.
 printf 'vault_path: /nofm\n' > "$CV"
-[ "$(obsidian_config_value vault_path)" = "/nofm" ] \
-  || fail "case7: a config without frontmatter markers read as empty"
+set +e; obsidian_config_value vault_path >/dev/null; RC=$?; set -e
+[ "$RC" -eq 1 ] \
+  || fail "case7: a config without opening frontmatter marker unexpectedly resolved: '$(obsidian_config_value vault_path)'"
 unset OBSIDIAN_LOCAL_MD
 PASS_COUNT=$((PASS_COUNT + 1))
 

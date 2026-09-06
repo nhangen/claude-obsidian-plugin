@@ -206,9 +206,13 @@ done
 FDCFG="$TMP/fdtick.local.md"; sed "s|^vault_path: .*|vault_path: $FDV|" "$CFG" > "$FDCFG"
 
 # 1. Shipped code, 64 fds: the tick completes and records the scan.
+# Uses /bin/bash when available (macOS system bash 3.2, where process substitution
+# in loops exhausted fds; under bash 5 it survives lower limits too).
+_FDBASH="/bin/bash"
+[ -x "$_FDBASH" ] || _FDBASH="bash"
 FD1="$TMP/fdtick-fixed.out"
 ( ulimit -n 64; OBSIDIAN_LOCAL_MD="$FDCFG" VAULTKEEPER_HOST="ml-1" \
-    bash "${ROOT_DIR}/scripts/vaultkeeper-tick.sh" >"$FD1" 2>&1 ) \
+    "$_FDBASH" "${ROOT_DIR}/scripts/vaultkeeper-tick.sh" >"$FD1" 2>&1 ) \
   || fail "the tick failed under ulimit -n 64; got: $(cat "$FD1")"
 grep -q 'scan complete' "$FD1" \
   || fail "the tick did not complete under ulimit -n 64; got: $(cat "$FD1")"
@@ -234,7 +238,7 @@ FDV2="$TMP/fdtickvault2"; cp -R "$FDV" "$FDV2"; rm -f "$FDV2/Librarian.md" "$FDV
 FDCFG2="$TMP/fdtick2.local.md"; sed "s|^vault_path: .*|vault_path: $FDV2|" "$CFG" > "$FDCFG2"
 FD2="$TMP/fdtick-old.out"
 ( ulimit -n 64; OBSIDIAN_LOCAL_MD="$FDCFG2" VAULTKEEPER_HOST="ml-1" \
-    bash "$FDS/vaultkeeper-tick.sh" >"$FD2" 2>&1 ) \
+    "$_FDBASH" "$FDS/vaultkeeper-tick.sh" >"$FD2" 2>&1 ) \
   || fail "the reverted-scanner tick aborted rather than reporting; got: $(cat "$FD2")"
 grep -q 'scan INCOMPLETE' "$FD2" \
   || fail "the pre-#49 scanner exhausted fds and the tick still called the scan complete — the gate does not see it: $(cat "$FD2")"

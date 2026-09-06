@@ -387,6 +387,7 @@ esac
 reset_state
 UP="$WORK/upstream.git"
 git init -q --bare "$UP"
+git -C "$UP" symbolic-ref HEAD refs/heads/main
 THEIRS="$WORK/theirs"
 mkrepo "$THEIRS" "$UP"
 git -C "$THEIRS" config user.email teammate@example.com
@@ -428,6 +429,7 @@ esac
 reset_state
 UP2="$WORK/upstream2.git"
 git init -q --bare "$UP2"
+git -C "$UP2" symbolic-ref HEAD refs/heads/main
 OTHER="$WORK/other-machine"
 mkrepo "$OTHER" "$UP2"
 git -C "$OTHER" config user.email me@example.com

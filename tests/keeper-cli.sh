@@ -145,6 +145,34 @@ bash "$KEEPER" append --vault "$V" --target "Notes/boundary.md" \
 grep -q '^## abc1234 — the commit we mean' "$V/Notes/boundary.md" \
   || fail "a heading for a longer sha with the same prefix suppressed a distinct commit"
 
+# 17e. fence tracking: a heading inside a code fence must not suppress capture.
+printf '%s\n' '```markdown' '## deadbee — some diff heading' '```' > "$TMP/fenced.md"
+bash "$KEEPER" append --vault "$V" --target "Notes/fenced.md" \
+  --section '## 18:00 — init' --body-file "$TMP/fenced.md" >/dev/null
+FENCE_BEFORE="$(cat "$V/Notes/fenced.md")"
+bash "$KEEPER" append --vault "$V" --target "Notes/fenced.md" \
+  --section '## deadbee — real commit' --body-file "$TMP/b.md" --skip-if-hash deadbee >/dev/null
+[ "$(cat "$V/Notes/fenced.md")" != "$FENCE_BEFORE" ] \
+  || fail "a heading inside a code fence suppressed the commit's capture"
+
+# 17f. fence tracking must distinguish the delimiter TYPE. A single boolean
+#      toggled by both ``` and ~~~ mis-tracks a note that mixes them -- which is
+#      exactly what a doc illustrating the capture format looks like -- leaving
+#      an illustrative heading readable as a real capture. The consequence is a
+#      false "already captured": insert exits 0, nothing is written, and there
+#      is no retry, so the commit is lost. 17e above covers only the balanced
+#      ``` case, which is why this survived.
+printf '%s\n' '```markdown' 'an example, shown as text:' '~~~' \
+  '## deadbee — illustrative only, not a real capture' '~~~' '```' \
+  > "$TMP/mixed.md"
+bash "$KEEPER" append --vault "$V" --target "Notes/mixed.md" \
+  --section '## 18:00 — init' --body-file "$TMP/mixed.md" >/dev/null
+MIXED_BEFORE="$(cat "$V/Notes/mixed.md")"
+bash "$KEEPER" append --vault "$V" --target "Notes/mixed.md" \
+  --section '## deadbee — real commit' --body-file "$TMP/b.md" --skip-if-hash deadbee >/dev/null
+[ "$(cat "$V/Notes/mixed.md")" != "$MIXED_BEFORE" ] \
+  || fail 'a heading inside mixed backtick/tilde fences was read as a real capture; the commit was silently dropped'
+
 # 18. a malformed --skip-if-hash fails loudly. Silently treating an unusable
 #     value as "no guard" turns a typo into a duplicate note, which is the
 #     failure this flag exists to prevent.
@@ -305,9 +333,9 @@ else
   [ "$LOCKDAY_RC" = "0" ] \
     || fail "the note committed, so insert must still exit 0; rc=$LOCKDAY_RC"
   [ -f "$V/Notes/2026-07-01-locked-daily.md" ] || fail "insert did not write the note"
-  grep -qE 'could not be linked into Daily|Daily/ is unwritable' "$TMP/lockday.err" \
-    || fail "an unlinkable daily note was silent:"$'\n'"$(cat "$TMP/lockday.err")"
-  STRAY="$(find "$V/Daily" -maxdepth 1 -name '*ktmp*' | wc -l | tr -d ' ')"
+  grep -q 'Daily/ is unwritable; no session link' "$TMP/lockday.err" \
+    || fail "an unwritable Daily/ directory was silent or gave wrong warning:"$'\n'"$(cat "$TMP/lockday.err")"
+  STRAY="$(find "$V/Daily" -maxdepth 1 -name '.Daily-*' | wc -l | tr -d ' ')"
   [ "$STRAY" = "0" ] \
     || fail "$STRAY stray temp file(s) left in Daily/ after a failed session link"
 
@@ -334,6 +362,25 @@ else
     || fail "insert printed no path for a note it committed:"$'\n'"$(cat "$TMP/nodaily.out")"
   grep -q 'no session link' "$TMP/nodaily.err" \
     || fail "an uncreatable daily note was silent:"$'\n'"$(cat "$TMP/nodaily.err")"
+
+  # I11c: swap failure on an existing daily note warns specifically about linking.
+  FSWAP="$TMP/fault-swap"; mkdir -p "$FSWAP/lib"
+  cp "${ROOT_DIR}/scripts/keeper" "$FSWAP/"
+  cp "${ROOT_DIR}/scripts/lib/"* "$FSWAP/lib/"
+  cat >> "$FSWAP/lib/note-hash.sh" <<'EOF'
+keeper_swap_or_clean() { rm -f "$1" 2>/dev/null; return 1; }
+EOF
+  set +e
+  bash "$FSWAP/keeper" insert --vault "$V" --target "Notes/2026-07-01-swap-fail.md" \
+    --body-file "$TMP/note.md" --title "Swap Fail" --session-link-date 2026-07-01 \
+    >"$TMP/swapfail.out" 2>"$TMP/swapfail.err"
+  SWAPFAIL_RC=$?
+  set -e
+  [ "$SWAPFAIL_RC" = "0" ] || fail "swap failure must exit 0; rc=$SWAPFAIL_RC"
+  grep -q 'could not be linked into Daily/2026-07-01.md' "$TMP/swapfail.err" \
+    || fail "a swap failure did not report could not be linked into Daily:"$'\n'"$(cat "$TMP/swapfail.err")"
+  STRAY="$(find "$V/Daily" -maxdepth 1 -name '.Daily-*' | wc -l | tr -d ' ')"
+  [ "$STRAY" = "0" ] || fail "$STRAY stray temp file(s) left after failed swap"
 fi
 
 # I10b: the INDEX creation write is the third bare write after the note
@@ -358,6 +405,23 @@ else
   grep -q 'keeper: warning' "$TMP/blockidx.err" \
     || fail "an unusable INDEX.md was silent:"$'\n'"$(cat "$TMP/blockidx.err")"
   rmdir "$V/Blocked/INDEX.md" 2>/dev/null || true
+
+  # I10c: when vault_index_apply returns a non-zero rc, insert reports the rc suffix.
+  FIDX="$TMP/fault-idx"; mkdir -p "$FIDX/lib"
+  cp "${ROOT_DIR}/scripts/keeper" "$FIDX/"
+  cp "${ROOT_DIR}/scripts/lib/"* "$FIDX/lib/"
+  cat >> "$FIDX/lib/vault-index.sh" <<'EOF'
+vault_index_apply() { return 42; }
+EOF
+  set +e
+  bash "$FIDX/keeper" insert --vault "$V" --target "Notes/2026-06-29-rc-fail.md" \
+    --body-file "$TMP/note.md" --title "RC Fail" \
+    >"$TMP/rcfail.out" 2>"$TMP/rcfail.err"
+  RCFAIL_RC=$?
+  set -e
+  [ "$RCFAIL_RC" = "0" ] || fail "INDEX apply failure must exit 0; rc=$RCFAIL_RC"
+  grep -q '(INDEX step failed, rc=42)' "$TMP/rcfail.err" \
+    || fail "non-zero vault_index_apply rc was not reported:"$'\n'"$(cat "$TMP/rcfail.err")"
 fi
 
 # 14. zsh portability — both subcommands clean under zsh (insert sources the substrate libs)
