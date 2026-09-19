@@ -1,0 +1,32 @@
+{
+  "initialize": {
+    "modern": "2026-07-28",
+    "compatibility": "2025-11-25",
+    "transport": "stdio"
+  },
+  "toolCalls": [
+    {
+      "name": "obsidian_find_notes",
+      "arguments": { "query": "MCP" },
+      "result": { "matches": [{ "path": "Projects/MCP.md", "preview": "MCP notes" }] }
+    },
+    {
+      "name": "obsidian_commit_meta",
+      "arguments": { "repository": "/vault/repository" },
+      "result": {
+        "repository": "/vault/repository",
+        "branch": "master",
+        "commit": "0123456789abcdef",
+        "subject": "Example commit",
+        "author": "user",
+        "timestamp": "2026-09-19T00:00:00Z"
+      }
+    }
+  ],
+  "errors": [
+    { "code": "INVALID_INPUT", "isError": true },
+    { "code": "SUBPROCESS_TIMEOUT", "isError": true },
+    { "code": "SUBPROCESS_OUTPUT_LIMIT", "isError": true }
+  ],
+  "writeStatuses": ["committed", "skipped", "conflicted", "failed"]
+}

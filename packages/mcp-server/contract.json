@@ -1,0 +1,146 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "contractVersion": "0.1.0",
+  "protocol": {
+    "sdk": "@modelcontextprotocol/server@2.0.0",
+    "modernRevision": "2026-07-28",
+    "compatibilityRevisions": ["2025-11-25"],
+    "node": ">=20",
+    "transports": {
+      "mvp": ["stdio"],
+      "planned": ["streamable-http"],
+      "compatibilityOnly": ["http+sse"]
+    }
+  },
+  "scopes": {
+    "stdio": ["vault:read"],
+    "streamableHttp": [],
+    "available": ["vault:read", "vault:write", "vault:admin"]
+  },
+  "limits": {
+    "searchResults": 5,
+    "previewCharacters": 240,
+    "toolOutputBytes": 65536,
+    "subprocessTimeoutMs": 5000
+  },
+  "tools": {
+    "obsidian_find_notes": {
+      "status": "mvp",
+      "readOnly": true,
+      "scope": "vault:read",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["query"],
+        "properties": {
+          "query": { "type": "string", "minLength": 1, "maxLength": 240 }
+        }
+      },
+      "resultSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["matches"],
+        "properties": {
+          "matches": {
+            "type": "array",
+            "maxItems": 5,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["path", "preview"],
+              "properties": {
+                "path": { "type": "string" },
+                "preview": { "type": "string", "maxLength": 240 }
+              }
+            }
+          }
+        }
+      },
+      "idempotency": "not-required-read-only",
+      "errors": ["INVALID_INPUT", "READ_FAILED", "SUBPROCESS_TIMEOUT", "SUBPROCESS_OUTPUT_LIMIT"]
+    },
+    "obsidian_commit_meta": {
+      "status": "mvp",
+      "readOnly": true,
+      "scope": "vault:read",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["repository"],
+        "properties": {
+          "repository": { "type": "string", "minLength": 1, "maxLength": 4096 }
+        }
+      },
+      "resultSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["repository", "branch", "commit", "subject", "author", "timestamp"],
+        "properties": {
+          "repository": { "type": "string" },
+          "branch": { "type": "string" },
+          "commit": { "type": "string" },
+          "subject": { "type": "string" },
+          "author": { "type": "string" },
+          "timestamp": { "type": "string" }
+        }
+      },
+      "idempotency": "not-required-read-only",
+      "errors": ["INVALID_INPUT", "METADATA_INCOMPLETE", "READ_FAILED", "SUBPROCESS_TIMEOUT", "SUBPROCESS_OUTPUT_LIMIT"]
+    }
+  },
+  "resources": {
+    "obsidian://taxonomy": {
+      "status": "planned-read-only",
+      "scope": "vault:read",
+      "privacy": "vault-structure",
+      "maxBytes": 65536
+    },
+    "obsidian://daily/{date}": {
+      "status": "planned-read-only",
+      "scope": "vault:read",
+      "privacy": "user-authored-content",
+      "maxBytes": 65536
+    },
+    "obsidian://librarian": {
+      "status": "planned-read-only",
+      "scope": "vault:read",
+      "privacy": "vault-index",
+      "maxBytes": 65536
+    },
+    "obsidian://pending": {
+      "status": "planned-read-only",
+      "scope": "vault:read",
+      "privacy": "workflow-state",
+      "maxBytes": 65536
+    }
+  },
+  "prompts": {
+    "obsidian_ask": {
+      "status": "planned-client-side",
+      "serverModel": false,
+      "scope": "vault:read",
+      "semantics": "Return bounded context for the client to apply its own prompt flow."
+    },
+    "reorganize_vault": {
+      "status": "excluded-from-mcp-mvp",
+      "serverModel": false,
+      "scope": "vault:admin",
+      "semantics": "Existing plugin workflow only until an explicit approval and write contract exist."
+    }
+  },
+  "writes": {
+    "mvp": false,
+    "requiredScopes": ["vault:write", "vault:admin"],
+    "statuses": ["committed", "skipped", "conflicted", "failed"],
+    "invariants": [
+      "Canonical containment rejects traversal and symlink escape.",
+      "A response never reports success for a partial or conflicted write.",
+      "Remote writes require authentication, explicit gating, and an idempotency key."
+    ]
+  },
+  "errors": {
+    "transport": "Use standard JSON-RPC/MCP errors.",
+    "tool": "Return isError=true with a stable code and bounded detail.",
+    "successBoundary": "Only validated, complete results may be reported as successful."
+  }
+}
