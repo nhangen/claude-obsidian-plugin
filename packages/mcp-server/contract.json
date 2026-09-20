@@ -27,7 +27,8 @@
     "toolOutputBytes": 65536,
     "subprocessTimeoutMs": 5000,
     "maxRepositoryPathCharacters": 4096,
-    "maxScanFiles": 10000,
+    "maxScanEntries": 10000,
+    "maxScanBytes": 67108864,
     "maxResourceBytes": 65536
   },
   "tools": {
@@ -72,6 +73,7 @@
       "readOnly": true,
       "scope": "repo:read",
       "privacy": "sanitized-git-metadata",
+      "repositoryRoots": "MCP_REPOSITORY_ROOTS, a path-delimited allowlist defaulting to the adapter repository root",
       "inputSchema": {
         "type": "object",
         "additionalProperties": false,
@@ -92,12 +94,11 @@
           "ticket": { "type": "string" },
           "date": { "type": "string" },
           "time": { "type": "string" },
-          "subject": { "type": "string" },
-          "repositoryPath": { "type": "string" }
+          "subject": { "type": "string" }
         }
       },
       "idempotency": "not-required-read-only",
-      "errors": ["INVALID_INPUT", "METADATA_INCOMPLETE", "READ_FAILED", "SUBPROCESS_TIMEOUT", "SUBPROCESS_OUTPUT_LIMIT"]
+      "errors": ["INVALID_INPUT", "PATH_INVALID", "METADATA_INCOMPLETE", "READ_FAILED", "SUBPROCESS_TIMEOUT", "SUBPROCESS_OUTPUT_LIMIT"]
     }
   },
   "resources": {
@@ -107,7 +108,7 @@
       "scope": "vault:read",
       "privacy": "vault-structure",
       "maxBytes": 65536,
-      "source": "resolved-config-with-vault-path-redacted"
+      "source": "allowlisted-project-taxonomy-table-only"
     },
     "obsidian://daily/{date}": {
       "status": "mvp",
@@ -176,7 +177,7 @@
   },
   "cancellation": {
     "notification": "notifications/cancelled",
-    "handlerSignal": "ServerContext.signal",
+    "handlerSignal": "ServerContext.mcpReq.signal",
     "response": "No successful tool response after cancellation.",
     "childProcess": "Terminate, await close, and escalate only if termination does not reap the child."
   }

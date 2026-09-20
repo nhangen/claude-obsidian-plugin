@@ -33,11 +33,18 @@ test("pins the initial read-only tool surface", () => {
 
 test("keeps future resources, prompts, and writes gated", () => {
   assert.ok(Object.values(contract.resources).every((resource) => resource.status === "mvp"));
+  assert.deepEqual(
+    fixtures.resources.map(({ uri }) => uri),
+    ["obsidian://taxonomy", "obsidian://daily/2026-09-20", "obsidian://librarian", "obsidian://pending"],
+  );
   assert.equal(contract.prompts.obsidian_ask.serverModel, false);
   assert.equal(contract.prompts.reorganize_vault.status, "excluded-from-mcp-mvp");
   assert.equal(contract.writes.mvp, false);
   assert.deepEqual(contract.writes.statuses, fixtures.writeStatuses);
   assert.ok(fixtures.errors.every(({ isError }) => isError === true));
-  assert.ok(contract.cancellation.handlerSignal.includes("signal"));
+  assert.ok(contract.cancellation.handlerSignal.includes("mcpReq.signal"));
+  assert.ok(contract.tools.obsidian_commit_meta.errors.includes("PATH_INVALID"));
+  assert.equal(contract.tools.obsidian_commit_meta.resultSchema.properties.repositoryPath, undefined);
+  assert.equal(contract.limits.maxScanEntries, 10000);
   assert.deepEqual(contract.errors.schema.required, ["code", "detail"]);
 });

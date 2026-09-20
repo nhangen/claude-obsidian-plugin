@@ -13,5 +13,10 @@ for t in "$ROOT_DIR"/*.sh; do
     echo "FAIL $(basename "$t")"; cat "$TMP"; fails=$(( fails + 1 ))
   fi
 done
+if (cd "$ROOT_DIR/../packages/mcp-server" && npm test && npm run build) >"$TMP" 2>&1; then
+  echo "ok   mcp-server"
+else
+  echo "FAIL mcp-server"; cat "$TMP"; fails=$(( fails + 1 ))
+fi
 [ "$fails" -eq 0 ] || { echo "$fails suite(s) failed"; exit 1; }
 echo "ALL PASS"

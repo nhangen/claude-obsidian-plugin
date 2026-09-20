@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { chmod, mkdtemp, mkdir, writeFile, rm } from "node:fs/promises";
+import { chmod, mkdtemp, mkdir, readFile, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { spawn } from "node:child_process";
@@ -83,6 +83,20 @@ function delay(milliseconds) {
   return new Promise((resolveDelay) => setTimeout(resolveDelay, milliseconds));
 }
 
+async function waitForFile(path, predicate, timeoutMs = 2_000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    try {
+      const contents = await readFile(path, "utf8");
+      if (predicate(contents)) return contents;
+    } catch {
+      // The marker is created by the child process under test.
+    }
+    await delay(25);
+  }
+  throw new Error(`timed out waiting for ${path}`);
+}
+
 test("stdio server exposes read-only tools with clean MCP framing", async (t) => {
   const fixture = await mkdtemp(join(tmpdir(), "mcp-stdio-"));
   const vault = join(fixture, "vault");
@@ -94,7 +108,7 @@ test("stdio server exposes read-only tools with clean MCP framing", async (t) =>
   await writeFile(join(vault, "Daily", "2026-09-20.md"), "# Daily\nA daily resource.\n");
   await writeFile(join(vault, "Librarian.md"), "# Librarian\nAn index resource.\n");
   await writeFile(join(vault, "Pending.md"), "# Pending\n- [ ] A pending item\n");
-  await writeFile(config, `---\nvault_path: "${vault}" # quoted config\ndaily_path: Daily/\n---\n`);
+  await writeFile(config, `---\nvault_path: "${vault}" # quoted config\ndaily_path: Daily/\napi_token: top-secret\n---\n\n# Obsidian Plugin Config\n\nVault is at \`${vault}\`.\n\n## Project Taxonomy\n\n| Domain | Vault path | Precedence | Notes |\n|--------|------------|------------|-------|\n| Development | Projects/Development/ | 10 | Code |\n`);
 
   const server = startServer(config);
   t.after(async () => {
@@ -112,7 +126,7 @@ test("stdio server exposes read-only tools with clean MCP framing", async (t) =>
       id: 1,
       method: "initialize",
       params: {
-        protocolVersion: "2026-07-28",
+        protocolVersion: "2025-11-25",
         capabilities: {},
         clientInfo: { name: "stdio-contract-test", version: "1.0.0" },
       },
@@ -122,6 +136,7 @@ test("stdio server exposes read-only tools with clean MCP framing", async (t) =>
   assert.equal(initialized.jsonrpc, "2.0");
   assert.equal(initialized.id, 1);
   assert.equal(typeof initialized.result?.serverInfo?.name, "string");
+  assert.equal(initialized.result?.protocolVersion, "2025-11-25");
   server.notification({ jsonrpc: "2.0", method: "notifications/initialized" });
 
   const tools = await server.request(
@@ -156,6 +171,20 @@ test("stdio server exposes read-only tools with clean MCP framing", async (t) =>
   );
   assert.equal(taxonomy.result.contents[0].mimeType, "text/plain");
   assert.doesNotMatch(taxonomy.result.contents[0].text, new RegExp(vault.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+  assert.doesNotMatch(taxonomy.result.contents[0].text, /top-secret/);
+  assert.match(taxonomy.result.contents[0].text, /Project Taxonomy/);
+
+  const librarian = await server.request(
+    { jsonrpc: "2.0", id: 51, method: "resources/read", params: { uri: "obsidian://librarian" } },
+    51,
+  );
+  assert.match(librarian.result.contents[0].text, /An index resource/);
+
+  const pending = await server.request(
+    { jsonrpc: "2.0", id: 52, method: "resources/read", params: { uri: "obsidian://pending" } },
+    52,
+  );
+  assert.match(pending.result.contents[0].text, /A pending item/);
 
   const daily = await server.request(
     { jsonrpc: "2.0", id: 6, method: "resources/read", params: { uri: "obsidian://daily/2026-09-20" } },
@@ -194,6 +223,18 @@ test("stdio server exposes read-only tools with clean MCP framing", async (t) =>
   assert.equal(typeof metadata.result?.structuredContent?.subject, "string");
   assert.doesNotMatch(metadata.result?.content?.[0]?.text ?? "", /vault_path=/);
 
+  const outOfScope = await server.request(
+    {
+      jsonrpc: "2.0",
+      id: 81,
+      method: "tools/call",
+      params: { name: "obsidian_commit_meta", arguments: { repository: tmpdir() } },
+    },
+    81,
+  );
+  assert.equal(outOfScope.result?.isError, true);
+  assert.equal(JSON.parse(outOfScope.result.content[0].text).code, "PATH_INVALID");
+
   const invalid = await server.request(
     {
       jsonrpc: "2.0",
@@ -204,7 +245,10 @@ test("stdio server exposes read-only tools with clean MCP framing", async (t) =>
     9,
   );
   assert.equal(invalid.result?.isError, true);
-  assert.match(invalid.result?.content?.[0]?.text ?? "", /Input validation error/);
+  const invalidPayload = JSON.parse(invalid.result.content[0].text);
+  assert.equal(invalidPayload.code, "INVALID_INPUT");
+  assert.equal(typeof invalidPayload.detail, "string");
+  assert.ok(invalidPayload.detail.length <= 240);
 
   server.notification({
     jsonrpc: "2.0",
@@ -238,13 +282,14 @@ test("cancellation stops active child work and shutdown reaps it", async (t) => 
   const vault = join(fixture, "vault");
   const config = join(fixture, "obsidian.local.md");
   const bin = join(fixture, "bin");
+  const marker = join(fixture, "git-marker");
   await mkdir(vault);
   await mkdir(bin);
-  await writeFile(join(bin, "git"), "#!/bin/sh\nsleep 4\nexit 0\n");
+  await writeFile(join(bin, "git"), "#!/bin/sh\nprintf '%s\\n' \"$$\" > \"$MCP_GIT_MARKER\"\nsleep 4\nexit 0\n");
   await chmod(join(bin, "git"), 0o755);
   await writeFile(config, `---\nvault_path: ${vault}\n---\n`);
 
-  const server = startServer(config, { PATH: `${bin}:${process.env.PATH}` });
+  const server = startServer(config, { PATH: `${bin}:${process.env.PATH}`, MCP_GIT_MARKER: marker });
   t.after(async () => {
     if (!server.child.killed) server.child.kill("SIGKILL");
     await Promise.race([once(server.child, "close").catch(() => {}), delay(500)]);
@@ -257,7 +302,7 @@ test("cancellation stops active child work and shutdown reaps it", async (t) => 
       id: 1,
       method: "initialize",
       params: {
-        protocolVersion: "2026-07-28",
+        protocolVersion: "2025-11-25",
         capabilities: {},
         clientInfo: { name: "cancellation-test", version: "1.0.0" },
       },
@@ -276,16 +321,84 @@ test("cancellation stops active child work and shutdown reaps it", async (t) => 
     2,
   );
   const pendingHandled = pending.catch(() => {});
+  const pidText = (await waitForFile(marker, (contents) => contents.trim().length > 0)).trim();
   await delay(100);
   server.notification({
     jsonrpc: "2.0",
     method: "notifications/cancelled",
     params: { requestId: 2, reason: "test cancellation" },
   });
-  await delay(500);
+  await delay(100);
   assert.equal(server.messages.some((message) => message.id === 2), false);
+  for (let attempt = 0; attempt < 40; attempt += 1) {
+    try {
+      process.kill(Number(pidText), 0);
+    } catch {
+      break;
+    }
+    await delay(25);
+  }
+  assert.throws(() => process.kill(Number(pidText), 0));
+  assert.equal(server.child.exitCode, null);
   server.child.stdin.end();
-  await Promise.race([once(server.child, "close"), delay(750)]);
-  assert.notEqual(server.child.exitCode, null);
+  await once(server.child, "close");
   await pendingHandled;
+});
+
+test("modern discovery and SIGTERM shutdown are covered separately", async (t) => {
+  const fixture = await mkdtemp(join(tmpdir(), "mcp-signal-"));
+  const vault = join(fixture, "vault");
+  const config = join(fixture, "obsidian.local.md");
+  const bin = join(fixture, "bin");
+  const marker = join(fixture, "git-marker");
+  await mkdir(vault);
+  await mkdir(bin);
+  await writeFile(join(bin, "git"), "#!/bin/sh\nprintf '%s\\n' \"$$\" > \"$MCP_GIT_MARKER\"\nsleep 4\nexit 0\n");
+  await chmod(join(bin, "git"), 0o755);
+  await writeFile(config, `---\nvault_path: ${vault}\n---\n`);
+
+  const server = startServer(config, { PATH: `${bin}:${process.env.PATH}`, MCP_GIT_MARKER: marker });
+  t.after(async () => {
+    if (!server.child.killed) server.child.kill("SIGKILL");
+    await Promise.race([once(server.child, "close").catch(() => {}), delay(500)]);
+    await rm(fixture, { recursive: true, force: true });
+  });
+
+  const discovery = await server.request(
+    {
+      jsonrpc: "2.0",
+      id: 0,
+      method: "server/discover",
+      params: {
+        _meta: {
+          "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+          "io.modelcontextprotocol/clientCapabilities": {},
+        },
+      },
+    },
+    0,
+  );
+  assert.ok(discovery.result, JSON.stringify(discovery));
+  assert.ok(discovery.result.supportedVersions.includes("2026-07-28"));
+
+  server.request(
+    {
+      jsonrpc: "2.0",
+      id: 2,
+      method: "tools/call",
+      params: {
+        _meta: {
+          "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+          "io.modelcontextprotocol/clientCapabilities": {},
+        },
+        name: "obsidian_commit_meta",
+        arguments: { repository: repositoryRoot },
+      },
+    },
+    2,
+  ).catch(() => {});
+  await waitForFile(marker, (contents) => contents.trim().length > 0);
+  server.child.kill("SIGTERM");
+  const [exitCode] = await once(server.child, "exit");
+  assert.equal(exitCode, 0);
 });

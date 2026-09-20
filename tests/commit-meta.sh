@@ -62,6 +62,15 @@ case "$OUT" in
 esac
 [ "$(field "$OUT" org_repo)" = "org/repo" ] || fail "no-port token remote: got $(field "$OUT" org_repo)"
 
+# URL query strings and fragments are not repository identity and must not carry
+# credentials into the persisted org_repo field.
+git -C "$R" remote set-url origin "https://github.com/org/repo.git?access_token=${SECRET}#fragment"
+OUT="$(run)"
+case "$OUT" in
+  *"$SECRET"*|*'?'*|*'#fragment'*) fail "remote query or fragment reached the record: $OUT" ;;
+esac
+[ "$(field "$OUT" org_repo)" = "org/repo" ] || fail "query-bearing remote: got $(field "$OUT" org_repo)"
+
 # A repository-controlled remote must not be able to create another record
 # field. The skill consumes the first field match, so accepting this value would
 # let the remote override the configured vault_path.

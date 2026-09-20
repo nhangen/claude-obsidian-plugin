@@ -13,7 +13,14 @@ npm start
 ```
 
 The server resolves `OBSIDIAN_LOCAL_MD` through the existing stable resolver.
-It does not start an HTTP listener or expose vault mutation tools.
+It does not start an HTTP listener or expose vault mutation tools. Repository
+metadata is limited to the adapter repository root by default; set the
+path-delimited `MCP_REPOSITORY_ROOTS` environment variable to approve additional
+local repository roots.
+
+The taxonomy resource returns only the project-taxonomy table. Tool arguments
+are validated inside the handlers so invalid input uses the stable structured
+error contract instead of leaking SDK validation text.
 
 The machine-readable contract is [`contract.json`](contract.json). Its fixture
 cases are in [`test/fixtures/contract-fixtures.json`](test/fixtures/contract-fixtures.json)
