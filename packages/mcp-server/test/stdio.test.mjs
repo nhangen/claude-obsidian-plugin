@@ -55,6 +55,7 @@ function startServer(configPath, extraEnv = {}) {
   return {
     child,
     stderr: () => stderr,
+    trailing: () => stdout,
     async request(message, id) {
       child.stdin.write(`${JSON.stringify(message)}\n`);
       for (;;) {
@@ -202,7 +203,8 @@ test("stdio server exposes read-only tools with clean MCP framing", async (t) =>
     },
     9,
   );
-  assert.equal(invalid.error?.code, -32602);
+  assert.equal(invalid.result?.isError, true);
+  assert.match(invalid.result?.content?.[0]?.text ?? "", /Input validation error/);
 
   server.notification({
     jsonrpc: "2.0",
@@ -227,6 +229,7 @@ test("stdio server exposes read-only tools with clean MCP framing", async (t) =>
   const [exitCode] = await once(server.child, "exit");
   assert.equal(exitCode, 0);
   assert.equal(server.messages.some((message) => message.parseFailure), false);
+  assert.equal(server.trailing(), "");
   assert.doesNotMatch(server.stderr(), /stdout|MCP message/i);
 });
 

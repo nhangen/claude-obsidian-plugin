@@ -65,7 +65,7 @@
         }
       },
       "idempotency": "not-required-read-only",
-      "errors": ["INVALID_INPUT", "READ_FAILED", "SUBPROCESS_TIMEOUT", "SUBPROCESS_OUTPUT_LIMIT"]
+      "errors": ["INVALID_INPUT", "READ_FAILED", "SCAN_LIMIT", "SUBPROCESS_TIMEOUT", "SUBPROCESS_OUTPUT_LIMIT"]
     },
     "obsidian_commit_meta": {
       "status": "mvp",
@@ -160,7 +160,7 @@
     ]
   },
   "errors": {
-    "codes": ["INVALID_INPUT", "PATH_INVALID", "READ_FAILED", "METADATA_INCOMPLETE", "SUBPROCESS_TIMEOUT", "SUBPROCESS_OUTPUT_LIMIT", "CANCELLED"],
+    "codes": ["INVALID_INPUT", "PATH_INVALID", "READ_FAILED", "SCAN_LIMIT", "METADATA_INCOMPLETE", "SUBPROCESS_TIMEOUT", "SUBPROCESS_OUTPUT_LIMIT", "CANCELLED"],
     "schema": {
       "type": "object",
       "additionalProperties": false,
