@@ -93,6 +93,7 @@ async function collectMarkdownFiles(root, current = root, files = [], signal) {
   const entries = await readdir(current, { withFileTypes: true });
   for (const entry of entries) {
     throwIfAborted(signal);
+    if (entry.name === ".obsidian") continue;
     const path = join(current, entry.name);
     if (entry.isDirectory()) {
       await collectMarkdownFiles(root, path, files, signal);
@@ -293,6 +294,7 @@ async function readResource(uri, variables, configuration, signal) {
   throwIfAborted(signal);
   if (uri.href === "obsidian://taxonomy") {
     const text = configuration.config.replace(/^vault_path:.*$/m, "vault_path: [redacted]");
+    if (Buffer.byteLength(text, "utf8") > maxResourceBytes) throw codedError("SUBPROCESS_OUTPUT_LIMIT", "resource exceeded output limit");
     return resourceResult(uri, text, "text/plain");
   }
   if (uri.href === "obsidian://librarian") {
