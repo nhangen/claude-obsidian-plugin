@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, writeFile, rm } from "node:fs/promises";
+import { chmod, mkdtemp, mkdir, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { spawn } from "node:child_process";
@@ -10,10 +10,10 @@ const packageRoot = resolve(dirname(new URL(import.meta.url).pathname), "..");
 const entrypoint = join(packageRoot, "src", "stdio.mjs");
 const repositoryRoot = resolve(packageRoot, "../..");
 
-function startServer(configPath) {
+function startServer(configPath, extraEnv = {}) {
   const child = spawn(process.execPath, [entrypoint], {
     cwd: tmpdir(),
-    env: { ...process.env, OBSIDIAN_LOCAL_MD: configPath },
+    env: { ...process.env, OBSIDIAN_LOCAL_MD: configPath, ...extraEnv },
     stdio: ["pipe", "pipe", "pipe"],
   });
   let stdout = "";
@@ -78,6 +78,10 @@ function startServer(configPath) {
   };
 }
 
+function delay(milliseconds) {
+  return new Promise((resolveDelay) => setTimeout(resolveDelay, milliseconds));
+}
+
 test("stdio server exposes read-only tools with clean MCP framing", async (t) => {
   const fixture = await mkdtemp(join(tmpdir(), "mcp-stdio-"));
   const vault = join(fixture, "vault");
@@ -85,7 +89,11 @@ test("stdio server exposes read-only tools with clean MCP framing", async (t) =>
   await mkdir(vault);
   await writeFile(join(vault, "mcp-note.md"), "# MCP note\nThis fixture is searchable.\n");
   await writeFile(join(vault, "other.md"), "# Other note\n");
-  await writeFile(config, `---\nvault_path: ${vault}\n---\n`);
+  await mkdir(join(vault, "Daily"));
+  await writeFile(join(vault, "Daily", "2026-09-20.md"), "# Daily\nA daily resource.\n");
+  await writeFile(join(vault, "Librarian.md"), "# Librarian\nAn index resource.\n");
+  await writeFile(join(vault, "Pending.md"), "# Pending\n- [ ] A pending item\n");
+  await writeFile(config, `---\nvault_path: "${vault}" # quoted config\ndaily_path: Daily/\n---\n`);
 
   const server = startServer(config);
   t.after(async () => {
@@ -103,7 +111,7 @@ test("stdio server exposes read-only tools with clean MCP framing", async (t) =>
       id: 1,
       method: "initialize",
       params: {
-        protocolVersion: "2025-11-25",
+        protocolVersion: "2026-07-28",
         capabilities: {},
         clientInfo: { name: "stdio-contract-test", version: "1.0.0" },
       },
@@ -121,34 +129,80 @@ test("stdio server exposes read-only tools with clean MCP framing", async (t) =>
   );
   const toolNames = tools.result.tools.map((tool) => tool.name);
   assert.deepEqual(toolNames.sort(), ["obsidian_commit_meta", "obsidian_find_notes"]);
+  const searchTool = tools.result.tools.find((tool) => tool.name === "obsidian_find_notes");
+  const metadataTool = tools.result.tools.find((tool) => tool.name === "obsidian_commit_meta");
+  assert.equal(searchTool.outputSchema.properties.matches.type, "array");
+  assert.equal(metadataTool.outputSchema.properties.commit.type, "string");
+
+  const resources = await server.request(
+    { jsonrpc: "2.0", id: 3, method: "resources/list", params: {} },
+    3,
+  );
+  assert.deepEqual(
+    resources.result.resources.map((resource) => resource.uri).sort(),
+    ["obsidian://librarian", "obsidian://pending", "obsidian://taxonomy"],
+  );
+
+  const resourceTemplates = await server.request(
+    { jsonrpc: "2.0", id: 4, method: "resources/templates/list", params: {} },
+    4,
+  );
+  assert.deepEqual(resourceTemplates.result.resourceTemplates.map((resource) => resource.uriTemplate), ["obsidian://daily/{date}"]);
+
+  const taxonomy = await server.request(
+    { jsonrpc: "2.0", id: 5, method: "resources/read", params: { uri: "obsidian://taxonomy" } },
+    5,
+  );
+  assert.equal(taxonomy.result.contents[0].mimeType, "text/plain");
+  assert.doesNotMatch(taxonomy.result.contents[0].text, new RegExp(vault.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+
+  const daily = await server.request(
+    { jsonrpc: "2.0", id: 6, method: "resources/read", params: { uri: "obsidian://daily/2026-09-20" } },
+    6,
+  );
+  assert.match(daily.result.contents[0].text, /A daily resource/);
 
   const search = await server.request(
     {
       jsonrpc: "2.0",
-      id: 3,
+      id: 7,
       method: "tools/call",
       params: { name: "obsidian_find_notes", arguments: { query: "MCP" } },
     },
-    3,
+    7,
   );
   assert.equal(search.result?.isError, false);
+  assert.equal(search.result?.structuredContent?.matches[0]?.path, "mcp-note.md");
   assert.match(search.result?.content?.[0]?.text ?? "", /mcp-note\.md/);
 
   const metadata = await server.request(
     {
       jsonrpc: "2.0",
-      id: 4,
+      id: 8,
       method: "tools/call",
       params: {
         name: "obsidian_commit_meta",
         arguments: { repository: repositoryRoot },
       },
     },
-    4,
+    8,
   );
   assert.equal(metadata.result?.isError, false);
-  assert.match(metadata.result?.content?.[0]?.text ?? "", /hash=/);
-  assert.match(metadata.result?.content?.[0]?.text ?? "", /vault_path=/);
+  assert.equal(metadata.result?.structuredContent?.repository, "nhangen/claude-obsidian-plugin");
+  assert.equal(typeof metadata.result?.structuredContent?.commit, "string");
+  assert.equal(typeof metadata.result?.structuredContent?.subject, "string");
+  assert.doesNotMatch(metadata.result?.content?.[0]?.text ?? "", /vault_path=/);
+
+  const invalid = await server.request(
+    {
+      jsonrpc: "2.0",
+      id: 9,
+      method: "tools/call",
+      params: { name: "obsidian_find_notes", arguments: { query: "x".repeat(241) } },
+    },
+    9,
+  );
+  assert.equal(invalid.error?.code, -32602);
 
   server.notification({
     jsonrpc: "2.0",
@@ -156,16 +210,16 @@ test("stdio server exposes read-only tools with clean MCP framing", async (t) =>
     params: { requestId: 999, reason: "contract test" },
   });
   const afterCancellation = await server.request(
-    { jsonrpc: "2.0", id: 5, method: "tools/list", params: {} },
-    5,
+    { jsonrpc: "2.0", id: 10, method: "tools/list", params: {} },
+    10,
   );
-  assert.equal(afterCancellation.id, 5);
+  assert.equal(afterCancellation.id, 10);
 
-  const invalid = await server.request(
-    { jsonrpc: "2.0", id: 6, method: "not-a-real-method", params: {} },
-    6,
+  const unknownMethod = await server.request(
+    { jsonrpc: "2.0", id: 11, method: "not-a-real-method", params: {} },
+    11,
   );
-  assert.equal(invalid.error?.code, -32601);
+  assert.equal(unknownMethod.error?.code, -32601);
   assert.equal(server.child.exitCode, null);
   assert.equal(server.messages.some((message) => message.parseFailure), false);
 
@@ -174,4 +228,61 @@ test("stdio server exposes read-only tools with clean MCP framing", async (t) =>
   assert.equal(exitCode, 0);
   assert.equal(server.messages.some((message) => message.parseFailure), false);
   assert.doesNotMatch(server.stderr(), /stdout|MCP message/i);
+});
+
+test("cancellation stops active child work and shutdown reaps it", async (t) => {
+  const fixture = await mkdtemp(join(tmpdir(), "mcp-cancel-"));
+  const vault = join(fixture, "vault");
+  const config = join(fixture, "obsidian.local.md");
+  const bin = join(fixture, "bin");
+  await mkdir(vault);
+  await mkdir(bin);
+  await writeFile(join(bin, "git"), "#!/bin/sh\nsleep 4\nexit 0\n");
+  await chmod(join(bin, "git"), 0o755);
+  await writeFile(config, `---\nvault_path: ${vault}\n---\n`);
+
+  const server = startServer(config, { PATH: `${bin}:${process.env.PATH}` });
+  t.after(async () => {
+    if (!server.child.killed) server.child.kill("SIGKILL");
+    await Promise.race([once(server.child, "close").catch(() => {}), delay(500)]);
+    await rm(fixture, { recursive: true, force: true });
+  });
+
+  await server.request(
+    {
+      jsonrpc: "2.0",
+      id: 1,
+      method: "initialize",
+      params: {
+        protocolVersion: "2026-07-28",
+        capabilities: {},
+        clientInfo: { name: "cancellation-test", version: "1.0.0" },
+      },
+    },
+    1,
+  );
+  server.notification({ jsonrpc: "2.0", method: "notifications/initialized" });
+
+  const pending = server.request(
+    {
+      jsonrpc: "2.0",
+      id: 2,
+      method: "tools/call",
+      params: { name: "obsidian_commit_meta", arguments: { repository: repositoryRoot } },
+    },
+    2,
+  );
+  const pendingHandled = pending.catch(() => {});
+  await delay(100);
+  server.notification({
+    jsonrpc: "2.0",
+    method: "notifications/cancelled",
+    params: { requestId: 2, reason: "test cancellation" },
+  });
+  await delay(500);
+  assert.equal(server.messages.some((message) => message.id === 2), false);
+  server.child.stdin.end();
+  await Promise.race([once(server.child, "close"), delay(750)]);
+  assert.notEqual(server.child.exitCode, null);
+  await pendingHandled;
 });
