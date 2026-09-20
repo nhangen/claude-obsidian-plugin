@@ -24,17 +24,20 @@ test("pins the initial read-only tool surface", () => {
   for (const tool of Object.values(contract.tools)) {
     assert.equal(tool.status, "mvp");
     assert.equal(tool.readOnly, true);
-    assert.equal(tool.scope, "vault:read");
     assert.equal(tool.idempotency, "not-required-read-only");
   }
+  assert.equal(contract.tools.obsidian_find_notes.scope, "vault:read");
+  assert.equal(contract.tools.obsidian_commit_meta.scope, "repo:read");
   assert.deepEqual(fixtures.toolCalls.map(({ name }) => name), Object.keys(contract.tools));
 });
 
 test("keeps future resources, prompts, and writes gated", () => {
-  assert.ok(Object.values(contract.resources).every((resource) => resource.status === "planned-read-only"));
+  assert.ok(Object.values(contract.resources).every((resource) => resource.status === "mvp"));
   assert.equal(contract.prompts.obsidian_ask.serverModel, false);
   assert.equal(contract.prompts.reorganize_vault.status, "excluded-from-mcp-mvp");
   assert.equal(contract.writes.mvp, false);
   assert.deepEqual(contract.writes.statuses, fixtures.writeStatuses);
   assert.ok(fixtures.errors.every(({ isError }) => isError === true));
+  assert.ok(contract.cancellation.handlerSignal.includes("signal"));
+  assert.deepEqual(contract.errors.schema.required, ["code", "detail"]);
 });

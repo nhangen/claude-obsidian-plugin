@@ -14,12 +14,15 @@
       "name": "obsidian_commit_meta",
       "arguments": { "repository": "/vault/repository" },
       "result": {
-        "repository": "/vault/repository",
+        "repository": "nhangen/example",
         "branch": "master",
         "commit": "0123456789abcdef",
+        "files": "README.md",
+        "ticket": "",
+        "date": "2026-09-20",
+        "time": "10:00",
         "subject": "Example commit",
-        "author": "user",
-        "timestamp": "2026-09-19T00:00:00Z"
+        "repositoryPath": "/vault/repository"
       }
     }
   ],

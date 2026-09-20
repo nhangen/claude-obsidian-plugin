@@ -10,24 +10,32 @@
       "mvp": ["stdio"],
       "planned": ["streamable-http"],
       "compatibilityOnly": ["http+sse"]
-    }
+    },
+    "clientMatrix": [
+      { "protocolRevision": "2026-07-28", "transport": "stdio", "status": "supported" },
+      { "protocolRevision": "2025-11-25", "transport": "stdio", "status": "compatibility" }
+    ]
   },
   "scopes": {
-    "stdio": ["vault:read"],
+    "stdio": ["vault:read", "repo:read"],
     "streamableHttp": [],
-    "available": ["vault:read", "vault:write", "vault:admin"]
+    "available": ["vault:read", "repo:read", "vault:write", "vault:admin"]
   },
   "limits": {
     "searchResults": 5,
     "previewCharacters": 240,
     "toolOutputBytes": 65536,
-    "subprocessTimeoutMs": 5000
+    "subprocessTimeoutMs": 5000,
+    "maxRepositoryPathCharacters": 4096,
+    "maxScanFiles": 10000,
+    "maxResourceBytes": 65536
   },
   "tools": {
     "obsidian_find_notes": {
       "status": "mvp",
       "readOnly": true,
       "scope": "vault:read",
+      "privacy": "vault-note-path-and-preview",
       "inputSchema": {
         "type": "object",
         "additionalProperties": false,
@@ -62,7 +70,8 @@
     "obsidian_commit_meta": {
       "status": "mvp",
       "readOnly": true,
-      "scope": "vault:read",
+      "scope": "repo:read",
+      "privacy": "sanitized-git-metadata",
       "inputSchema": {
         "type": "object",
         "additionalProperties": false,
@@ -74,14 +83,17 @@
       "resultSchema": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["repository", "branch", "commit", "subject", "author", "timestamp"],
+        "required": ["repository", "branch", "commit", "files", "ticket", "date", "time", "subject"],
         "properties": {
           "repository": { "type": "string" },
           "branch": { "type": "string" },
           "commit": { "type": "string" },
+          "files": { "type": "string" },
+          "ticket": { "type": "string" },
+          "date": { "type": "string" },
+          "time": { "type": "string" },
           "subject": { "type": "string" },
-          "author": { "type": "string" },
-          "timestamp": { "type": "string" }
+          "repositoryPath": { "type": "string" }
         }
       },
       "idempotency": "not-required-read-only",
@@ -90,28 +102,37 @@
   },
   "resources": {
     "obsidian://taxonomy": {
-      "status": "planned-read-only",
+      "status": "mvp",
+      "mimeType": "text/plain",
       "scope": "vault:read",
       "privacy": "vault-structure",
-      "maxBytes": 65536
+      "maxBytes": 65536,
+      "source": "resolved-config-with-vault-path-redacted"
     },
     "obsidian://daily/{date}": {
-      "status": "planned-read-only",
+      "status": "mvp",
+      "mimeType": "text/markdown",
       "scope": "vault:read",
       "privacy": "user-authored-content",
-      "maxBytes": 65536
+      "maxBytes": 65536,
+      "datePattern": "^\\d{4}-\\d{2}-\\d{2}$",
+      "source": "configured-daily-path"
     },
     "obsidian://librarian": {
-      "status": "planned-read-only",
+      "status": "mvp",
+      "mimeType": "text/markdown",
       "scope": "vault:read",
       "privacy": "vault-index",
-      "maxBytes": 65536
+      "maxBytes": 65536,
+      "source": "Librarian.md-at-vault-root"
     },
     "obsidian://pending": {
-      "status": "planned-read-only",
+      "status": "mvp",
+      "mimeType": "text/markdown",
       "scope": "vault:read",
       "privacy": "workflow-state",
-      "maxBytes": 65536
+      "maxBytes": 65536,
+      "source": "Pending.md-at-vault-root"
     }
   },
   "prompts": {
@@ -139,8 +160,24 @@
     ]
   },
   "errors": {
-    "transport": "Use standard JSON-RPC/MCP errors.",
+    "codes": ["INVALID_INPUT", "PATH_INVALID", "READ_FAILED", "METADATA_INCOMPLETE", "SUBPROCESS_TIMEOUT", "SUBPROCESS_OUTPUT_LIMIT", "CANCELLED"],
+    "schema": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "detail"],
+      "properties": {
+        "code": { "type": "string" },
+        "detail": { "type": "string", "maxLength": 240 }
+      }
+    },
+    "transport": "Use standard JSON-RPC/MCP errors for invalid requests and stable tool codes for execution failures.",
     "tool": "Return isError=true with a stable code and bounded detail.",
     "successBoundary": "Only validated, complete results may be reported as successful."
+  },
+  "cancellation": {
+    "notification": "notifications/cancelled",
+    "handlerSignal": "ServerContext.signal",
+    "response": "No successful tool response after cancellation.",
+    "childProcess": "Terminate, await close, and escalate only if termination does not reap the child."
   }
 }
