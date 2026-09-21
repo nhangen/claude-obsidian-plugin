@@ -412,7 +412,7 @@ const metadataOutput = z.strictObject({
 const searchInput = z.strictObject({ query: z.string().trim().min(1).max(240) });
 const metadataInput = z.strictObject({ repository: z.string().trim().min(1).max(maxRepositoryPathCharacters) });
 
-function createServer() {
+export function createServer() {
   const configuration = loadConfiguration();
   const server = new McpServer(
     { name: "claude-obsidian-mcp", version: "0.1.0" },
@@ -478,21 +478,25 @@ function createServer() {
   return server;
 }
 
-async function closeActiveChildren() {
+export async function closeActiveChildren() {
   await Promise.all([...activeChildren].map((child) => terminateChild(child)));
 }
 
-const handle = serveStdio(createServer, { onerror: (error) => stderr(error instanceof Error ? error.message : String(error)) });
-let shuttingDown = false;
-async function shutdown(exit = false) {
-  if (shuttingDown) return;
-  shuttingDown = true;
-  await closeActiveChildren();
-  await handle.close();
-  if (exit) process.exit(0);
+function startStdio() {
+  const handle = serveStdio(createServer, { onerror: (error) => stderr(error instanceof Error ? error.message : String(error)) });
+  let shuttingDown = false;
+  async function shutdown(exit = false) {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    await closeActiveChildren();
+    await handle.close();
+    if (exit) process.exit(0);
+  }
+
+  for (const signal of ["SIGINT", "SIGTERM"]) {
+    process.once(signal, () => void shutdown(true));
+  }
+  process.stdin.once("end", () => void shutdown(false));
 }
 
-for (const signal of ["SIGINT", "SIGTERM"]) {
-  process.once(signal, () => void shutdown(true));
-}
-process.stdin.once("end", () => void shutdown(false));
+if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) startStdio();

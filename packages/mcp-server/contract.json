@@ -7,19 +7,33 @@
     "compatibilityRevisions": ["2025-11-25"],
     "node": ">=20",
     "transports": {
-      "mvp": ["stdio"],
-      "planned": ["streamable-http"],
+      "mvp": ["stdio", "streamable-http"],
+      "planned": [],
       "compatibilityOnly": ["http+sse"]
     },
     "clientMatrix": [
       { "protocolRevision": "2026-07-28", "transport": "stdio", "status": "supported" },
-      { "protocolRevision": "2025-11-25", "transport": "stdio", "status": "compatibility" }
+      { "protocolRevision": "2025-11-25", "transport": "stdio", "status": "compatibility" },
+      { "protocolRevision": "2026-07-28", "transport": "streamable-http", "status": "supported" },
+      { "protocolRevision": "2025-11-25", "transport": "streamable-http", "status": "compatibility" }
     ]
   },
   "scopes": {
     "stdio": ["vault:read", "repo:read"],
-    "streamableHttp": [],
+    "streamableHttp": ["vault:read", "repo:read"],
     "available": ["vault:read", "repo:read", "vault:write", "vault:admin"]
+  },
+  "http": {
+    "path": "/mcp",
+    "defaultBind": "127.0.0.1",
+    "authentication": "HS256 bearer JWT on every request",
+    "requiredClaims": ["iss", "aud", "exp", "scope"],
+    "sessionMode": "stateful",
+    "methods": ["GET", "POST", "DELETE"],
+    "queryCredentials": false,
+    "hostAllowlist": "MCP_HTTP_ALLOWED_HOSTS",
+    "originAllowlist": "MCP_HTTP_ALLOWED_ORIGINS",
+    "tls": "Terminate TLS in a trusted reverse proxy for remote deployments."
   },
   "limits": {
     "searchResults": 5,
@@ -29,7 +43,11 @@
     "maxRepositoryPathCharacters": 4096,
     "maxScanEntries": 10000,
     "maxScanBytes": 67108864,
-    "maxResourceBytes": 65536
+    "maxResourceBytes": 65536,
+    "httpRequestBodyBytesDefault": 1048576,
+    "httpResponseBytesDefault": 1048576,
+    "httpConcurrentRequestsDefault": 16,
+    "httpRequestTimeoutMsDefault": 10000
   },
   "tools": {
     "obsidian_find_notes": {
