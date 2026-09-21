@@ -12,7 +12,8 @@ npm test
 npm start
 ```
 
-Authenticated Streamable HTTP uses stateful sessions at `/mcp`:
+Authenticated Streamable HTTP uses stateful sessions at `/mcp` for the
+compatibility revision `2025-11-25`:
 
 ```bash
 MCP_HTTP_JWT_SECRET='<at least 32 bytes>' \
@@ -34,9 +35,13 @@ URLs.
 
 `MCP_HTTP_MAX_BODY_BYTES` and `MCP_HTTP_MAX_RESPONSE_BYTES` default to 1 MiB.
 `MCP_HTTP_CONCURRENCY_LIMIT` defaults to 16, and
-`MCP_HTTP_REQUEST_TIMEOUT_MS` defaults to 10000. Host and Origin allowlists are
-checked before authentication and before any MCP handler runs. POST carries
-JSON-RPC, GET opens the session SSE stream, and DELETE closes the session.
+`MCP_HTTP_REQUEST_TIMEOUT_MS` defaults to 10000, and
+`MCP_HTTP_SESSION_TTL_MS` defaults to 15 minutes. Host and Origin allowlists
+are checked before authentication and before any MCP handler runs. POST carries
+JSON-RPC, GET opens the session SSE stream, and DELETE closes the session. The
+modern `2026-07-28` Streamable HTTP envelope remains planned because the pinned
+stateful adapter does not classify modern envelopes; it is not advertised as
+supported.
 
 The server resolves `OBSIDIAN_LOCAL_MD` through the existing stable resolver.
 The stdio entrypoint does not start an HTTP listener. Neither entrypoint exposes vault mutation tools. Repository

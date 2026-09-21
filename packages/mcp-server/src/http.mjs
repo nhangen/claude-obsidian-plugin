@@ -3,9 +3,10 @@ import { createServer as createHttpServer } from "node:http";
 import { WebStandardStreamableHTTPServerTransport, validateHostHeader } from "@modelcontextprotocol/server";
 import { closeActiveChildren, createServer } from "./stdio.mjs";
 
-const protocolVersions = ["2026-07-28", "2025-11-25"];
+const protocolVersions = ["2025-11-25"];
 const sessions = new Map();
 const activeRequests = new Set();
+const activeStreams = new Set();
 
 class HttpBoundaryError extends Error {
   constructor(status, code, message) {
@@ -64,6 +65,7 @@ function loadHttpConfiguration() {
     maxResponseBytes: integerSetting("MCP_HTTP_MAX_RESPONSE_BYTES", 1024 * 1024, 1024, 64 * 1024 * 1024),
     concurrencyLimit: integerSetting("MCP_HTTP_CONCURRENCY_LIMIT", 16, 1, 1024),
     requestTimeoutMs: integerSetting("MCP_HTTP_REQUEST_TIMEOUT_MS", 10_000, 100, 300_000),
+    sessionTtlMs: integerSetting("MCP_HTTP_SESSION_TTL_MS", 15 * 60 * 1000, 100, 24 * 60 * 60 * 1000),
   };
 }
 
@@ -89,10 +91,15 @@ function validateTransportBoundary(req, configuration) {
 }
 
 function decodeJwtSegment(segment) {
+  const bytes = decodeBase64url(segment);
+  return JSON.parse(bytes.toString("utf8"));
+}
+
+function decodeBase64url(segment) {
   if (!/^[A-Za-z0-9_-]+$/.test(segment)) throw new Error("invalid token");
   const bytes = Buffer.from(segment, "base64url");
   if (bytes.toString("base64url") !== segment) throw new Error("invalid token");
-  return JSON.parse(bytes.toString("utf8"));
+  return bytes;
 }
 
 function validateToken(req, configuration) {
@@ -110,7 +117,7 @@ function validateToken(req, configuration) {
     const claims = decodeJwtSegment(parts[1]);
     if (header?.alg !== "HS256" || (header.typ !== undefined && header.typ !== "JWT")) throw new Error("invalid token");
     const expected = createHmac("sha256", configuration.jwtSecret).update(`${parts[0]}.${parts[1]}`).digest();
-    const actual = Buffer.from(parts[2], "base64url");
+    const actual = decodeBase64url(parts[2]);
     if (actual.length !== expected.length || !timingSafeEqual(actual, expected)) throw new Error("invalid token");
     const now = Math.floor(Date.now() / 1000);
     if (claims?.iss !== configuration.jwtIssuer || claims?.aud !== configuration.jwtAudience) throw new Error("invalid token");
@@ -125,6 +132,7 @@ function validateToken(req, configuration) {
     return {
       fingerprint: createHash("sha256").update(token).digest("base64url"),
       scopes: new Set(scopes),
+      expiresAt: claims.exp * 1000,
     };
   } catch (error) {
     if (error instanceof HttpBoundaryError) throw error;
@@ -213,6 +221,7 @@ function enforceMessageScopes(message, auth) {
 function nodeHeaders(req) {
   const headers = new Headers();
   for (const [name, value] of Object.entries(req.headers)) {
+    if (["authorization", "cookie", "proxy-authorization", "proxy-authenticate", "set-cookie"].includes(name.toLowerCase())) continue;
     if (Array.isArray(value)) headers.set(name, value.join(", "));
     else if (value !== undefined) headers.set(name, value);
   }
@@ -228,7 +237,15 @@ function webRequest(req, requestUrl, body, signal) {
   });
 }
 
-function createSession() {
+function touchSession(session, configuration) {
+  if (!session.id || session.closed) return;
+  if (session.expiryTimer) clearTimeout(session.expiryTimer);
+  const deadline = Math.min(session.absoluteExpiresAt, Date.now() + configuration.sessionTtlMs);
+  session.expiryTimer = setTimeout(() => void closeSession(session), Math.max(1, deadline - Date.now()));
+  session.expiryTimer.unref?.();
+}
+
+function createSession(configuration, auth) {
   let session;
   const transport = new WebStandardStreamableHTTPServerTransport({
     sessionIdGenerator: randomUUID,
@@ -237,16 +254,31 @@ function createSession() {
     onsessioninitialized: (sessionId) => {
       session.id = sessionId;
       sessions.set(sessionId, session);
+      touchSession(session, configuration);
     },
     onsessionclosed: (sessionId) => {
       sessions.delete(sessionId);
+      session.closed = true;
+      if (session.expiryTimer) clearTimeout(session.expiryTimer);
+      session.expiryTimer = undefined;
     },
   });
-  session = { id: undefined, fingerprint: undefined, server: createServer(), transport };
+  session = {
+    id: undefined,
+    fingerprint: auth.fingerprint,
+    absoluteExpiresAt: auth.expiresAt,
+    expiryTimer: undefined,
+    closed: false,
+    server: createServer({ supportedProtocolVersions: protocolVersions }),
+    transport,
+  };
   return session;
 }
 
 async function closeSession(session) {
+  if (session.closed) return;
+  session.closed = true;
+  if (session.expiryTimer) clearTimeout(session.expiryTimer);
   if (session.id) sessions.delete(session.id);
   await session.transport.close().catch(() => {});
   await session.server.close().catch(() => {});
@@ -260,21 +292,69 @@ async function transportResponse(session, request, parsedBody, timeoutMs, contro
       reject(new HttpBoundaryError(408, -32008, "Request timed out"));
     }, timeoutMs);
   });
+  const abortSession = () => {
+    if (request.method !== "GET") void closeSession(session);
+  };
+  controller.signal.addEventListener("abort", abortSession, { once: true });
   try {
     return await Promise.race([session.transport.handleRequest(request, { parsedBody }), timeout]);
   } finally {
     clearTimeout(timer);
+    controller.signal.removeEventListener("abort", abortSession);
+    if (controller.signal.aborted && request.method !== "GET") await closeSession(session);
   }
 }
 
-async function collectResponseBody(response, maximumBytes) {
+function readResponseChunk(reader, signal) {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const onAbort = () => {
+      void reader.cancel().catch(() => {});
+      settle(reject, new HttpBoundaryError(408, -32008, "Request timed out"));
+    };
+    const cleanup = () => signal?.removeEventListener("abort", onAbort);
+    const settle = (callback, value) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      callback(value);
+    };
+    signal?.addEventListener("abort", onAbort, { once: true });
+    reader.read().then(
+      (value) => settle(resolve, value),
+      (error) => settle(reject, error),
+    );
+  });
+}
+
+function waitForDrain(res, signal) {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const cleanup = () => {
+      res.off("drain", onDrain);
+      signal?.removeEventListener("abort", onAbort);
+    };
+    const settle = (callback, value) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      callback(value);
+    };
+    const onDrain = () => settle(resolve);
+    const onAbort = () => settle(reject, new HttpBoundaryError(408, -32008, "Request timed out"));
+    res.once("drain", onDrain);
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
+async function collectResponseBody(response, maximumBytes, signal) {
   if (!response.body) return Buffer.alloc(0);
   const reader = response.body.getReader();
   const chunks = [];
   let size = 0;
   try {
     for (;;) {
-      const { done, value } = await reader.read();
+      const { done, value } = await readResponseChunk(reader, signal);
       if (done) break;
       size += value.byteLength;
       if (size > maximumBytes) throw new HttpBoundaryError(500, -32603, "Response body too large");
@@ -291,10 +371,10 @@ function copyResponseHeaders(response, res) {
   for (const [name, value] of response.headers) res.setHeader(name, value);
 }
 
-async function sendWebResponse(response, res, maximumBytes) {
+async function sendWebResponse(response, res, maximumBytes, signal) {
   const contentType = response.headers.get("content-type") ?? "";
   if (!contentType.includes("text/event-stream")) {
-    const body = await collectResponseBody(response, maximumBytes);
+    const body = await collectResponseBody(response, maximumBytes, signal);
     res.writeHead(response.status, Object.fromEntries(response.headers));
     res.end(body);
     return;
@@ -310,11 +390,11 @@ async function sendWebResponse(response, res, maximumBytes) {
   let size = 0;
   try {
     for (;;) {
-      const { done, value } = await reader.read();
+      const { done, value } = await readResponseChunk(reader, signal);
       if (done) break;
       size += value.byteLength;
       if (size > maximumBytes) break;
-      if (!res.write(Buffer.from(value))) await new Promise((resolve) => res.once("drain", resolve));
+      if (!res.write(Buffer.from(value))) await waitForDrain(res, signal);
     }
   } finally {
     await reader.cancel().catch(() => {});
@@ -331,39 +411,40 @@ function sendBoundaryError(error, res) {
 }
 
 async function handleRequest(req, res, configuration) {
-  if (activeRequests.size >= configuration.concurrencyLimit) {
+  const method = req.method?.toUpperCase() ?? "";
+  const activeSet = method === "GET" ? activeStreams : activeRequests;
+  if (method !== "DELETE" && activeSet.size >= configuration.concurrencyLimit) {
     await sendBoundaryError(new HttpBoundaryError(429, -32009, "Too many requests"), res);
     return;
   }
   const controller = new AbortController();
-  activeRequests.add(controller);
+  activeSet.add(controller);
   const abort = () => controller.abort();
   req.once("aborted", abort);
   res.once("close", () => {
     if (!res.writableEnded) abort();
   });
   let provisionalSession;
+  let session;
   try {
     const requestUrl = validateTransportBoundary(req, configuration);
     const auth = validateToken(req, configuration);
-    const method = req.method?.toUpperCase() ?? "";
     if (!["GET", "POST", "DELETE"].includes(method)) {
       throw new HttpBoundaryError(405, -32000, "Method not allowed");
     }
-    let body = Buffer.alloc(0);
-    if (method === "POST") {
-      const bodyTimer = setTimeout(() => controller.abort(), configuration.requestTimeoutMs);
-      try {
-        body = await readRequestBody(req, configuration.maxBodyBytes, controller.signal);
-      } finally {
-        clearTimeout(bodyTimer);
-      }
+    const bodyTimer = setTimeout(() => controller.abort(), configuration.requestTimeoutMs);
+    let body;
+    try {
+      body = await readRequestBody(req, configuration.maxBodyBytes, controller.signal);
+    } finally {
+      clearTimeout(bodyTimer);
     }
+    if (method !== "POST" && body.length > 0) throw new HttpBoundaryError(400, -32600, "Request body is not allowed");
     const parsedBody = method === "POST" ? parseJsonBody(body) : undefined;
     if (parsedBody !== undefined) enforceMessageScopes(parsedBody, auth);
     const sessionId = req.headers["mcp-session-id"];
     const normalizedSessionId = Array.isArray(sessionId) ? undefined : sessionId;
-    let session = normalizedSessionId ? sessions.get(normalizedSessionId) : undefined;
+    session = normalizedSessionId ? sessions.get(normalizedSessionId) : undefined;
     if (normalizedSessionId && !session) throw new HttpBoundaryError(404, -32001, "Session not found");
     if (session && session.fingerprint !== auth.fingerprint) throw new HttpBoundaryError(403, -32000, "Forbidden");
     if (!session) {
@@ -371,14 +452,14 @@ async function handleRequest(req, res, configuration) {
       const initializing = method === "POST" && messages.length === 1 && messages[0]?.method === "initialize";
       if (!initializing) throw new HttpBoundaryError(400, -32600, "Mcp-Session-Id header is required");
       if (sessions.size >= configuration.concurrencyLimit) throw new HttpBoundaryError(429, -32009, "Too many sessions");
-      provisionalSession = createSession();
-      provisionalSession.fingerprint = auth.fingerprint;
+      provisionalSession = createSession(configuration, auth);
       await provisionalSession.server.connect(provisionalSession.transport);
       session = provisionalSession;
     }
+    touchSession(session, configuration);
     const request = webRequest(req, requestUrl, body, controller.signal);
     const response = await transportResponse(session, request, parsedBody, configuration.requestTimeoutMs, controller);
-    await sendWebResponse(response, res, configuration.maxResponseBytes);
+    await sendWebResponse(response, res, configuration.maxResponseBytes, controller.signal);
     if (provisionalSession && !provisionalSession.id) await closeSession(provisionalSession);
   } catch (error) {
     if (provisionalSession && !provisionalSession.id) await closeSession(provisionalSession);
@@ -386,7 +467,8 @@ async function handleRequest(req, res, configuration) {
     else res.end();
   } finally {
     req.off("aborted", abort);
-    activeRequests.delete(controller);
+    if (controller.signal.aborted && session && method !== "GET") await closeSession(session);
+    activeSet.delete(controller);
   }
 }
 
@@ -400,6 +482,7 @@ async function shutdown() {
   if (shuttingDown) return;
   shuttingDown = true;
   for (const controller of activeRequests) controller.abort();
+  for (const controller of activeStreams) controller.abort();
   await Promise.all([...sessions.values()].map((session) => closeSession(session)));
   await closeActiveChildren();
   await new Promise((resolve) => httpServer.close(resolve));

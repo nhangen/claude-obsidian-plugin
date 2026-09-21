@@ -14,7 +14,7 @@
     "clientMatrix": [
       { "protocolRevision": "2026-07-28", "transport": "stdio", "status": "supported" },
       { "protocolRevision": "2025-11-25", "transport": "stdio", "status": "compatibility" },
-      { "protocolRevision": "2026-07-28", "transport": "streamable-http", "status": "supported" },
+      { "protocolRevision": "2026-07-28", "transport": "streamable-http", "status": "planned" },
       { "protocolRevision": "2025-11-25", "transport": "streamable-http", "status": "compatibility" }
     ]
   },
@@ -46,6 +46,7 @@
     "maxResourceBytes": 65536,
     "httpRequestBodyBytesDefault": 1048576,
     "httpResponseBytesDefault": 1048576,
+    "httpSessionTtlMsDefault": 900000,
     "httpConcurrentRequestsDefault": 16,
     "httpRequestTimeoutMsDefault": 10000
   },

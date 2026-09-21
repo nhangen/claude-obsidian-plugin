@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createHmac } from "node:crypto";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { access, chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { request as httpRequest } from "node:http";
 import { once } from "node:events";
 import { dirname, join, resolve } from "node:path";
@@ -122,9 +122,15 @@ async function fixture() {
   return { directory, config };
 }
 
-test("HTTP hardening covers modern negotiation, malformed signatures, body limits, cleanup, and expiry", async (t) => {
+test("HTTP hardening covers legacy negotiation, malformed signatures, body limits, cleanup, and expiry", async (t) => {
   const { directory, config } = await fixture();
+  const bin = join(directory, "bin");
+  const secretMarker = join(bin, "secret-leaked");
+  await mkdir(bin);
+  await writeFile(join(bin, "bash"), '#!/bin/sh\nif [ -n "${MCP_HTTP_JWT_SECRET+x}" ]; then printf leaked > "$(dirname "$0")/secret-leaked"; fi\nexec /bin/bash "$@"\n');
+  await chmod(join(bin, "bash"), 0o755);
   const server = startServer(config, {
+    PATH: `${bin}:${process.env.PATH}`,
     MCP_HTTP_CONCURRENCY_LIMIT: "1",
     MCP_HTTP_SESSION_TTL_MS: "100",
   });
@@ -133,6 +139,7 @@ test("HTTP hardening covers modern negotiation, malformed signatures, body limit
     await rm(directory, { recursive: true, force: true });
   });
   const url = await server.ready;
+  await assert.rejects(access(secretMarker));
   const validToken = token();
 
   const malformedSignature = await fetch(`${url}/mcp`, {
@@ -151,13 +158,22 @@ test("HTTP hardening covers modern negotiation, malformed signatures, body limit
   const sessionId = initialized.headers.get("mcp-session-id");
   assert.ok(sessionId);
 
-  const discover = await fetch(`${url}/mcp`, {
+  const unsupportedModern = await fetch(`${url}/mcp`, {
     method: "POST",
     headers: headers(url, validToken, { "MCP-Protocol-Version": "2026-07-28", "Mcp-Session-Id": sessionId }),
-    body: JSON.stringify({ jsonrpc: "2.0", id: 2, method: "server/discover", params: {} }),
+    body: JSON.stringify({
+      jsonrpc: "2.0",
+      id: 2,
+      method: "server/discover",
+      params: {
+        _meta: {
+          "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+          "io.modelcontextprotocol/clientCapabilities": {},
+        },
+      },
+    }),
   });
-  assert.equal(discover.status, 200);
-  assert.ok((await discover.json()).result.supportedVersions.includes("2026-07-28"));
+  assert.equal(unsupportedModern.status, 400);
 
   const bodyOnGet = await rawRequest(`${url}/mcp`, {
     method: "GET",
