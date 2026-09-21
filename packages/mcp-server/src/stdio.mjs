@@ -20,6 +20,7 @@ const maxRepositoryPathCharacters = 4096;
 const maxScanEntries = 10_000;
 const maxScanBytes = 64 * 1024 * 1024;
 const subprocessTimeoutMs = 5_000;
+const protocolVersions = ["2026-07-28", "2025-11-25"];
 const activeChildren = new Set();
 
 function stderr(message) {
@@ -32,6 +33,11 @@ function codedError(code, detail) {
   return error;
 }
 
+function childEnvironment() {
+  const allowed = ["PATH", "HOME", "XDG_CONFIG_HOME", "OBSIDIAN_LOCAL_MD", "CLAUDE_PLUGIN_ROOT", "LANG", "LC_ALL", "MCP_GIT_MARKER"];
+  return Object.fromEntries(allowed.filter((key) => process.env[key] !== undefined).map((key) => [key, process.env[key]]));
+}
+
 function throwIfAborted(signal) {
   if (signal?.aborted) throw codedError("CANCELLED", "request cancelled");
 }
@@ -39,7 +45,7 @@ function throwIfAborted(signal) {
 function resolveConfigPath() {
   const result = spawnSync("bash", [configResolver], {
     encoding: "utf8",
-    env: process.env,
+    env: childEnvironment(),
     maxBuffer: 16 * 1024,
     timeout: 2_000,
   });
@@ -232,7 +238,7 @@ function commitMetadata(repository, approvedRoots, signal) {
   return new Promise((resolveResult, reject) => {
     const child = spawn("bash", [metadataScript, "-C", canonicalRepository], {
       cwd: repositoryRoot,
-      env: process.env,
+      env: childEnvironment(),
       detached: process.platform !== "win32",
       shell: false,
       stdio: ["ignore", "pipe", "pipe"],
@@ -412,11 +418,11 @@ const metadataOutput = z.strictObject({
 const searchInput = z.strictObject({ query: z.string().trim().min(1).max(240) });
 const metadataInput = z.strictObject({ repository: z.string().trim().min(1).max(maxRepositoryPathCharacters) });
 
-function createServer() {
+export function createServer({ supportedProtocolVersions = protocolVersions } = {}) {
   const configuration = loadConfiguration();
   const server = new McpServer(
     { name: "claude-obsidian-mcp", version: "0.1.0" },
-    { capabilities: { tools: {}, resources: { listChanged: false } } },
+    { capabilities: { tools: {}, resources: { listChanged: false } }, supportedProtocolVersions },
   );
   server.registerTool(
     "obsidian_find_notes",
@@ -478,21 +484,25 @@ function createServer() {
   return server;
 }
 
-async function closeActiveChildren() {
+export async function closeActiveChildren() {
   await Promise.all([...activeChildren].map((child) => terminateChild(child)));
 }
 
-const handle = serveStdio(createServer, { onerror: (error) => stderr(error instanceof Error ? error.message : String(error)) });
-let shuttingDown = false;
-async function shutdown(exit = false) {
-  if (shuttingDown) return;
-  shuttingDown = true;
-  await closeActiveChildren();
-  await handle.close();
-  if (exit) process.exit(0);
+function startStdio() {
+  const handle = serveStdio(createServer, { onerror: (error) => stderr(error instanceof Error ? error.message : String(error)) });
+  let shuttingDown = false;
+  async function shutdown(exit = false) {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    await closeActiveChildren();
+    await handle.close();
+    if (exit) process.exit(0);
+  }
+
+  for (const signal of ["SIGINT", "SIGTERM"]) {
+    process.once(signal, () => void shutdown(true));
+  }
+  process.stdin.once("end", () => void shutdown(false));
 }
 
-for (const signal of ["SIGINT", "SIGTERM"]) {
-  process.once(signal, () => void shutdown(true));
-}
-process.stdin.once("end", () => void shutdown(false));
+if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) startStdio();

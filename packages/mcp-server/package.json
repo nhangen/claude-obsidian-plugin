@@ -2,12 +2,13 @@
   "name": "@claude-obsidian/mcp-server",
   "version": "0.1.0",
   "private": true,
-  "description": "Read-only MCP stdio server exposing obsidian_find_notes and obsidian_commit_meta (issue #116).",
+  "description": "Read-only MCP server over stdio and authenticated Streamable HTTP.",
   "type": "module",
   "main": "src/stdio.mjs",
   "scripts": {
-    "build": "node --check src/stdio.mjs",
+    "build": "node --check src/stdio.mjs && node --check src/http.mjs",
     "start": "node src/stdio.mjs",
+    "start:http": "node src/http.mjs",
     "test": "node --test test/*.test.mjs"
   },
   "engines": {
