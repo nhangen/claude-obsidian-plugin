@@ -5,6 +5,7 @@ import { dirname, join, resolve } from "node:path";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
 import { createHmac } from "node:crypto";
+import { request as httpRequest } from "node:http";
 import { test } from "node:test";
 
 const packageRoot = resolve(dirname(new URL(import.meta.url).pathname), "..");
@@ -99,6 +100,27 @@ function initializeRequest(id = 1) {
   };
 }
 
+function rawRequest(url, options) {
+  const parsed = new URL(url);
+  return new Promise((resolveRequest, rejectRequest) => {
+    const request = httpRequest(
+      {
+        hostname: parsed.hostname,
+        port: parsed.port,
+        path: parsed.pathname,
+        method: options.method,
+        headers: options.headers,
+      },
+      (response) => {
+        response.resume();
+        response.once("end", () => resolveRequest({ status: response.statusCode, headers: response.headers }));
+      },
+    );
+    request.once("error", rejectRequest);
+    request.end(options.body);
+  });
+}
+
 test("authenticated Streamable HTTP is read-only and enforces transport boundaries", async (t) => {
   const fixture = await mkdtemp(join(tmpdir(), "mcp-http-"));
   const vault = join(fixture, "vault");
@@ -130,7 +152,7 @@ test("authenticated Streamable HTTP is read-only and enforces transport boundari
   });
   assert.equal(invalidOrigin.status, 403);
 
-  const invalidHost = await fetch(`${url}/mcp`, {
+  const invalidHost = await rawRequest(`${url}/mcp`, {
     method: "POST",
     headers: requestHeaders(url, validToken, { Host: "evil.example" }),
     body: JSON.stringify(initializeRequest()),
@@ -144,12 +166,26 @@ test("authenticated Streamable HTTP is read-only and enforces transport boundari
   });
   assert.equal(expired.status, 401);
 
+  const wrongAudience = await fetch(`${url}/mcp`, {
+    method: "POST",
+    headers: requestHeaders(url, token({ aud: "wrong-audience" })),
+    body: JSON.stringify(initializeRequest()),
+  });
+  assert.equal(wrongAudience.status, 401);
+
   const insufficientScope = await fetch(`${url}/mcp`, {
     method: "POST",
     headers: requestHeaders(url, token({ scope: "vault:write" })),
     body: JSON.stringify(initializeRequest()),
   });
   assert.equal(insufficientScope.status, 403);
+
+  const queryCredential = await fetch(`${url}/mcp?access_token=${encodeURIComponent(validToken)}`, {
+    method: "POST",
+    headers: requestHeaders(url, "", { Authorization: undefined }),
+    body: JSON.stringify(initializeRequest()),
+  });
+  assert.equal(queryCredential.status, 400);
 
   const initialized = await fetch(`${url}/mcp`, {
     method: "POST",
