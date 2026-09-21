@@ -1,0 +1,184 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "contractVersion": "0.1.0",
+  "protocol": {
+    "sdk": "@modelcontextprotocol/server@2.0.0",
+    "modernRevision": "2026-07-28",
+    "compatibilityRevisions": ["2025-11-25"],
+    "node": ">=20",
+    "transports": {
+      "mvp": ["stdio"],
+      "planned": ["streamable-http"],
+      "compatibilityOnly": ["http+sse"]
+    },
+    "clientMatrix": [
+      { "protocolRevision": "2026-07-28", "transport": "stdio", "status": "supported" },
+      { "protocolRevision": "2025-11-25", "transport": "stdio", "status": "compatibility" }
+    ]
+  },
+  "scopes": {
+    "stdio": ["vault:read", "repo:read"],
+    "streamableHttp": [],
+    "available": ["vault:read", "repo:read", "vault:write", "vault:admin"]
+  },
+  "limits": {
+    "searchResults": 5,
+    "previewCharacters": 240,
+    "toolOutputBytes": 65536,
+    "subprocessTimeoutMs": 5000,
+    "maxRepositoryPathCharacters": 4096,
+    "maxScanEntries": 10000,
+    "maxScanBytes": 67108864,
+    "maxResourceBytes": 65536
+  },
+  "tools": {
+    "obsidian_find_notes": {
+      "status": "mvp",
+      "readOnly": true,
+      "scope": "vault:read",
+      "privacy": "vault-note-path-and-preview",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["query"],
+        "properties": {
+          "query": { "type": "string", "minLength": 1, "maxLength": 240 }
+        }
+      },
+      "resultSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["matches"],
+        "properties": {
+          "matches": {
+            "type": "array",
+            "maxItems": 5,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["path", "preview"],
+              "properties": {
+                "path": { "type": "string" },
+                "preview": { "type": "string", "maxLength": 240 }
+              }
+            }
+          }
+        }
+      },
+      "idempotency": "not-required-read-only",
+      "errors": ["INVALID_INPUT", "READ_FAILED", "SCAN_LIMIT", "SUBPROCESS_TIMEOUT", "SUBPROCESS_OUTPUT_LIMIT"]
+    },
+    "obsidian_commit_meta": {
+      "status": "mvp",
+      "readOnly": true,
+      "scope": "repo:read",
+      "privacy": "sanitized-git-metadata",
+      "repositoryRoots": "MCP_REPOSITORY_ROOTS, a path-delimited allowlist defaulting to the adapter repository root",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["repository"],
+        "properties": {
+          "repository": { "type": "string", "minLength": 1, "maxLength": 4096 }
+        }
+      },
+      "resultSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["repository", "branch", "commit", "files", "ticket", "date", "time", "subject"],
+        "properties": {
+          "repository": { "type": "string" },
+          "branch": { "type": "string" },
+          "commit": { "type": "string" },
+          "files": { "type": "string" },
+          "ticket": { "type": "string" },
+          "date": { "type": "string" },
+          "time": { "type": "string" },
+          "subject": { "type": "string" }
+        }
+      },
+      "idempotency": "not-required-read-only",
+      "errors": ["INVALID_INPUT", "PATH_INVALID", "METADATA_INCOMPLETE", "READ_FAILED", "SUBPROCESS_TIMEOUT", "SUBPROCESS_OUTPUT_LIMIT"]
+    }
+  },
+  "resources": {
+    "obsidian://taxonomy": {
+      "status": "mvp",
+      "mimeType": "text/plain",
+      "scope": "vault:read",
+      "privacy": "vault-structure",
+      "maxBytes": 65536,
+      "source": "allowlisted-project-taxonomy-table-only"
+    },
+    "obsidian://daily/{date}": {
+      "status": "mvp",
+      "mimeType": "text/markdown",
+      "scope": "vault:read",
+      "privacy": "user-authored-content",
+      "maxBytes": 65536,
+      "datePattern": "^\\d{4}-\\d{2}-\\d{2}$",
+      "source": "configured-daily-path"
+    },
+    "obsidian://librarian": {
+      "status": "mvp",
+      "mimeType": "text/markdown",
+      "scope": "vault:read",
+      "privacy": "vault-index",
+      "maxBytes": 65536,
+      "source": "Librarian.md-at-vault-root"
+    },
+    "obsidian://pending": {
+      "status": "mvp",
+      "mimeType": "text/markdown",
+      "scope": "vault:read",
+      "privacy": "workflow-state",
+      "maxBytes": 65536,
+      "source": "Pending.md-at-vault-root"
+    }
+  },
+  "prompts": {
+    "obsidian_ask": {
+      "status": "planned-client-side",
+      "serverModel": false,
+      "scope": "vault:read",
+      "semantics": "Return bounded context for the client to apply its own prompt flow."
+    },
+    "reorganize_vault": {
+      "status": "excluded-from-mcp-mvp",
+      "serverModel": false,
+      "scope": "vault:admin",
+      "semantics": "Existing plugin workflow only until an explicit approval and write contract exist."
+    }
+  },
+  "writes": {
+    "mvp": false,
+    "requiredScopes": ["vault:write", "vault:admin"],
+    "statuses": ["committed", "skipped", "conflicted", "failed"],
+    "invariants": [
+      "Canonical containment rejects traversal and symlink escape.",
+      "A response never reports success for a partial or conflicted write.",
+      "Remote writes require authentication, explicit gating, and an idempotency key."
+    ]
+  },
+  "errors": {
+    "codes": ["INVALID_INPUT", "PATH_INVALID", "READ_FAILED", "SCAN_LIMIT", "METADATA_INCOMPLETE", "SUBPROCESS_TIMEOUT", "SUBPROCESS_OUTPUT_LIMIT", "CANCELLED"],
+    "schema": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "detail"],
+      "properties": {
+        "code": { "type": "string" },
+        "detail": { "type": "string", "maxLength": 240 }
+      }
+    },
+    "transport": "Use standard JSON-RPC/MCP errors for invalid requests and stable tool codes for execution failures.",
+    "tool": "Return isError=true with a stable code and bounded detail.",
+    "successBoundary": "Only validated, complete results may be reported as successful."
+  },
+  "cancellation": {
+    "notification": "notifications/cancelled",
+    "handlerSignal": "ServerContext.mcpReq.signal",
+    "response": "No successful tool response after cancellation.",
+    "childProcess": "Terminate, await close, and escalate only if termination does not reap the child."
+  }
+}

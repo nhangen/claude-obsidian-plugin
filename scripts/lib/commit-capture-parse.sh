@@ -380,6 +380,10 @@ cc_org_repo() {
       esac
       ;;
   esac
+  # Query strings and fragments are remote transport metadata, never repository
+  # identity. Drop them before deriving a path that is persisted to the vault.
+  REMOTE_PATH="${REMOTE_PATH%%\?*}"
+  REMOTE_PATH="${REMOTE_PATH%%\#*}"
   # A colon is either an scp-style host:path separator or a port. Decide by what
   # follows it: all digits means port (drop it), anything else means path.
   HOSTPART="${REMOTE_PATH%%/*}"
