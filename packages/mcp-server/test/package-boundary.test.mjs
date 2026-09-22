@@ -3,28 +3,55 @@ import { copyFile, mkdir, mkdtemp, readFile, readdir, rm, stat, symlink, writeFi
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { spawn } from "node:child_process";
-import { once } from "node:events";
 import { test } from "node:test";
 
 const packageRoot = resolve(dirname(new URL(import.meta.url).pathname), "..");
 const repositoryRoot = resolve(packageRoot, "../..");
 
-function waitForLine(child) {
-  return new Promise((resolveLine, reject) => {
-    let output = "";
-    const onData = (chunk) => {
-      output += chunk;
-      const newline = output.indexOf("\n");
-      if (newline < 0) return;
-      child.stdout.off("data", onData);
-      resolveLine(output.slice(0, newline));
-    };
-    child.stdout.on("data", onData);
-    child.once("error", reject);
-    child.once("exit", (code, signal) => {
-      reject(new Error(`stdio launcher exited before responding: ${code ?? signal}`));
+function collectOutput(child) {
+  let stdout = "";
+  let stderr = "";
+  let pendingStdout = "";
+  const lines = [];
+  const waiters = [];
+
+  child.stdout.setEncoding("utf8");
+  child.stderr.setEncoding("utf8");
+  child.stdout.on("data", (chunk) => {
+    stdout += chunk;
+    pendingStdout += chunk;
+    let newline = pendingStdout.indexOf("\n");
+    while (newline >= 0) {
+      const line = pendingStdout.slice(0, newline).replace(/\r$/, "");
+      pendingStdout = pendingStdout.slice(newline + 1);
+      const waiter = waiters.shift();
+      if (waiter) waiter.resolve(line);
+      else lines.push(line);
+      newline = pendingStdout.indexOf("\n");
+    }
+  });
+  child.stderr.on("data", (chunk) => { stderr += chunk; });
+
+  const rejectWaiters = (error) => {
+    for (const waiter of waiters.splice(0)) waiter.reject(error);
+  };
+  child.once("error", rejectWaiters);
+  const closed = new Promise((resolveClose) => {
+    child.once("close", (code, signal) => {
+      rejectWaiters(new Error(`stdio launcher exited before responding: ${code ?? signal}`));
+      resolveClose({ code, signal });
     });
   });
+
+  return {
+    closed,
+    nextLine() {
+      if (lines.length > 0) return Promise.resolve(lines.shift());
+      return new Promise((resolveLine, reject) => waiters.push({ resolve: resolveLine, reject }));
+    },
+    get stdout() { return stdout; },
+    get stderr() { return stderr; },
+  };
 }
 
 function run(command, args, options) {
@@ -44,7 +71,7 @@ function run(command, args, options) {
   });
 }
 
-async function initialize(child, id = 1) {
+async function initialize(child, output, id = 1) {
   child.stdin.write(`${JSON.stringify({
     jsonrpc: "2.0",
     id,
@@ -55,16 +82,42 @@ async function initialize(child, id = 1) {
       clientInfo: { name: "package-boundary-test", version: "1.0.0" },
     },
   })}\n`);
-  const response = JSON.parse(await waitForLine(child));
+  const response = JSON.parse(await output.nextLine());
   assert.equal(response.jsonrpc, "2.0");
   assert.equal(response.id, id);
   assert.equal(response.result?.protocolVersion, "2025-11-25");
   child.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" })}\n`);
 }
 
-async function close(child) {
+async function close(child, output) {
   child.stdin.end();
-  await Promise.race([once(child, "close"), new Promise((resolveClose) => setTimeout(resolveClose, 500))]);
+  let timeout;
+  const closed = await Promise.race([
+    output.closed,
+    new Promise((_, reject) => {
+      timeout = setTimeout(() => reject(new Error("stdio launcher did not stop after stdin closed")), 2000);
+    }),
+  ]).finally(() => clearTimeout(timeout));
+  assert.equal(closed.code, 0);
+  assert.equal(closed.signal, null);
+}
+
+function assertMcpOutput(output) {
+  for (const [index, line] of output.stdout.split(/\r?\n/).entries()) {
+    if (line.trim() === "") continue;
+    let message;
+    try {
+      message = JSON.parse(line);
+    } catch {
+      assert.fail(`stdout line ${index + 1} is not JSON-RPC: ${line}`);
+    }
+    const isRequest = typeof message.method === "string";
+    const isResponse = Object.hasOwn(message, "id")
+      && (Object.hasOwn(message, "result") !== Object.hasOwn(message, "error"));
+    assert.equal(message.jsonrpc, "2.0", `stdout line ${index + 1} is not JSON-RPC 2.0`);
+    assert.ok(isRequest || isResponse, `stdout line ${index + 1} is not an MCP message`);
+  }
+  assert.equal(output.stderr, "");
 }
 
 test("packed package exposes a built stdio launcher that works outside the install directory", async (t) => {
@@ -110,39 +163,41 @@ test("packed package exposes a built stdio launcher that works outside the insta
     env: { ...baseEnvironment, OBSIDIAN_LOCAL_MD: config, MCP_REPOSITORY_ROOTS: repositoryRoot },
     stdio: ["pipe", "pipe", "pipe"],
   });
+  const defaultOutput = collectOutput(defaultChild);
+  const explicitOutput = collectOutput(explicitChild);
   t.after(async () => {
-    if (defaultChild.exitCode === null) await close(defaultChild);
-    if (explicitChild.exitCode === null) await close(explicitChild);
+    if (defaultChild.exitCode === null) await close(defaultChild, defaultOutput);
+    if (explicitChild.exitCode === null) await close(explicitChild, explicitOutput);
     await rm(fixture, { recursive: true, force: true });
   });
 
-  await initialize(defaultChild);
+  await initialize(defaultChild, defaultOutput);
   defaultChild.stdin.write(`${JSON.stringify({
     jsonrpc: "2.0",
     id: 2,
     method: "tools/call",
     params: { name: "obsidian_commit_meta", arguments: { repository: externalCwd } },
   })}\n`);
-  const deniedMetadata = JSON.parse(await waitForLine(defaultChild));
+  const deniedMetadata = JSON.parse(await defaultOutput.nextLine());
   assert.equal(deniedMetadata.id, 2);
   assert.equal(deniedMetadata.result?.isError, true);
   assert.equal(JSON.parse(deniedMetadata.result.content[0].text).code, "PATH_INVALID");
-  assert.equal(defaultChild.stderr.read()?.toString() ?? "", "");
-  await close(defaultChild);
+  await close(defaultChild, defaultOutput);
+  assertMcpOutput(defaultOutput);
 
-  await initialize(explicitChild);
+  await initialize(explicitChild, explicitOutput);
   explicitChild.stdin.write(`${JSON.stringify({
     jsonrpc: "2.0",
     id: 3,
     method: "tools/call",
     params: { name: "obsidian_commit_meta", arguments: { repository: repositoryRoot } },
   })}\n`);
-  const metadata = JSON.parse(await waitForLine(explicitChild));
+  const metadata = JSON.parse(await explicitOutput.nextLine());
   assert.equal(metadata.id, 3);
   assert.equal(metadata.result?.isError, false);
   assert.equal(metadata.result?.structuredContent?.repository, "nhangen/claude-obsidian-plugin");
-  assert.equal(explicitChild.stderr.read()?.toString() ?? "", "");
-  await close(explicitChild);
+  await close(explicitChild, explicitOutput);
+  assertMcpOutput(explicitOutput);
 });
 
 test("source entrypoint uses canonical helpers before a build exists", async (t) => {
@@ -190,23 +245,24 @@ test("source entrypoint uses canonical helpers before a build exists", async (t)
     env: { ...environment, OBSIDIAN_LOCAL_MD: config },
     stdio: ["pipe", "pipe", "pipe"],
   });
+  const output = collectOutput(child);
   t.after(async () => {
-    if (child.exitCode === null) await close(child);
+    if (child.exitCode === null) await close(child, output);
     await rm(fixture, { recursive: true, force: true });
   });
 
-  await initialize(child);
+  await initialize(child, output);
   child.stdin.write(`${JSON.stringify({
     jsonrpc: "2.0",
     id: 2,
     method: "tools/call",
     params: { name: "obsidian_commit_meta", arguments: { repository: sourceRoot } },
   })}\n`);
-  const metadata = JSON.parse(await waitForLine(child));
+  const metadata = JSON.parse(await output.nextLine());
   assert.equal(metadata.id, 2);
   assert.equal(metadata.result?.isError, false);
   assert.equal(metadata.result?.structuredContent?.repository, "local/checkout");
   assert.equal(metadata.result?.structuredContent?.subject, "source fixture");
-  assert.equal(child.stderr.read()?.toString() ?? "", "");
-  await close(child);
+  await close(child, output);
+  assertMcpOutput(output);
 });
