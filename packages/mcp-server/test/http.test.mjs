@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { spawn } from "node:child_process";
@@ -219,6 +219,21 @@ test("authenticated Streamable HTTP is read-only and enforces transport boundari
   });
   assert.equal(search.status, 200);
   assert.equal((await search.json()).result.structuredContent.matches[0].path, "remote-note.md");
+
+  const beforeMutationAttempt = await readFile(join(vault, "remote-note.md"), "utf8");
+  const unavailableMutation = await fetch(`${url}/mcp`, {
+    method: "POST",
+    headers: requestHeaders(url, validToken, { "MCP-Protocol-Version": "2025-11-25", "Mcp-Session-Id": sessionId }),
+    body: JSON.stringify({
+      jsonrpc: "2.0",
+      id: 31,
+      method: "tools/call",
+      params: { name: "obsidian_insert_note", arguments: { target: "remote-note.md", body: "changed" } },
+    }),
+  });
+  assert.equal(unavailableMutation.status, 200);
+  assert.ok((await unavailableMutation.json()).error);
+  assert.equal(await readFile(join(vault, "remote-note.md"), "utf8"), beforeMutationAttempt);
 
   const malformed = await fetch(`${url}/mcp`, {
     method: "POST",

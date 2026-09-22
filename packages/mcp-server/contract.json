@@ -172,9 +172,10 @@
   "writes": {
     "mvp": false,
     "requiredScopes": ["vault:write", "vault:admin"],
-    "statuses": ["committed", "skipped", "conflicted", "failed"],
+    "statuses": ["committed", "skipped", "partial", "conflict", "failed"],
     "invariants": [
-      "Canonical containment rejects traversal and symlink escape.",
+      "Canonical containment rejects traversal and symlink escape for keeper-cooperating same-host writers.",
+      "Path publication is revalidated while holding the canonical vault lock; non-cooperating filesystem mutation is outside the portable shell threat model.",
       "A response never reports success for a partial or conflicted write.",
       "Remote writes require authentication, explicit gating, and an idempotency key."
     ]

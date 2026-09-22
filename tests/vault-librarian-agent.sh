@@ -3,12 +3,13 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 A="${ROOT_DIR}/agents/vault-librarian.md"
 fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
-need() { grep -qiF "$1" "$A" || fail "agent missing: $1"; }
+need() { grep -qiF -- "$1" "$A" || fail "agent missing: $1"; }
 
 [ -f "$A" ] || fail "agents/vault-librarian.md missing"
 grep -q '^description:' "$A" || fail "missing frontmatter description"
 need "resolve-config.sh"          # resolves vault dynamically
 need "vault_index_apply"          # refreshes slice before answering
+need 'vault_index_apply "$VAULT_PATH" "$FOLDER"' # configured vault is the write boundary
 need "coverage"                   # coverage invariant present
 need "vault_index_coverage_check" # coverage defect is reported, not assumed away
 need "append them by hand"        # #30: link writing belongs to apply, not prose
@@ -21,6 +22,10 @@ need "_Daily Template.md"         # APPEND creates from the daily template on ab
 need "resolved: true"             # pre-resolved INSERT seam — literal trigger
 need "do not run routing"         # routing skip is gated on resolved
 need "skip the dedup scan"        # dedup skip is gated on resolved
+need "scripts/keeper insert"      # note writes use the cross-process keeper
+need "scripts/keeper append"      # Pending writes use the cross-process keeper
+need "--recover"                  # partial insert outcomes have a recovery path
+need "Do not append Pending rows by" # no direct Pending writer remains in the agent contract
 grep -q '## Hard Rules' "$A" || fail "missing Hard Rules section"
 # FIX E — guard the never-read-.base clause so deleting it breaks the suite.
 need "Never read a"   # "Never read a .base to answer"

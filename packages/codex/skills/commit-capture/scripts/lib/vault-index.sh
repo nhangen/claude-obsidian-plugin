@@ -183,9 +183,9 @@ $(find "$folder" -type f -name '*.md' | LC_ALL=C sort)
 EOF
 }
 
-vault_index_apply() {
+_vault_index_apply_locked() {
   local folder="$1" idx="$2"
-  local state plan action fn touched tmp tmp2 added=()
+  local state plan action fn touched tmp tmp2 idx_tmp="" added=()
   state="$(index_state_file "$idx")"
   plan="$(vault_index_plan "$folder" "$idx")"
 
@@ -193,7 +193,8 @@ vault_index_apply() {
   touched="$(printf '%s\n' "$plan" | cut -f2)"
 
   tmp="$(mktemp "${TMPDIR:-/tmp}/idxstate-XXXXXX")" || return 1
-  tmp2="$(mktemp "${TMPDIR:-/tmp}/idxstate-XXXXXX")" || { rm -f "$tmp"; return 1; }
+  tmp2="$(mktemp "$(dirname "$state")/.index-state-XXXXXX")" \
+    || { rm -f "$tmp"; return 1; }
   # No RETURN trap: it is bash-only (zsh prints "undefined signal: RETURN" when
   # this lib is sourced into a zsh shell). There are no early returns past this
   # point, so explicit cleanup before the function's output is equivalent and
@@ -225,9 +226,8 @@ vault_index_apply() {
     esac
   done <<<"$plan"
 
-  { printf '# last_reconciled:%s\n' "$(now_epoch)"; sort "$tmp"; } > "$tmp2"
-  mv "$tmp2" "$state"
-  rm -f "$tmp" "$tmp2"
+  { printf '# last_reconciled:%s\n' "$(now_epoch)"; sort "$tmp"; } > "$tmp2" \
+    || { rm -f "$tmp" "$tmp2"; return 1; }
 
   # Write the links here rather than returning them for a caller to remember.
   # Leaving this to prose is what let state run 203 notes ahead of a 12-link
@@ -235,14 +235,31 @@ vault_index_apply() {
   # Append-only — never rewrite or reorder an existing INDEX.
   local rel dups missed=0
   if (( ${#added[@]} )); then
-    if [ ! -f "$idx" ]; then
-      printf '# %s Index\n' "$(basename "$folder")" > "$idx"
+    if [ -e "$idx" ] && [ ! -w "$idx" ]; then
+      printf 'vault_index_apply: coverage defect in %s — INDEX is not writable\n' "$idx" >&2
+      rm -f "$tmp" "$tmp2"
+      return 1
+    fi
+    idx_tmp="$(mktemp "$(dirname "$idx")/.index-XXXXXX")" \
+      || { rm -f "$tmp" "$tmp2"; return 1; }
+    if [ -f "$idx" ]; then
+      cp "$idx" "$idx_tmp" || { rm -f "$tmp" "$tmp2" "$idx_tmp"; return 1; }
+    else
+      printf '# %s Index\n' "$(basename "$folder")" > "$idx_tmp" \
+        || { rm -f "$tmp" "$tmp2" "$idx_tmp"; return 1; }
     fi
     dups="$(vault_index_dup_leaves "$folder")"
     for fn in "${added[@]}"; do
       rel="${fn%.md}"
-      vault_index_has_link "$idx" "$rel" "$dups" \
-        || printf -- '- [[%s]]\n' "$(vault_link_target "$folder" "$rel")" >> "$idx"
+      if ! vault_index_has_link "$idx_tmp" "$rel" "$dups"; then
+        printf -- '- [[%s]]\n' "$(vault_link_target "$folder" "$rel")" >> "$idx_tmp" \
+          || {
+            printf 'vault_index_apply: coverage defect in %s — link for %s could not be written\n' \
+              "$idx" "$fn" >&2
+            rm -f "$tmp" "$tmp2" "$idx_tmp"
+            return 1
+          }
+      fi
     done
     # Verify what this run was supposed to write. A full-folder sweep here would
     # re-ask plan's question about every note — 1073 greps and a third
@@ -250,13 +267,56 @@ vault_index_apply() {
     # it to the set this run touched. vault_index_coverage_check is the
     # standalone full-folder assertion for a sweep.
     for fn in "${added[@]}"; do
-      vault_index_has_link "$idx" "${fn%.md}" "$dups" || missed=$(( missed + 1 ))
+      vault_index_has_link "$idx_tmp" "${fn%.md}" "$dups" || missed=$(( missed + 1 ))
     done
     if [ "$missed" -gt 0 ]; then
       printf 'vault_index_apply: coverage defect in %s — %s link(s) could not be written\n' \
         "$idx" "$missed" >&2
+      rm -f "$tmp" "$tmp2" "$idx_tmp"
+      return 1
     fi
+    keeper_swap_or_clean "$idx_tmp" "$idx" || { rm -f "$tmp" "$tmp2"; return 1; }
   fi
 
+  keeper_fault before_index_state || { rm -f "$tmp" "$tmp2"; return 91; }
+  keeper_swap_or_clean "$tmp2" "$state" || { rm -f "$tmp"; return 1; }
+  rm -f "$tmp"
+  keeper_fault after_index_state || return 91
+
   (( ${#added[@]} )) && printf '%s\n' "${added[@]}" || true
+}
+
+_vault_index_apply_guarded() {
+  local folder="$1" idx="$2"
+  [ ! -L "$idx" ] || { printf 'vault_index_apply: refusing symlink INDEX: %s\n' "$idx" >&2; return 1; }
+  [ ! -e "$idx" ] || [ -f "$idx" ] \
+    || { printf 'vault_index_apply: INDEX is not a regular file: %s\n' "$idx" >&2; return 1; }
+  [ ! -L "$(index_state_file "$idx")" ] \
+    || { printf 'vault_index_apply: refusing symlink state: %s\n' "$(index_state_file "$idx")" >&2; return 1; }
+  _vault_index_apply_locked "$folder" "$idx"
+}
+
+vault_index_apply_held() {
+  local vault="$1" folder="$2" idx="$3" canonical_vault canonical idx_parent canonical_idx_parent canonical_idx
+  canonical_vault="$(cd "$vault" 2>/dev/null && pwd -P)" || return 1
+  canonical="$(cd "$folder" 2>/dev/null && pwd -P)" || return 1
+  case "$canonical" in
+    "$canonical_vault"|"$canonical_vault"/*) : ;;
+    *) printf 'vault_index_apply: indexed folder is outside the configured vault: %s\n' "$folder" >&2; return 1 ;;
+  esac
+  idx_parent="$(dirname "$idx")"
+  canonical_idx_parent="$(cd "$idx_parent" 2>/dev/null && pwd -P)" || return 1
+  if [ "$canonical_idx_parent" != "$canonical" ]; then
+    printf 'vault_index_apply: INDEX must be inside its indexed folder: %s\n' "$idx" >&2
+    return 1
+  fi
+  canonical_idx="$canonical/$(basename "$idx")"
+  _vault_index_apply_guarded "$canonical" "$canonical_idx"
+}
+
+vault_index_apply() {
+  local vault="$1" canonical_vault
+  canonical_vault="$(cd "$vault" 2>/dev/null && pwd -P)" || return 1
+  shift
+  keeper_with_lock "$canonical_vault" vault_index_apply_held "$canonical_vault" "$@"
 }

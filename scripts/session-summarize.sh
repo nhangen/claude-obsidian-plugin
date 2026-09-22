@@ -9,6 +9,7 @@ set -uo pipefail
 TMPFILE="$1"
 CONFIG_FILE="$2"
 VAULT_PATH="$3"
+BODY_FILE=""
 
 if [ ! -f "$TMPFILE" ]; then
   exit 1
@@ -16,6 +17,7 @@ fi
 
 cleanup() {
   rm -f "$TMPFILE"
+  [ -z "$BODY_FILE" ] || rm -f "$BODY_FILE"
 }
 trap cleanup EXIT
 
@@ -27,16 +29,18 @@ TODAY=$(date '+%Y-%m-%d')
 DAILY_SUBPATH=$(grep '^daily_path:' "$CONFIG_FILE" | head -1 | sed 's/^daily_path:[[:space:]]*//' | sed 's|\.\./||g; s|^\./||; s|^/||; s|/$||')
 : "${DAILY_SUBPATH:=Daily}"
 RESOLVED_VAULT=$(cd "$VAULT_PATH" && pwd -P)
-DAILY_DIR="${RESOLVED_VAULT}/${DAILY_SUBPATH}"
-RESOLVED_DAILY=$(mkdir -p "$DAILY_DIR" && cd "$DAILY_DIR" && pwd -P)
-case "$RESOLVED_DAILY" in
-  "${RESOLVED_VAULT}/"*|"${RESOLVED_VAULT}") ;;
-  *)
+daily_probe="$RESOLVED_VAULT"
+daily_rest="$DAILY_SUBPATH"
+while [ -n "$daily_rest" ]; do
+  daily_component="${daily_rest%%/*}"
+  if [ "$daily_component" = "$daily_rest" ]; then daily_rest=""; else daily_rest="${daily_rest#*/}"; fi
+  [ -n "$daily_component" ] || continue
+  daily_probe="$daily_probe/$daily_component"
+  if [ -L "$daily_probe" ] || { [ -e "$daily_probe" ] && [ ! -d "$daily_probe" ]; }; then
     DAILY_SUBPATH="Daily"
-    DAILY_DIR="${RESOLVED_VAULT}/Daily"
-    ;;
-esac
-DAILY_NOTE="${DAILY_DIR}/${TODAY}.md"
+    break
+  fi
+done
 
 ROUTING_RULES=$(awk '/^## Routing Rules/ { in_section=1; next } /^## / && in_section { exit } in_section { print }' "$CONFIG_FILE" | head -20)
 TAXONOMY=$(awk '/^## Project Taxonomy/ { in_section=1; next } /^## / && in_section { exit } in_section { print }' "$CONFIG_FILE" | head -20)
@@ -214,57 +218,25 @@ if [ "$CAPTURE_ACTION" = "daily_only" ]; then
   VAULT_FOLDER="${DAILY_SUBPATH}/"
 fi
 
-NOTE_DIR="${VAULT_PATH}/${VAULT_FOLDER}"
-
-# Resolve and verify the target stays inside the vault
-RESOLVED_VAULT=$(cd "$VAULT_PATH" && pwd -P)
-mkdir -p "$NOTE_DIR"
-RESOLVED_DIR=$(cd "$NOTE_DIR" && pwd -P)
-case "$RESOLVED_DIR" in
-  "${RESOLVED_VAULT}/"*|"${RESOLVED_VAULT}") ;;
-  *) exit 1 ;;
-esac
-
 NOTE_FILENAME="${TODAY}-${SLUG}.md"
-NOTE_PATH="${NOTE_DIR}/${NOTE_FILENAME}"
+NOTE_TARGET="${VAULT_FOLDER}${NOTE_FILENAME}"
 
 CLEAN_RESULT=$(printf '%s\n' "$RESULT" | sed '/^vault_folder:/d; /^slug:/d')
-printf '%s\n' "$CLEAN_RESULT" > "$NOTE_PATH"
+BODY_FILE="$(mktemp "${TMPDIR:-/tmp}/obsidian-session-note-XXXXXX")" || exit 1
+printf '%s\n' "$CLEAN_RESULT" > "$BODY_FILE" || exit 1
 
-RELATIVE_NOTE_PATH="${VAULT_FOLDER}${NOTE_FILENAME%.md}"
 TITLE=$(printf '%s\n' "$RESULT" | grep '^# ' | head -1 | sed 's/^# //')
 : "${TITLE:=$SLUG}"
 
-LINK_LINE="- [[${RELATIVE_NOTE_PATH}|${TITLE}]]"
-
-mkdir -p "$(dirname "$DAILY_NOTE")"
-
-if [ ! -f "$DAILY_NOTE" ]; then
-  cat > "$DAILY_NOTE" <<DAILY_EOF
-# ${TODAY}
-
-## Top 3
-1.
-2.
-3.
-
-## Schedule / Time blocks
--
-
-## Tasks
-- [ ]
-
-## Notes
--
-
-## Carryover
--
-
-## Session Links
-${LINK_LINE}
-DAILY_EOF
-elif grep -qF "## Session Links" "$DAILY_NOTE"; then
-  printf '%s\n' "$LINK_LINE" >> "$DAILY_NOTE"
-else
-  printf '\n## Session Links\n%s\n' "$LINK_LINE" >> "$DAILY_NOTE"
-fi
+# Recovery is safe only when the existing note is byte-identical. A different
+# same-target note remains an explicit keeper conflict and this process exits
+# non-zero without truncating it.
+bash "$(dirname "$0")/keeper" insert \
+  --vault "$RESOLVED_VAULT" \
+  --target "$NOTE_TARGET" \
+  --body-file "$BODY_FILE" \
+  --title "$TITLE" \
+  --session-link-date "$TODAY" \
+  --daily-path "$DAILY_SUBPATH" \
+  --recover \
+  --format json

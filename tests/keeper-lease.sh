@@ -88,6 +88,23 @@ grep -q "QUARANTINE"$'\t'"_vaultkeeper.sync-conflict" <<<"$OUT3" || fail "_vault
 [ "$(find "$V3/.vaultkeeper-quarantine" -name '*_vaultkeeper.sync-conflict*' 2>/dev/null | wc -l | tr -d ' ')" = "1" ] \
   || fail "_vaultkeeper .base conflict not preserved in quarantine"
 
+V4="$TMP/vault4"; OUTSIDE="$TMP/outside"; mkdir -p "$V4" "$OUTSIDE"
+ln -s "$OUTSIDE" "$V4/.vaultkeeper-quarantine"
+printf 'conflicted\n' > "$V4/Pending.sync-conflict-20260620-120000-ESCAPE.md"
+keeper_quarantine_conflicts "$V4" >/dev/null 2>&1 \
+  && fail "quarantine accepted a symlink destination"
+[ -f "$V4/Pending.sync-conflict-20260620-120000-ESCAPE.md" ] \
+  || fail "rejected quarantine lost the source conflict"
+[ -z "$(find "$OUTSIDE" -mindepth 1 -print -quit)" ] \
+  || fail "quarantine moved a conflict outside the vault"
+
+V5="$TMP/vault5"; OUTSIDE_CLAIMS="$TMP/outside-claims"; mkdir -p "$V5" "$OUTSIDE_CLAIMS"
+ln -s "$OUTSIDE_CLAIMS" "$V5/.vaultkeeper"
+keeper_claim_write "$V5/.vaultkeeper" hostile-host \
+  && fail "claim writer followed a symlinked lease directory"
+[ -z "$(find "$OUTSIDE_CLAIMS" -mindepth 1 -print -quit 2>/dev/null)" ] \
+  || fail "claim writer wrote outside the vault"
+
 # keeper_live_hosts under zsh, against a claim dir holding zero claims. Same
 # defect keeper_vault_health carried: an unquoted glob aborts under zsh NOMATCH,
 # and `for ... in <glob>` is not exempt. keeper_elect calls this, so an empty

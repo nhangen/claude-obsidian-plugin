@@ -223,6 +223,19 @@ test("stdio server exposes read-only tools with clean MCP framing", async (t) =>
   assert.equal(typeof metadata.result?.structuredContent?.subject, "string");
   assert.doesNotMatch(metadata.result?.content?.[0]?.text ?? "", /vault_path=/);
 
+  const beforeMutationAttempt = await readFile(join(vault, "mcp-note.md"), "utf8");
+  const unavailableMutation = await server.request(
+    {
+      jsonrpc: "2.0",
+      id: 80,
+      method: "tools/call",
+      params: { name: "obsidian_insert_note", arguments: { target: "mcp-note.md", body: "changed" } },
+    },
+    80,
+  );
+  assert.ok(unavailableMutation.error);
+  assert.equal(await readFile(join(vault, "mcp-note.md"), "utf8"), beforeMutationAttempt);
+
   const outOfScope = await server.request(
     {
       jsonrpc: "2.0",

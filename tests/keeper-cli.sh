@@ -289,9 +289,8 @@ bash "$KEEPER" insert --vault "$V" --target "Notes/quiet.md" \
 grep -q 'keeper: warning' "$TMP/quiet.err" \
   && fail "insert warned about a link it did write:"$'\n'"$(cat "$TMP/quiet.err")"
 
-# I10: when the INDEX link cannot be written, insert says so. The note is
-#      committed before the link step, so swallowing the failure with `|| true`
-#      let the CLI print the path and exit 0 on a note nothing links to (#104).
+# I10: when the INDEX link cannot be written, insert reports a recoverable
+#      partial rather than returning false success for an unlinked note (#104).
 if [ "$(id -u)" = "0" ]; then
   printf 'skip: unlinkable-INDEX assertion (running as root ignores 0444)\n' >&2
 else
@@ -300,15 +299,18 @@ else
   chmod 444 "$V/Locked/INDEX.md"
   set +e
   bash "$KEEPER" insert --vault "$V" --target "Locked/2026-06-29-orphan.md" \
-    --body-file "$TMP/note.md" >"$TMP/lock.out" 2>"$TMP/lock.err"
+    --body-file "$TMP/note.md" --format json >"$TMP/lock.out" 2>"$TMP/lock.err"
   LOCK_RC=$?
   set -e
   chmod 644 "$V/Locked/INDEX.md"
-  [ "$LOCK_RC" = "0" ] \
-    || fail "the note itself committed, so insert must still exit 0; rc=$LOCK_RC"
+  [ "$LOCK_RC" = "2" ] || fail "unlinked note must report partial; rc=$LOCK_RC"
   [ -f "$V/Locked/2026-06-29-orphan.md" ] || fail "insert did not write the note"
-  grep -q 'not linked from' "$TMP/lock.err" \
-    || fail "insert reported success on an unlinked note; stderr was:"$'\n'"$(cat "$TMP/lock.err")"
+  grep -q '"status":"partial"' "$TMP/lock.out" \
+    || fail "insert reported false success on an unlinked note"
+  grep -q '"recovery":' "$TMP/lock.out" || fail "partial INDEX write omitted recovery"
+  bash "$KEEPER" insert --vault "$V" --target "Locked/2026-06-29-orphan.md" \
+    --body-file "$TMP/note.md" --recover --format json >/dev/null \
+    || fail "INDEX partial was not recoverable"
 fi
 
 # I11: a Daily/ note that cannot be replaced leaves no stray temp file behind,
@@ -325,16 +327,18 @@ else
   chmod 555 "$V/Daily"
   set +e
   bash "$KEEPER" insert --vault "$V" --target "Notes/2026-07-01-locked-daily.md" \
-    --body-file "$TMP/note.md" --title "Locked Daily" --session-link-date 2026-07-01 \
+    --body-file "$TMP/note.md" --title "Locked Daily" --session-link-date 2026-07-01 --format json \
     >"$TMP/lockday.out" 2>"$TMP/lockday.err"
   LOCKDAY_RC=$?
   set -e
   chmod 755 "$V/Daily"
-  [ "$LOCKDAY_RC" = "0" ] \
-    || fail "the note committed, so insert must still exit 0; rc=$LOCKDAY_RC"
+  [ "$LOCKDAY_RC" = "2" ] || fail "failed daily backlink must report partial; rc=$LOCKDAY_RC"
   [ -f "$V/Notes/2026-07-01-locked-daily.md" ] || fail "insert did not write the note"
-  grep -q 'Daily/ is unwritable; no session link' "$TMP/lockday.err" \
-    || fail "an unwritable Daily/ directory was silent or gave wrong warning:"$'\n'"$(cat "$TMP/lockday.err")"
+  grep -q '"status":"partial"' "$TMP/lockday.out" \
+    || fail "an unwritable Daily/ directory reported false success"
+  bash "$KEEPER" insert --vault "$V" --target "Notes/2026-07-01-locked-daily.md" \
+    --body-file "$TMP/note.md" --title "Locked Daily" --session-link-date 2026-07-01 \
+    --recover --format json >/dev/null || fail "daily backlink partial was not recoverable"
   STRAY="$(find "$V/Daily" -maxdepth 1 -name '.Daily-*' | wc -l | tr -d ' ')"
   [ "$STRAY" = "0" ] \
     || fail "$STRAY stray temp file(s) left in Daily/ after a failed session link"
@@ -347,47 +351,47 @@ else
   chmod 555 "$V/Daily"
   set +e
   bash "$KEEPER" insert --vault "$V" --target "Notes/2026-07-02-no-daily-yet.md" \
-    --body-file "$TMP/note.md" --title "No Daily Yet" --session-link-date 2026-07-02 \
+    --body-file "$TMP/note.md" --title "No Daily Yet" --session-link-date 2026-07-02 --format json \
     >"$TMP/nodaily.out" 2>"$TMP/nodaily.err"
   NODAILY_RC=$?
   set -e
   chmod 755 "$V/Daily"
-  [ "$NODAILY_RC" = "0" ] \
-    || fail "insert exited $NODAILY_RC after committing the note; a caller reads that as 'not captured'"
+  [ "$NODAILY_RC" = "2" ] || fail "uncreatable daily note must report partial; rc=$NODAILY_RC"
   [ -f "$V/Notes/2026-07-02-no-daily-yet.md" ] || fail "insert did not write the note"
-  # The vault-relative suffix, not "$V/...": $TMPDIR is a symlink on macOS
-  # (/var -> /private/var) and keeper resolves it, so the absolute forms never
-  # match there and this arm failed on every run.
-  grep -qF "Notes/2026-07-02-no-daily-yet.md" "$TMP/nodaily.out" \
-    || fail "insert printed no path for a note it committed:"$'\n'"$(cat "$TMP/nodaily.out")"
-  grep -q 'no session link' "$TMP/nodaily.err" \
-    || fail "an uncreatable daily note was silent:"$'\n'"$(cat "$TMP/nodaily.err")"
+  grep -q '"recovery":' "$TMP/nodaily.out" || fail "daily creation partial omitted recovery"
+  bash "$KEEPER" insert --vault "$V" --target "Notes/2026-07-02-no-daily-yet.md" \
+    --body-file "$TMP/note.md" --title "No Daily Yet" --session-link-date 2026-07-02 \
+    --recover --format json >/dev/null || fail "daily creation partial was not recoverable"
 
   # I11c: swap failure on an existing daily note warns specifically about linking.
   FSWAP="$TMP/fault-swap"; mkdir -p "$FSWAP/lib"
   cp "${ROOT_DIR}/scripts/keeper" "$FSWAP/"
   cp "${ROOT_DIR}/scripts/lib/"* "$FSWAP/lib/"
   cat >> "$FSWAP/lib/note-hash.sh" <<'EOF'
-keeper_swap_or_clean() { rm -f "$1" 2>/dev/null; return 1; }
+keeper_swap_or_clean() {
+  case "$2" in
+    */Daily/*) rm -f "$1" 2>/dev/null; return 1 ;;
+    *) mv "$1" "$2" ;;
+  esac
+}
 EOF
   set +e
   bash "$FSWAP/keeper" insert --vault "$V" --target "Notes/2026-07-01-swap-fail.md" \
     --body-file "$TMP/note.md" --title "Swap Fail" --session-link-date 2026-07-01 \
-    >"$TMP/swapfail.out" 2>"$TMP/swapfail.err"
+    --format json >"$TMP/swapfail.out" 2>"$TMP/swapfail.err"
   SWAPFAIL_RC=$?
   set -e
-  [ "$SWAPFAIL_RC" = "0" ] || fail "swap failure must exit 0; rc=$SWAPFAIL_RC"
-  grep -q 'could not be linked into Daily/2026-07-01.md' "$TMP/swapfail.err" \
-    || fail "a swap failure did not report could not be linked into Daily:"$'\n'"$(cat "$TMP/swapfail.err")"
+  [ "$SWAPFAIL_RC" = "2" ] || fail "daily swap failure must report partial; rc=$SWAPFAIL_RC"
+  grep -q '"status":"partial"' "$TMP/swapfail.out" \
+    || fail "a daily swap failure reported false success"
+  bash "$KEEPER" insert --vault "$V" --target "Notes/2026-07-01-swap-fail.md" \
+    --body-file "$TMP/note.md" --title "Swap Fail" --session-link-date 2026-07-01 \
+    --recover --format json >/dev/null || fail "daily swap partial was not recoverable"
   STRAY="$(find "$V/Daily" -maxdepth 1 -name '.Daily-*' | wc -l | tr -d ' ')"
   [ "$STRAY" = "0" ] || fail "$STRAY stray temp file(s) left after failed swap"
 fi
 
-# I10b: the INDEX creation write is the third bare write after the note
-# commits. `[ -f "$idx" ] || printf ... > "$idx"` aborts under `set -e` when
-# INDEX.md cannot be created -- an INDEX.md that is a directory is the cheap
-# reproduction, ENOSPC the real one -- so insert exits 1 having written the
-# note, which callers read as "not captured". Same invariant as I10 and I11b.
+# I10b: an unusable INDEX target is also a recoverable partial, not success.
 if [ "$(id -u)" = "0" ]; then
   printf 'skip: unwritable-INDEX assertion (running as root)\n' >&2
 else
@@ -395,33 +399,36 @@ else
   mkdir -p "$V/Blocked/INDEX.md"
   set +e
   bash "$KEEPER" insert --vault "$V" --target "Blocked/2026-07-03-blocked-index.md" \
-    --body-file "$TMP/note.md" --title "Blocked Index" \
+    --body-file "$TMP/note.md" --title "Blocked Index" --format json \
     >"$TMP/blockidx.out" 2>"$TMP/blockidx.err"
   BLOCKIDX_RC=$?
   set -e
-  [ "$BLOCKIDX_RC" = "0" ] \
-    || fail "the note committed, so insert must still exit 0 with an unusable INDEX; rc=$BLOCKIDX_RC"$'\n'"$(cat "$TMP/blockidx.err")"
+  [ "$BLOCKIDX_RC" = "2" ] || fail "unusable INDEX must report partial; rc=$BLOCKIDX_RC"
   [ -f "$V/Blocked/2026-07-03-blocked-index.md" ] || fail "insert did not write the note"
-  grep -q 'keeper: warning' "$TMP/blockidx.err" \
-    || fail "an unusable INDEX.md was silent:"$'\n'"$(cat "$TMP/blockidx.err")"
+  grep -q '"status":"partial"' "$TMP/blockidx.out" || fail "unusable INDEX reported false success"
   rmdir "$V/Blocked/INDEX.md" 2>/dev/null || true
+  bash "$KEEPER" insert --vault "$V" --target "Blocked/2026-07-03-blocked-index.md" \
+    --body-file "$TMP/note.md" --title "Blocked Index" --recover --format json >/dev/null \
+    || fail "unusable INDEX partial was not recoverable"
 
-  # I10c: when vault_index_apply returns a non-zero rc, insert reports the rc suffix.
+  # I10c: when the locked INDEX apply returns a non-zero rc, insert reports the rc suffix.
   FIDX="$TMP/fault-idx"; mkdir -p "$FIDX/lib"
   cp "${ROOT_DIR}/scripts/keeper" "$FIDX/"
   cp "${ROOT_DIR}/scripts/lib/"* "$FIDX/lib/"
   cat >> "$FIDX/lib/vault-index.sh" <<'EOF'
-vault_index_apply() { return 42; }
+vault_index_apply_held() { return 42; }
 EOF
   set +e
   bash "$FIDX/keeper" insert --vault "$V" --target "Notes/2026-06-29-rc-fail.md" \
-    --body-file "$TMP/note.md" --title "RC Fail" \
+    --body-file "$TMP/note.md" --title "RC Fail" --format json \
     >"$TMP/rcfail.out" 2>"$TMP/rcfail.err"
   RCFAIL_RC=$?
   set -e
-  [ "$RCFAIL_RC" = "0" ] || fail "INDEX apply failure must exit 0; rc=$RCFAIL_RC"
-  grep -q '(INDEX step failed, rc=42)' "$TMP/rcfail.err" \
-    || fail "non-zero vault_index_apply rc was not reported:"$'\n'"$(cat "$TMP/rcfail.err")"
+  [ "$RCFAIL_RC" = "2" ] || fail "INDEX apply failure must report partial; rc=$RCFAIL_RC"
+  grep -q '"recovery":' "$TMP/rcfail.out" || fail "INDEX apply partial omitted recovery"
+  bash "$KEEPER" insert --vault "$V" --target "Notes/2026-06-29-rc-fail.md" \
+    --body-file "$TMP/note.md" --title "RC Fail" --recover --format json >/dev/null \
+    || fail "INDEX apply partial was not recoverable"
 fi
 
 # 14. zsh portability — both subcommands clean under zsh (insert sources the substrate libs)

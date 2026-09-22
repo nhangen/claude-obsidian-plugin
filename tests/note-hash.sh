@@ -29,6 +29,117 @@ note_hash_valid "" && fail "should reject empty"
 M="$(file_mtime "$TMP/a.md")"; [[ "$M" =~ ^[0-9]+$ ]] || fail "file_mtime not integer: $M"
 N="$(now_epoch)"; [[ "$N" =~ ^[0-9]+$ ]] || fail "now_epoch not integer: $N"
 
+wait_for_file() {
+  local file="$1" n=0
+  while [ ! -e "$file" ] && [ "$n" -lt 500 ]; do sleep 0.01; n=$(( n + 1 )); done
+  [ -e "$file" ] || fail "timed out waiting for $file"
+}
+
+# The first acquirer pauses before publishing a complete owner-bearing candidate.
+# A second process may acquire while the candidate is private, but the two
+# processes must never overlap in the critical section.
+PAUSE="$TMP/publish-pause"
+mkdir -p "$PAUSE"
+KEEPER_TEST_PAUSE_POINT=before_lock_owner KEEPER_TEST_PAUSE_DIR="$PAUSE" \
+  bash -c '
+    set -e
+    . "$1"
+    lock="$(keeper_lock_acquire "$2")"
+    : > "$3/paused-entered"
+    while [ ! -e "$3/release-paused" ]; do sleep 0.01; done
+    keeper_lock_release "$lock"
+  ' _ "$ROOT_DIR/scripts/lib/note-hash.sh" "$TMP/paused-key" "$PAUSE" \
+  >/dev/null 2>&1 & paused_pid=$!
+wait_for_file "$PAUSE/ready"
+
+bash -c '
+  set -e
+  . "$1"
+  lock="$(keeper_lock_acquire "$2")"
+  : > "$3/second-entered"
+  while [ ! -e "$3/release-second" ]; do sleep 0.01; done
+  keeper_lock_release "$lock"
+' _ "$ROOT_DIR/scripts/lib/note-hash.sh" "$TMP/paused-key" "$PAUSE" \
+  >/dev/null 2>&1 & second_pid=$!
+sleep 0.1
+[ -e "$PAUSE/second-entered" ] || fail "second acquirer did not enter while the first candidate was private"
+: > "$PAUSE/release-second"
+wait "$second_pid"
+: > "$PAUSE/continue"
+wait_for_file "$PAUSE/paused-entered"
+: > "$PAUSE/release-paused"
+wait "$paused_pid"
+
+# A legacy crash before owner publication can leave an ownerless directory. It
+# becomes recoverable only after the bounded stale-publication interval. New
+# acquisitions publish owner metadata atomically with the canonical lock path.
+OWNERLESS_KEY="$TMP/ownerless-key"
+LOCK_ROOT="/tmp/claude-obsidian-keeper-$(id -u)"
+OWNERLESS_LOCK="$LOCK_ROOT/$(keeper_sha256_text "$OWNERLESS_KEY").lock"
+rm -f "$OWNERLESS_LOCK/owner" 2>/dev/null || true
+rmdir "$OWNERLESS_LOCK" 2>/dev/null || true
+mkdir -p "$OWNERLESS_LOCK"
+touch -t 200001010000 "$OWNERLESS_LOCK"
+sleep 2
+record="$(KEEPER_LOCK_STALE_SECONDS=1 keeper_lock_acquire "$OWNERLESS_KEY")" \
+  || fail "stale ownerless lock was not recovered"
+keeper_lock_release "$record" || fail "recovered ownerless lock could not be released"
+
+# An interrupted reclaimer may leave a tombstone, but never the canonical lock.
+INTERRUPTED_KEY="$TMP/interrupted-reclaim-key"
+INTERRUPTED_LOCK="$LOCK_ROOT/$(keeper_sha256_text "$INTERRUPTED_KEY").lock"
+mkdir -p "$INTERRUPTED_LOCK"
+printf '99999999\nold-token\n' > "$INTERRUPTED_LOCK/owner"
+REAP_PAUSE="$TMP/reap-pause"; mkdir -p "$REAP_PAUSE"
+KEEPER_TEST_PAUSE_POINT=after_lock_reap KEEPER_TEST_PAUSE_DIR="$REAP_PAUSE" \
+  KEEPER_LOCK_STALE_SECONDS=0 bash -c '. "$1"; keeper_lock_acquire "$2" >/dev/null' \
+    _ "$ROOT_DIR/scripts/lib/note-hash.sh" "$INTERRUPTED_KEY" & reaper_pid=$!
+wait_for_file "$REAP_PAUSE/ready"
+kill -9 "$reaper_pid" 2>/dev/null || true
+wait "$reaper_pid" 2>/dev/null || true
+[ ! -e "$INTERRUPTED_LOCK" ] || fail "interrupted reclaim left the canonical lock wedged"
+record="$(KEEPER_LOCK_STALE_SECONDS=0 keeper_lock_acquire "$INTERRUPTED_KEY")" \
+  || fail "lock was not acquirable after interrupted reclaim"
+keeper_lock_release "$record" || fail "post-reclaim lock could not be released"
+
+# A numeric dead owner is reclaimed without moving the final lock directory.
+DEAD_KEY="$TMP/dead-owner-key"
+DEAD_LOCK="$LOCK_ROOT/$(keeper_sha256_text "$DEAD_KEY").lock"
+mkdir -p "$DEAD_LOCK"
+printf '99999999\n' > "$DEAD_LOCK/owner"
+RECLAIM_DIR="$TMP/dead-reclaim"
+mkdir -p "$RECLAIM_DIR"
+for _ in 1 2; do
+  KEEPER_LOCK_STALE_SECONDS=0 bash -c '
+    set -e
+    . "$1"
+    lock="$(keeper_lock_acquire "$2")"
+    : > "$3/entered-$$"
+    while [ ! -e "$3/release-$$" ]; do sleep 0.01; done
+    keeper_lock_release "$lock"
+  ' _ "$ROOT_DIR/scripts/lib/note-hash.sh" "$DEAD_KEY" "$RECLAIM_DIR" \
+    >/dev/null 2>&1 &
+done
+for _ in $(seq 1 500); do
+  [ "$(find "$RECLAIM_DIR" -name 'entered-*' | wc -l | tr -d ' ')" = 1 ] && break
+  sleep 0.01
+done
+[ "$(find "$RECLAIM_DIR" -name 'entered-*' | wc -l | tr -d ' ')" = 1 ] \
+  || fail "dead-owner reclaim did not produce one entrant"
+sleep 0.1
+[ "$(find "$RECLAIM_DIR" -name 'entered-*' | wc -l | tr -d ' ')" = 1 ] \
+  || fail "dead-owner reclaim admitted two processes"
+FIRST_ENTRY="$(find "$RECLAIM_DIR" -name 'entered-*' -print -quit)"
+: > "${FIRST_ENTRY/entered-/release-}"
+for _ in $(seq 1 500); do
+  [ "$(find "$RECLAIM_DIR" -name 'entered-*' | wc -l | tr -d ' ')" = 2 ] && break
+  sleep 0.01
+done
+[ "$(find "$RECLAIM_DIR" -name 'entered-*' | wc -l | tr -d ' ')" = 2 ] \
+  || fail "second process never acquired the reclaimed lock"
+for entry in "$RECLAIM_DIR"/entered-*; do : > "${entry/entered-/release-}"; done
+wait
+
 # The two spellings cannot be told apart by exit status: GNU stat reads `-f` as
 # a filesystem query and SUCCEEDS on it, returning a block of filesystem stats.
 # Trusting that answer gave every caller a non-numeric mtime — vault_index_plan
