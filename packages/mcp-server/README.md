@@ -8,9 +8,39 @@ hooks, commands, and keeper remain unchanged.
 
 ```bash
 npm ci
+npm run build
 npm test
 npm start
 ```
+
+The TypeScript build emits the runnable package into `dist/` and copies the
+canonical deterministic config and commit-metadata helpers into that package
+output. The package exposes `claude-obsidian-mcp` for stdio and
+`claude-obsidian-mcp-http` for authenticated Streamable HTTP. Both commands
+resolve their implementation from the installed package, independent of the
+caller's working directory.
+
+An installed package can be configured in a stdio MCP client with the stable
+launcher and explicit configuration boundaries:
+
+```json
+{
+  "mcpServers": {
+    "obsidian": {
+      "command": "claude-obsidian-mcp",
+      "env": {
+        "OBSIDIAN_LOCAL_MD": "/absolute/path/to/obsidian.local.md",
+        "MCP_REPOSITORY_ROOTS": "/absolute/path/to/repository"
+      }
+    }
+  }
+}
+```
+
+The client invokes the package command rather than a file inside the package;
+configuration and repository authorization remain explicit environment values.
+Installed packages authorize no repository roots when `MCP_REPOSITORY_ROOTS`
+is omitted. Multiple roots use the platform path delimiter.
 
 Authenticated Streamable HTTP uses stateful sessions at `/mcp` for the
 compatibility revision `2025-11-25`:
@@ -44,10 +74,12 @@ stateful adapter does not classify modern envelopes; it is not advertised as
 supported.
 
 The server resolves `OBSIDIAN_LOCAL_MD` through the existing stable resolver.
-The stdio entrypoint does not start an HTTP listener. Neither entrypoint exposes vault mutation tools. Repository
-metadata is limited to the adapter repository root by default; set the
-path-delimited `MCP_REPOSITORY_ROOTS` environment variable to approve additional
-local repository roots.
+The stdio entrypoint does not start an HTTP listener. Neither entrypoint exposes vault mutation tools. In this
+repository's source checkout, the source entrypoint retains the documented
+behavior of defaulting repository metadata access to the repository root. An
+installed package never infers authorization from its install location or
+working directory. Set the path-delimited `MCP_REPOSITORY_ROOTS` environment
+variable to enable `obsidian_commit_meta` for explicit local repository roots.
 
 The taxonomy resource returns only the project-taxonomy table. Tool arguments
 are validated inside the handlers so invalid input uses the stable structured

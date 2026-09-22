@@ -1,5 +1,7 @@
+#!/usr/bin/env node
+
 import { spawn, spawnSync } from "node:child_process";
-import { constants as fsConstants, readFileSync, realpathSync, statSync } from "node:fs";
+import { constants as fsConstants, existsSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { lstat, open, readdir } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { delimiter, dirname, extname, isAbsolute, join, relative, resolve } from "node:path";
@@ -8,9 +10,32 @@ import { serveStdio } from "@modelcontextprotocol/server/stdio";
 import { z } from "zod";
 
 const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
-const repositoryRoot = resolve(packageRoot, "../..");
-const configResolver = join(repositoryRoot, "scripts", "lib", "resolve-config.sh");
-const metadataScript = join(repositoryRoot, "scripts", "commit-meta.sh");
+const sourceRepositoryRoot = resolve(packageRoot, "../..");
+const sourcePackageRoot = join(sourceRepositoryRoot, "packages", "mcp-server");
+
+function detectSourceCheckout() {
+  try {
+    const pluginManifest = JSON.parse(readFileSync(join(sourceRepositoryRoot, ".claude-plugin", "plugin.json"), "utf8"));
+    return pluginManifest.name === "obsidian"
+      && existsSync(join(sourceRepositoryRoot, ".git"))
+      && realpathSync(packageRoot) === realpathSync(sourcePackageRoot)
+      && existsSync(join(sourceRepositoryRoot, "scripts", "lib", "resolve-config.sh"))
+      && existsSync(join(sourceRepositoryRoot, "scripts", "commit-meta.sh"));
+  } catch {
+    return false;
+  }
+}
+
+const isSourceCheckout = detectSourceCheckout();
+const packagedHelperRoot = join(packageRoot, "dist", "helpers");
+
+function helperPath(...segments) {
+  if (isSourceCheckout) return join(sourceRepositoryRoot, "scripts", ...segments);
+  return join(packagedHelperRoot, ...segments);
+}
+
+const configResolver = helperPath("lib", "resolve-config.sh");
+const metadataScript = helperPath("commit-meta.sh");
 const maxResults = 5;
 const maxPreviewLength = 240;
 const maxFileBytes = 4 * 1024 * 1024;
@@ -93,7 +118,8 @@ function loadConfiguration() {
     throw new Error("daily_path must remain within the configured vault");
   }
   const configuredRoots = process.env.MCP_REPOSITORY_ROOTS?.split(delimiter).filter(Boolean);
-  const repositoryRoots = (configuredRoots?.length ? configuredRoots : [repositoryRoot]).map((root) => {
+  const defaultRoots = isSourceCheckout ? [sourceRepositoryRoot] : [];
+  const repositoryRoots = (configuredRoots?.length ? configuredRoots : defaultRoots).map((root) => {
     try {
       const canonical = realpathSync(resolve(root));
       if (!statSync(canonical).isDirectory()) throw new Error("not a directory");
@@ -237,7 +263,7 @@ function commitMetadata(repository, approvedRoots, signal) {
   throwIfAborted(signal);
   return new Promise((resolveResult, reject) => {
     const child = spawn("bash", [metadataScript, "-C", canonicalRepository], {
-      cwd: repositoryRoot,
+      cwd: canonicalRepository,
       env: childEnvironment(),
       detached: process.platform !== "win32",
       shell: false,
@@ -488,7 +514,7 @@ export async function closeActiveChildren() {
   await Promise.all([...activeChildren].map((child) => terminateChild(child)));
 }
 
-function startStdio() {
+export function startStdio() {
   const handle = serveStdio(createServer, { onerror: (error) => stderr(error instanceof Error ? error.message : String(error)) });
   let shuttingDown = false;
   async function shutdown(exit = false) {
@@ -505,4 +531,4 @@ function startStdio() {
   process.stdin.once("end", () => void shutdown(false));
 }
 
-if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) startStdio();
+if (process.argv[1] && realpathSync(resolve(process.argv[1])) === realpathSync(fileURLToPath(import.meta.url))) startStdio();

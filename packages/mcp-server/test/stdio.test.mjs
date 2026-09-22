@@ -13,7 +13,7 @@ const repositoryRoot = resolve(packageRoot, "../..");
 function startServer(configPath, extraEnv = {}) {
   const child = spawn(process.execPath, [entrypoint], {
     cwd: tmpdir(),
-    env: { ...process.env, OBSIDIAN_LOCAL_MD: configPath, ...extraEnv },
+    env: { ...process.env, OBSIDIAN_LOCAL_MD: configPath, MCP_REPOSITORY_ROOTS: repositoryRoot, ...extraEnv },
     stdio: ["pipe", "pipe", "pipe"],
   });
   let stdout = "";

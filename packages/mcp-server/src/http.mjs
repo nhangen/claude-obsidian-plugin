@@ -1,3 +1,5 @@
+#!/usr/bin/env node
+
 import { createHash, createHmac, randomUUID, timingSafeEqual } from "node:crypto";
 import { createServer as createHttpServer } from "node:http";
 import { WebStandardStreamableHTTPServerTransport, validateHostHeader } from "@modelcontextprotocol/server";
