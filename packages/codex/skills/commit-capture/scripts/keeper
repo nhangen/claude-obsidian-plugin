@@ -16,7 +16,66 @@ set -euo pipefail
 # function name (bash keeps the script path), so $0 is only reliable out here.
 KEEPER_DIR="$(cd "$(dirname "$0")" && pwd -P)"
 
-keeper_die() { printf 'keeper: %s\n' "$*" >&2; exit 1; }
+. "$KEEPER_DIR/lib/note-hash.sh"
+. "$KEEPER_DIR/lib/vault-index.sh"
+
+KEEPER_FORMAT=text
+KEEPER_OUTCOME_EMITTED=0
+
+keeper_emit_outcome() {
+  local outcome="$1" value="${2:-}"
+  KEEPER_OUTCOME_EMITTED=1
+  if [ "$KEEPER_FORMAT" = json ]; then
+    if [ "$outcome" = partial ]; then
+      printf '{"status":"partial","recovery":"rerun with --recover"}\n'
+    else
+      printf '{"status":"%s"}\n' "$outcome"
+    fi
+  elif [ -n "$value" ]; then
+    printf '%s\n' "$value"
+  fi
+}
+
+keeper_die() {
+  printf 'keeper: %s\n' "$*" >&2
+  keeper_emit_outcome failed
+  exit 1
+}
+
+keeper_fail_locked() {
+  printf 'keeper: %s\n' "$1" >&2
+  keeper_emit_outcome failed
+  return 1
+}
+
+keeper_partial_locked() {
+  printf 'keeper: partial — %s; rerun the same insert with --recover\n' "$1" >&2
+  keeper_emit_outcome partial
+  return 2
+}
+
+keeper_conflict_locked() {
+  printf 'keeper: conflict — %s\n' "$1" >&2
+  keeper_emit_outcome conflict
+  return 3
+}
+
+keeper_select_format() {
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --format)
+        [ $# -ge 2 ] || keeper_die "--format requires a value"
+        [ "$2" = json ] || [ "$2" = text ] || keeper_die "--format must be text or json"
+        KEEPER_FORMAT="$2"
+        shift 2 ;;
+      --recover) shift ;;
+      --vault|--target|--date|--section|--body-file|--init-file|--skip-if-hash|--title|--session-link-date)
+        [ $# -ge 2 ] || break
+        shift 2 ;;
+      *) shift ;;
+    esac
+  done
+}
 
 # Resolve + validate a vault path. Echoes the absolute vault root or dies.
 # Arg: the --vault value (may be empty → fall back to resolve-config.sh).
@@ -34,12 +93,49 @@ keeper_resolve_vault() {
 
 # Reject an absolute or '..'-bearing target (portable; no realpath).
 keeper_guard_target() {
+  [ -n "$1" ] || keeper_die "--target must not be empty"
   case "$1" in
     /*) keeper_die "--target must be vault-relative, not absolute: $1" ;;
+    *$'\n'*|*$'\r'*|*$'\t'*) keeper_die "--target contains a forbidden control delimiter" ;;
   esac
   case "/$1/" in
     *"/../"*) keeper_die "--target must not contain a '..' component: $1" ;;
   esac
+}
+
+# Resolve the nearest existing ancestor before mkdir, then resolve the final
+# parent afterwards. This rejects symlink escapes without realpath and without
+# creating missing directories through an outside-vault symlink.
+keeper_prepare_target() {
+  local vault="$1" target="$2" full parent probe canonical next
+  full="$vault/$target"
+  parent="$(dirname "$full")"
+  probe="$parent"
+  while [ ! -d "$probe" ]; do
+    if [ -e "$probe" ] || [ -L "$probe" ]; then
+      printf 'keeper: target parent is not a directory: %s\n' "$target" >&2
+      return 1
+    fi
+    next="$(dirname "$probe")"
+    [ "$next" != "$probe" ] || return 1
+    probe="$next"
+  done
+  canonical="$(cd "$probe" 2>/dev/null && pwd -P)" || return 1
+  case "$canonical" in "$vault"|"$vault"/*) : ;; *)
+    printf 'keeper: target escapes the configured vault: %s\n' "$target" >&2
+    return 1 ;;
+  esac
+  mkdir -p "$parent" || return 1
+  canonical="$(cd "$parent" 2>/dev/null && pwd -P)" || return 1
+  case "$canonical" in "$vault"|"$vault"/*) : ;; *)
+    printf 'keeper: target escapes the configured vault: %s\n' "$target" >&2
+    return 1 ;;
+  esac
+  [ ! -L "$full" ] || {
+    printf 'keeper: refusing symlink target: %s\n' "$target" >&2
+    return 1
+  }
+  printf '%s/%s\n' "$canonical" "$(basename "$full")"
 }
 
 # Does any section heading in $1 name the sha $2? Heading-only (a context bullet
@@ -71,8 +167,45 @@ keeper_heading_has_sha() {
 }
 
 # append a timestamped section to a dated note, creating it on absence.
+_cmd_append_locked() {
+  local vault_abs="$1" target="$2" section="$3" body_file="$4" init_file="$5"
+  local skip_hash="$6" skip_given="$7" full tmp body
+  full="$(keeper_prepare_target "$vault_abs" "$target")" \
+    || { keeper_fail_locked "append target is not writable inside the vault"; return 1; }
+
+  if [ "$skip_given" = 1 ] && [ -f "$full" ] \
+     && keeper_heading_has_sha "$full" "$skip_hash"; then
+    printf 'keeper: append skipped — %s already has a section for %s\n' "$target" "$skip_hash" >&2
+    keeper_emit_outcome skipped "$full"
+    return 0
+  fi
+
+  tmp="$(mktemp "$(dirname "$full")/.keeper-append-XXXXXX")" \
+    || { keeper_fail_locked "could not stage append for $target"; return 1; }
+  if [ -f "$full" ]; then
+    cp "$full" "$tmp" \
+      || { rm -f "$tmp"; keeper_fail_locked "could not read $target"; return 1; }
+  elif [ -n "$init_file" ]; then
+    cp "$init_file" "$tmp" \
+      || { rm -f "$tmp"; keeper_fail_locked "could not read init file"; return 1; }
+  fi
+  if [ -n "$body_file" ]; then
+    body="$(cat "$body_file")" \
+      || { rm -f "$tmp"; keeper_fail_locked "could not read body file"; return 1; }
+  else
+    body="$(cat)" \
+      || { rm -f "$tmp"; keeper_fail_locked "could not read stdin"; return 1; }
+  fi
+  printf '\n%s\n\n%s\n' "$section" "$body" >> "$tmp" \
+    || { rm -f "$tmp"; keeper_fail_locked "could not stage append for $target"; return 1; }
+  keeper_swap_or_clean "$tmp" "$full" \
+    || { keeper_fail_locked "could not commit append for $target"; return 1; }
+  keeper_emit_outcome committed "$full"
+}
+
 cmd_append() {
-  local vault="" target="" date="" section="" body_file="" init_file="" skip_hash="" skip_given=0
+  local vault="" target="" date="" section="" body_file="" init_file="" skip_hash="" skip_given=0 format="text"
+  keeper_select_format "$@"
   while [ $# -gt 0 ]; do
     case "$1" in
       --vault)     vault="${2:-}";     shift 2 ;;
@@ -82,6 +215,7 @@ cmd_append() {
       --body-file) body_file="${2:-}"; shift 2 ;;
       --init-file) init_file="${2:-}"; shift 2 ;;
       --skip-if-hash) skip_hash="${2:-}"; skip_given=1; shift 2 ;;
+      --format)    format="${2:-}";      shift 2 ;;
       *) keeper_die "append: unknown arg: $1" ;;
     esac
   done
@@ -93,10 +227,9 @@ cmd_append() {
   if [ -z "$target" ] && [ -z "$date" ]; then keeper_die "append: --target or --date required"; fi
   [ -n "$date" ] && target="Daily/$date.md"
   keeper_guard_target "$target"
-
-  local full parent
-  full="$vault_abs/$target"
-  parent="$(dirname "$full")"
+  [ "$format" = "$KEEPER_FORMAT" ] || keeper_die "append: invalid format"
+  [ -z "$body_file" ] || [ -f "$body_file" ] || keeper_die "append: --body-file not found: $body_file"
+  [ -z "$init_file" ] || [ -f "$init_file" ] || keeper_die "append: --init-file not found: $init_file"
 
   # Idempotency, read from the vault rather than from a host-local marker (#62).
   # The old commit-capture gate kept its key under XDG_STATE_HOME, which never
@@ -111,25 +244,8 @@ cmd_append() {
     case "$skip_hash" in
       '') keeper_die "append: --skip-if-hash requires a value" ;;
       *[!0-9a-fA-F]*) keeper_die "append: --skip-if-hash must be a hex sha: $skip_hash" ;;
-      *)
-        if [ -f "$full" ] && keeper_heading_has_sha "$full" "$skip_hash"; then
-          printf 'keeper: append skipped — %s already has a section for %s\n' "$target" "$skip_hash" >&2
-          printf '%s\n' "$full"
-          return 0
-        fi
-        ;;
+      *) : ;;
     esac
-  fi
-
-  mkdir -p "$parent"
-
-  if [ ! -f "$full" ]; then
-    if [ -n "$init_file" ]; then
-      [ -f "$init_file" ] || keeper_die "append: --init-file not found: $init_file"
-      cat "$init_file" > "$full"
-    else
-      : > "$full"
-    fi
   fi
 
   # --section names a section, so it is written as a heading (#100). Callers
@@ -147,22 +263,103 @@ cmd_append() {
     *) section="## $section" ;;
   esac
 
-  local body
-  if [ -n "$body_file" ]; then
-    [ -f "$body_file" ] || keeper_die "append: --body-file not found: $body_file"
-    body="$(cat "$body_file")"
-  else
-    body="$(cat)"
+  local rc=0
+  KEEPER_OUTCOME_EMITTED=0
+  keeper_with_lock "$vault_abs" _cmd_append_locked \
+    "$vault_abs" "$target" "$section" "$body_file" "$init_file" "$skip_hash" "$skip_given" || rc=$?
+  if [ "$rc" -ne 0 ] && [ "$KEEPER_OUTCOME_EMITTED" = 0 ]; then
+    printf 'keeper: append failed before an outcome was produced\n' >&2
+    keeper_emit_outcome failed
   fi
-
-  printf '\n%s\n\n%s\n' "$section" "$body" >> "$full"
-  printf '%s\n' "$full"
+  return "$rc"
 }
 
 # write a pre-resolved new note + INDEX link (+ optional daily Session Links).
 # Refuses to overwrite an existing target — the caller owns dedup/collision.
+keeper_daily_link_locked() {
+  local vault_abs="$1" target="$2" title="$3" sldate="$4"
+  local daily_rel="Daily/$sldate.md" daily folder ltarget link tmp
+  daily="$(keeper_prepare_target "$vault_abs" "$daily_rel")" || return 1
+  if [ ! -f "$daily" ]; then
+    tmp="$(mktemp "$(dirname "$daily")/.keeper-daily-XXXXXX")" || return 1
+    printf -- '---\ndate: %s\ntags: [daily]\n---\n\n# %s\n' "$sldate" "$sldate" > "$tmp" \
+      || { rm -f "$tmp"; return 1; }
+    keeper_swap_or_clean "$tmp" "$daily" || return 1
+  fi
+  folder="$(dirname "$vault_abs/$target")"
+  ltarget="$(vault_link_target "$folder" "$(basename "$target" .md)")"
+  link="- [[$ltarget]]"
+  [ "$title" = "$(basename "$target" .md)" ] || link="- [[$ltarget|$title]]"
+  if grep -qF -- "[[$ltarget]]" "$daily" || grep -qF -- "[[$ltarget|" "$daily"; then
+    return 0
+  fi
+  tmp="$(mktemp "$(dirname "$daily")/.keeper-daily-XXXXXX")" || return 1
+  if grep -q '^## Session Links' "$daily"; then
+    awk -v link="$link" '{print} /^## Session Links/ && !d {print link; d=1}' "$daily" > "$tmp" \
+      || { rm -f "$tmp"; return 1; }
+  else
+    { cat "$daily"; printf '\n## Session Links\n%s\n' "$link"; } > "$tmp" \
+      || { rm -f "$tmp"; return 1; }
+  fi
+  keeper_swap_or_clean "$tmp" "$daily"
+}
+
+_cmd_insert_locked() {
+  local vault_abs="$1" target="$2" body_file="$3" title="$4" sldate="$5" recover="$6"
+  local full folder idx tmp wrote_note=0
+  full="$(keeper_prepare_target "$vault_abs" "$target")" \
+    || { keeper_fail_locked "insert target is not writable inside the vault"; return 1; }
+  folder="$(dirname "$full")"
+
+  if [ -e "$full" ]; then
+    if [ "$recover" != 1 ]; then
+      keeper_conflict_locked "insert target already exists: $target"
+      return 3
+    fi
+    if [ ! -f "$full" ] || ! cmp -s "$body_file" "$full"; then
+      keeper_conflict_locked "recovery target differs from the requested note: $target"
+      return 3
+    fi
+  else
+    tmp="$(mktemp "$folder/.keeper-insert-XXXXXX")" \
+      || { keeper_fail_locked "could not stage insert for $target"; return 1; }
+    cp "$body_file" "$tmp" \
+      || { rm -f "$tmp"; keeper_fail_locked "could not stage insert for $target"; return 1; }
+    keeper_swap_or_clean "$tmp" "$full" \
+      || { keeper_fail_locked "could not commit insert for $target"; return 1; }
+    wrote_note=1
+  fi
+
+  if [ "$wrote_note" = 1 ]; then
+    keeper_fault after_note \
+      || { keeper_partial_locked "$target was written but INDEX and daily recovery remain"; return 2; }
+  fi
+
+  idx="$folder/INDEX.md"
+  if ! vault_index_apply "$folder" "$idx" >/dev/null; then
+    keeper_partial_locked "$target was written but INDEX reconciliation is incomplete"
+    return 2
+  fi
+  keeper_fault after_index \
+    || { keeper_partial_locked "$target and INDEX were written but daily recovery may remain"; return 2; }
+
+  if [ -n "$sldate" ]; then
+    keeper_fault before_daily \
+      || { keeper_partial_locked "$target and INDEX were written but the daily backlink remains"; return 2; }
+    if ! keeper_daily_link_locked "$vault_abs" "$target" "$title" "$sldate"; then
+      keeper_partial_locked "$target and INDEX were written but the daily backlink failed"
+      return 2
+    fi
+    keeper_fault after_daily \
+      || { keeper_partial_locked "$target, INDEX, and daily backlink were written; recovery must verify them"; return 2; }
+  fi
+
+  keeper_emit_outcome committed "$full"
+}
+
 cmd_insert() {
-  local vault="" target="" body_file="" title="" sldate=""
+  local vault="" target="" body_file="" title="" sldate="" recover=0 format="text"
+  keeper_select_format "$@"
   while [ $# -gt 0 ]; do
     case "$1" in
       --vault)              vault="${2:-}";     shift 2 ;;
@@ -170,6 +367,8 @@ cmd_insert() {
       --body-file)          body_file="${2:-}"; shift 2 ;;
       --title)              title="${2:-}";     shift 2 ;;
       --session-link-date)  sldate="${2:-}";    shift 2 ;;
+      --recover)            recover=1;           shift ;;
+      --format)             format="${2:-}";    shift 2 ;;
       *) keeper_die "insert: unknown arg: $1" ;;
     esac
   done
@@ -179,6 +378,7 @@ cmd_insert() {
   [ -n "$body_file" ] || keeper_die "insert: --body-file required"
   [ -f "$body_file" ] || keeper_die "insert: --body-file not found: $body_file"
   keeper_guard_target "$target"
+  [ "$format" = "$KEEPER_FORMAT" ] || keeper_die "insert: invalid format"
   if [ -n "$sldate" ]; then
     case "$sldate" in
       [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]) : ;;
@@ -186,112 +386,16 @@ cmd_insert() {
     esac
   fi
 
-  local full folder
-  full="$vault_abs/$target"
-  folder="$(dirname "$full")"
-  [ -e "$full" ] && keeper_die "insert: target already exists (refusing to overwrite): $target"
-  mkdir -p "$folder"
-  cat "$body_file" > "$full"
-
-  # title defaults to the filename stem (date prefix kept) so the wikilink
-  # resolves to the file — the librarian's filename-based INDEX convention.
   [ -n "$title" ] || title="$(basename "$target" .md)"
-
-  # Folder INDEX: vault_index_apply is the single link writer — it derives the
-  # resolvable target and dedups. Hand-appending here too meant a --title that
-  # differed from the stem produced two entries, the title one resolving to
-  # nothing. Keep stderr: apply's coverage report is the only signal that the
-  # slice is under-indexed.
-  local idx="$folder/INDEX.md" iprep=1
-  # Guarded for the same reason as the Daily/ writes below: the note committed
-  # above, so aborting here under `set -e` reports "not captured" for a capture
-  # that happened. An INDEX.md that cannot be created (ENOSPC, or a directory
-  # sitting on the name) is a link failure, and a link failure is a warning.
-  if [ ! -f "$idx" ]; then
-    printf '# %s Index\n' "$(basename "$folder")" > "$idx" 2>/dev/null || iprep=0
+  local rc=0
+  KEEPER_OUTCOME_EMITTED=0
+  keeper_with_lock "$vault_abs" _cmd_insert_locked \
+    "$vault_abs" "$target" "$body_file" "$title" "$sldate" "$recover" || rc=$?
+  if [ "$rc" -ne 0 ] && [ "$KEEPER_OUTCOME_EMITTED" = 0 ]; then
+    printf 'keeper: insert failed before an outcome was produced\n' >&2
+    keeper_emit_outcome failed
   fi
-  . "$KEEPER_DIR/lib/note-hash.sh"
-  . "$KEEPER_DIR/lib/vault-index.sh"
-  # `|| true` alone made a failed link indistinguishable from a written one
-  # (#104): the note is committed before this runs, so insert still printed the
-  # path and exited 0 while nothing in the vault pointed at the note. Keep the
-  # exit status (the note IS written — failing here would tell the caller the
-  # opposite), but say on stderr what is missing.
-  #
-  # Check the link, not just apply's rc: a coverage defect is reported on
-  # apply's stderr and still returns 0, so rc by itself would miss the common
-  # shape (an unwritable INDEX.md).
-  local link_rc=0 stem
-  [ "$iprep" = 1 ] && { vault_index_apply "$folder" "$idx" >/dev/null || link_rc=$?; }
-  stem="$(basename "$target" .md)"
-  # No dup_leaves argument: $stem is a bare basename, so vault_index_has_link
-  # returns before it consults that set (the leaf IS the rel). Passing it meant
-  # a second full recursive sweep of the folder per insert, duplicating the one
-  # vault_index_apply just did.
-  if [ "$iprep" = 0 ] || ! vault_index_has_link "$idx" "$stem"; then
-    printf 'keeper: warning — %s is written but is not linked from %s%s\n' \
-      "$target" "${idx#"$vault_abs"/}" \
-      "$([ "$link_rc" -eq 0 ] || printf ' (INDEX step failed, rc=%s)' "$link_rc")" >&2
-  fi
-
-  # Optional: link the note into Daily/<date> under ## Session Links.
-  if [ -n "$sldate" ]; then
-    local daily="$vault_abs/Daily/$sldate.md"
-    # Every write below is guarded, not just the swap at the end. Bare under
-    # `set -e` these abort the whole insert AFTER the note has committed, with
-    # nothing on stderr — and a caller reads a non-zero exit as "not captured",
-    # so a capture that did happen is reported as lost and the retry then dies
-    # on "target already exists". The note is written; a daily link that cannot
-    # be made is a warning, not a failure.
-    local sl_warn="keeper: warning — $target is written but Daily/$sldate.md"
-    if ! mkdir -p "$vault_abs/Daily" 2>/dev/null; then
-      printf '%s could not be created; no session link\n' "$sl_warn" >&2
-      printf '%s\n' "$full"; return 0
-    fi
-    if [ ! -f "$daily" ] \
-       && ! printf -- '---\ndate: %s\ntags: [daily]\n---\n\n# %s\n' "$sldate" "$sldate" > "$daily" 2>/dev/null; then
-      printf '%s could not be created; no session link\n' "$sl_warn" >&2
-      printf '%s\n' "$full"; return 0
-    fi
-    if ! grep -q '^## Session Links' "$daily" \
-       && ! printf '\n## Session Links\n' >> "$daily" 2>/dev/null; then
-      printf '%s is unwritable; no session link\n' "$sl_warn" >&2
-      printf '%s\n' "$full"; return 0
-    fi
-    # Link the note by its vault-relative path so it resolves from Daily/, with
-    # the human title as an alias. Dedup on the path: two different notes can
-    # share a title, and keying on title text dropped the second one's link.
-    local ltarget link
-    # Same target derivation as the folder INDEX (vault root = nearest .obsidian
-    # ancestor), so the two links can't disagree about where the root is when
-    # --vault points below it.
-    ltarget="$(vault_link_target "$folder" "$(basename "$target" .md)")"
-    link="- [[$ltarget]]"
-    [ "$title" = "$(basename "$target" .md)" ] || link="- [[$ltarget|$title]]"
-    if ! grep -qF -- "[[$ltarget]]" "$daily" && ! grep -qF -- "[[$ltarget|" "$daily"; then
-      # Stage and swap through the shared helper, which cleans the temp file up
-      # when the replace fails. `> "$daily.ktmp" && mv` left a stray .ktmp in
-      # the user's Daily/ folder on an unwritable note, and since the note
-      # itself committed above, the obvious retry then died on
-      # "target already exists". Warn and keep exit 0, like the INDEX link.
-      local dtmp
-      if dtmp="$(mktemp "$vault_abs/Daily/.Daily-XXXXXX")"; then
-        if awk -v link="$link" '{print} /^## Session Links/ && !d {print link; d=1}' \
-             "$daily" > "$dtmp" && keeper_swap_or_clean "$dtmp" "$daily"; then
-          :
-        else
-          rm -f "$dtmp" 2>/dev/null || true
-          printf 'keeper: warning — %s is written but could not be linked into Daily/%s.md\n' \
-            "$target" "$sldate" >&2
-        fi
-      else
-        printf 'keeper: warning — %s is written but Daily/ is unwritable; no session link\n' \
-          "$target" >&2
-      fi
-    fi
-  fi
-
-  printf '%s\n' "$full"
+  return "$rc"
 }
 
 main() {

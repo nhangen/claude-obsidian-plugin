@@ -52,7 +52,7 @@ surfacing_digest() {
 # Append-only is what makes this safe next to the transition gate: the snapshot is
 # left alone, and because the row can never be re-derived, the next healthy tick's
 # `comm -23` cannot see it as new and re-append it.
-surfacing_pending_append() {
+_surfacing_pending_append_locked() {
   local vault="$1" pending="$1/Pending.md" line out payload
   while IFS= read -r line; do
     [ -n "$line" ] || continue
@@ -72,6 +72,12 @@ surfacing_pending_append() {
     printf '%s\n' "$out" >> "$pending"
   done
   return 0
+}
+
+surfacing_pending_append() {
+  local vault="$1" canonical
+  canonical="$(cd "$vault" 2>/dev/null && pwd -P)" || return 1
+  keeper_with_lock "$canonical" _surfacing_pending_append_locked "$canonical"
 }
 
 surfacing_pending_transition() {

@@ -240,10 +240,8 @@ vault_index_coverage_check "$N/P" "$NIDX" >/dev/null 2>&1 \
   || fail "newchild: parent reports a defect for a note it handed off"
 
 # --- apply itself reports a gap it could not close -------------------------
-# Pins the coverage_check call inside vault_index_apply. Asserting the healed
-# end-state instead passes with that call deleted, because plan's unlinked->ADD
-# branch closes the gap either way. A read-only INDEX is a gap apply cannot
-# close, so its own report is the only thing that can surface it.
+# A read-only INDEX is a gap apply cannot close. It must report the defect,
+# return nonzero, and leave state behind the INDEX rather than claiming success.
 if [ "$(id -u)" = "0" ]; then
   printf 'skip: read-only INDEX assertion (running as root ignores 0444)\n' >&2
 else
@@ -251,17 +249,21 @@ else
   ROIDX="$RO/INDEX.md"; printf '# RO Index\n' > "$ROIDX"
   printf 'ro\n' > "$RO/ro.md"
   chmod 444 "$ROIDX"
-  ROERR="$(vault_index_apply "$RO" "$ROIDX" 2>&1 >/dev/null || true)"
-  ROOUT="$(vault_index_apply "$RO" "$ROIDX" 2>/dev/null || true)"
+  set +e
+  vault_index_apply "$RO" "$ROIDX" >"$TMP/ro.out" 2>"$TMP/ro.err"
+  RORC=$?
+  set -e
   chmod 644 "$ROIDX"
+  ROERR="$(cat "$TMP/ro.err")"
+  [ "$RORC" -ne 0 ] || fail "apply reported success for an INDEX gap it could not close"
   case "$ROERR" in
     *"coverage defect"*) : ;;
     *) fail "apply did not report the gap it could not close; got:"$'\n'"$ROERR" ;;
   esac
-  # stdout stays the ADD set: callers parse it (ADDED="$(vault_index_apply …)").
-  # A diagnostic leaking onto stdout puts a non-filename line in that list.
-  [ "$ROOUT" = "ro.md" ] \
-    || fail "apply's stdout must be the ADD set alone, got:"$'\n'"$ROOUT"
+  [ ! -s "$TMP/ro.out" ] || fail "failed apply leaked a partial ADD set onto stdout"
+  ROSTATE="$(index_state_file "$ROIDX")"
+  [ ! -f "$ROSTATE" ] || ! grep -qF 'ro.md' "$ROSTATE" \
+    || fail "failed apply advanced INDEX state"
 fi
 
 # --- per-note assertion: a surplus link cannot pay for a missing one ---------

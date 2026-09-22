@@ -50,6 +50,76 @@ now_epoch() {
   date +%s
 }
 
+keeper_sha256_text() {
+  local out
+  if command -v shasum >/dev/null 2>&1; then
+    out="$(printf '%s' "$1" | shasum -a 256 2>/dev/null | awk '{print $1}')"
+  fi
+  if [ -z "${out:-}" ] && command -v sha256sum >/dev/null 2>&1; then
+    out="$(printf '%s' "$1" | sha256sum 2>/dev/null | awk '{print $1}')"
+  fi
+  [ -n "${out:-}" ] || { printf 'keeper: no sha256 tool available for lock key\n' >&2; return 1; }
+  printf '%s\n' "$out"
+}
+
+keeper_lock_acquire() {
+  local key="$1" root lock start now owner stale timeout="${KEEPER_LOCK_TIMEOUT_SECONDS:-30}"
+  case "$timeout" in ''|*[!0-9]*) timeout=30 ;; esac
+  root="/tmp/claude-obsidian-keeper-$(id -u)"
+  mkdir -p "$root" || return 1
+  chmod 700 "$root" 2>/dev/null || true
+  lock="$root/$(keeper_sha256_text "$key").lock"
+  start="$(now_epoch)"
+  while ! mkdir "$lock" 2>/dev/null; do
+    owner="$(sed -n '1p' "$lock/owner" 2>/dev/null || true)"
+    if [ -n "$owner" ] && ! kill -0 "$owner" 2>/dev/null; then
+      stale="$lock.stale.$$.$(now_epoch)"
+      if mv "$lock" "$stale" 2>/dev/null; then rm -rf "$stale"; fi
+      continue
+    fi
+    now="$(now_epoch)"
+    if [ -z "$owner" ] && [ $(( now - start )) -ge 5 ]; then
+      stale="$lock.stale.$$.$now"
+      if mv "$lock" "$stale" 2>/dev/null; then rm -rf "$stale"; fi
+      continue
+    fi
+    if [ $(( now - start )) -ge "$timeout" ]; then
+      printf 'keeper: timed out waiting for local write lock\n' >&2
+      return 1
+    fi
+    sleep 0.05
+  done
+  if ! printf '%s\n' "$$" > "$lock/owner"; then
+    rm -rf "$lock"
+    return 1
+  fi
+  printf '%s\n' "$lock"
+}
+
+keeper_lock_release() {
+  local lock="$1" owner
+  owner="$(sed -n '1p' "$lock/owner" 2>/dev/null || true)"
+  [ "$owner" = "$$" ] || return 1
+  rm -f "$lock/owner" 2>/dev/null || return 1
+  rmdir "$lock" 2>/dev/null
+}
+
+keeper_with_lock() {
+  local key="$1" lock rc
+  shift
+  lock="$(keeper_lock_acquire "$key")" || return 1
+  if "$@"; then rc=0; else rc=$?; fi
+  keeper_lock_release "$lock" \
+    || printf 'keeper: warning — local write lock will be reclaimed after process exit\n' >&2
+  return "$rc"
+}
+
+keeper_fault() {
+  [ "${KEEPER_FAULT_INJECT:-}" = "$1" ] || return 0
+  printf 'keeper: injected fault at %s\n' "$1" >&2
+  return 91
+}
+
 # Atomic replace, or clean up after yourself. Every render-to-temp-then-swap site
 # used a bare `mv`, so a failed swap left the temp behind (#43) — and one of them
 # mktemps into the *vault root*, where the leak is visible in Obsidian and Syncthing
