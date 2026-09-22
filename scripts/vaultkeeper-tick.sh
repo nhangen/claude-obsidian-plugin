@@ -171,7 +171,7 @@ fi
 # which it is. keeper_quarantine_conflicts has already moved any sync conflict
 # irreversibly and emitted its row once, so that row cannot survive being withheld —
 # the fault branch below appends it, and only it, for that reason (#58).
-base_view_write "$VAULT/_vaultkeeper.base"
+base_view_write "$VAULT" "$VAULT/_vaultkeeper.base"
 printf '%s\n' "$CAND" | surfacing_digest "$VAULT" "${SCAN_FAULT:+INCOMPLETE}" "$SCAN_UNREADABLE"
 
 if [ -n "$SCAN_FAULT" ]; then

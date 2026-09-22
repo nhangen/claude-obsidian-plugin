@@ -32,7 +32,7 @@ chmod 755 "$V/Librarian.md"; rmdir "$V/Librarian.md"
 
 # 2. base_view_write.
 mkdir -p "$V/_vaultkeeper.base"; chmod 500 "$V/_vaultkeeper.base"
-if base_view_write "$V/_vaultkeeper.base" 2>/dev/null; then
+if base_view_write "$V" "$V/_vaultkeeper.base" 2>/dev/null; then
   fail "base_view_write reported success though the swap could not happen"
 fi
 B="$(leaked "$V" '.base-*')"

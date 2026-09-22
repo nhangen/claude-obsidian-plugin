@@ -185,7 +185,7 @@ EOF
 
 _vault_index_apply_locked() {
   local folder="$1" idx="$2"
-  local state plan action fn touched tmp tmp2 added=()
+  local state plan action fn touched tmp tmp2 idx_tmp="" added=()
   state="$(index_state_file "$idx")"
   plan="$(vault_index_plan "$folder" "$idx")"
 
@@ -235,18 +235,28 @@ _vault_index_apply_locked() {
   # Append-only — never rewrite or reorder an existing INDEX.
   local rel dups missed=0
   if (( ${#added[@]} )); then
-    if [ ! -f "$idx" ]; then
-      printf '# %s Index\n' "$(basename "$folder")" > "$idx"
+    if [ -e "$idx" ] && [ ! -w "$idx" ]; then
+      printf 'vault_index_apply: coverage defect in %s — INDEX is not writable\n' "$idx" >&2
+      rm -f "$tmp" "$tmp2"
+      return 1
+    fi
+    idx_tmp="$(mktemp "$(dirname "$idx")/.index-XXXXXX")" \
+      || { rm -f "$tmp" "$tmp2"; return 1; }
+    if [ -f "$idx" ]; then
+      cp "$idx" "$idx_tmp" || { rm -f "$tmp" "$tmp2" "$idx_tmp"; return 1; }
+    else
+      printf '# %s Index\n' "$(basename "$folder")" > "$idx_tmp" \
+        || { rm -f "$tmp" "$tmp2" "$idx_tmp"; return 1; }
     fi
     dups="$(vault_index_dup_leaves "$folder")"
     for fn in "${added[@]}"; do
       rel="${fn%.md}"
-      if ! vault_index_has_link "$idx" "$rel" "$dups"; then
-        printf -- '- [[%s]]\n' "$(vault_link_target "$folder" "$rel")" >> "$idx" \
+      if ! vault_index_has_link "$idx_tmp" "$rel" "$dups"; then
+        printf -- '- [[%s]]\n' "$(vault_link_target "$folder" "$rel")" >> "$idx_tmp" \
           || {
             printf 'vault_index_apply: coverage defect in %s — link for %s could not be written\n' \
               "$idx" "$fn" >&2
-            rm -f "$tmp" "$tmp2"
+            rm -f "$tmp" "$tmp2" "$idx_tmp"
             return 1
           }
       fi
@@ -257,14 +267,15 @@ _vault_index_apply_locked() {
     # it to the set this run touched. vault_index_coverage_check is the
     # standalone full-folder assertion for a sweep.
     for fn in "${added[@]}"; do
-      vault_index_has_link "$idx" "${fn%.md}" "$dups" || missed=$(( missed + 1 ))
+      vault_index_has_link "$idx_tmp" "${fn%.md}" "$dups" || missed=$(( missed + 1 ))
     done
     if [ "$missed" -gt 0 ]; then
       printf 'vault_index_apply: coverage defect in %s — %s link(s) could not be written\n' \
         "$idx" "$missed" >&2
-      rm -f "$tmp" "$tmp2"
+      rm -f "$tmp" "$tmp2" "$idx_tmp"
       return 1
     fi
+    keeper_swap_or_clean "$idx_tmp" "$idx" || { rm -f "$tmp" "$tmp2"; return 1; }
   fi
 
   keeper_fault before_index_state || { rm -f "$tmp" "$tmp2"; return 91; }
@@ -278,6 +289,8 @@ _vault_index_apply_locked() {
 _vault_index_apply_guarded() {
   local folder="$1" idx="$2"
   [ ! -L "$idx" ] || { printf 'vault_index_apply: refusing symlink INDEX: %s\n' "$idx" >&2; return 1; }
+  [ ! -e "$idx" ] || [ -f "$idx" ] \
+    || { printf 'vault_index_apply: INDEX is not a regular file: %s\n' "$idx" >&2; return 1; }
   [ ! -L "$(index_state_file "$idx")" ] \
     || { printf 'vault_index_apply: refusing symlink state: %s\n' "$(index_state_file "$idx")" >&2; return 1; }
   _vault_index_apply_locked "$folder" "$idx"

@@ -14,8 +14,9 @@
 # a fault — every readable note was still scanned — so the scan stays complete and
 # says how much of the vault it could not see. A count and not the paths: they are
 # absolute host paths, and this file is replicated to every host.
-surfacing_digest() {
+_surfacing_digest_locked() {
   local vault="$1" status="${2:-}" unreadable="${3:-}" lines tmp target="$1/Librarian.md" kind label
+  [ ! -L "$target" ] || return 1
   lines="$(cat)"
   tmp="$(mktemp "$vault/.Librarian-XXXXXX")" || return 1
   {
@@ -38,6 +39,14 @@ surfacing_digest() {
   keeper_swap_or_clean "$tmp" "$target"
 }
 
+surfacing_digest() {
+  local vault="$1" canonical status="${2:-}" unreadable="${3:-}" lines
+  canonical="$(cd "$vault" 2>/dev/null && pwd -P)" || return 1
+  lines="$(cat)" || return 1
+  printf '%s\n' "$lines" | keeper_with_lock "$canonical" \
+    _surfacing_digest_locked "$canonical" "$status" "$unreadable"
+}
+
 # surfacing_pending_append <vault>
 # Append rows to Pending.md without touching the prior-scan snapshot. For rows whose
 # side effect already happened and cannot be re-derived (#58).
@@ -53,7 +62,12 @@ surfacing_digest() {
 # left alone, and because the row can never be re-derived, the next healthy tick's
 # `comm -23` cannot see it as new and re-append it.
 _surfacing_pending_append_locked() {
-  local vault="$1" pending="$1/Pending.md" line out payload
+  local vault="$1" pending="$1/Pending.md" line out payload tmp changed=0
+  [ ! -L "$pending" ] || return 1
+  tmp="$(mktemp "$vault/.Pending-XXXXXX")" || return 1
+  if [ -f "$pending" ]; then
+    cp "$pending" "$tmp" || { rm -f "$tmp"; return 1; }
+  fi
   while IFS= read -r line; do
     [ -n "$line" ] || continue
     payload="$(printf '%s' "$line" | sed 's/'$'\t''/: /')"
@@ -65,13 +79,17 @@ _surfacing_pending_append_locked() {
     # Syncthing-replicated, which makes this the one path where a bug touches notes a
     # person is working in. Compare the payload with the checkbox stripped, so any box
     # state counts as present.
-    if [ -f "$pending" ] \
-      && sed -n 's/^- \[[^]]*\] //p' "$pending" | grep -qxF -- "$payload"; then
+    if sed -n 's/^- \[[^]]*\] //p' "$tmp" | grep -qxF -- "$payload"; then
       continue
     fi
-    printf '%s\n' "$out" >> "$pending"
+    printf '%s\n' "$out" >> "$tmp" || { rm -f "$tmp"; return 1; }
+    changed=1
   done
-  return 0
+  if [ "$changed" = 0 ]; then
+    rm -f "$tmp"
+    return 0
+  fi
+  keeper_swap_or_clean "$tmp" "$pending"
 }
 
 surfacing_pending_append() {

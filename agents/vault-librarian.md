@@ -94,12 +94,18 @@ deduped.)
    If routing confidence is low, do **not** commit silently — append an
    `[ask:where should this go?]` entry to `$VAULT_PATH/Pending.md` and ask the user once.
 2. **Dedup:** call the shared scanner — `dedup_same_day "<vault>/<folder>" "$(date +%Y-%m-%d)" "<slug>"`. Pass no threshold: the scanner reads the vault's `dedup_jaccard_threshold` (default `0.4`) itself. If it echoes a `path<TAB>score`, surface that note and ask whether to append rather than file a duplicate — never silently merge.
-3. Write the note using the matching template in `$VAULT_PATH/Templates/`. Its
-   INDEX link is written by step 5 (`vault_index_apply`), not by hand. Link
-   session notes to the daily note under `## Session Links`. A domain MOC that
-   is not the folder's `INDEX.md` is still a manual append.
-4. Unknown fields → `[ask]` markers in the note + entries in `Pending.md`
-   (defer the question; do not interrogate the user mid-task).
+3. Render the note using the matching template in `$VAULT_PATH/Templates/`,
+   then call `$CLAUDE_PLUGIN_ROOT/scripts/keeper insert` with `--vault
+   "$VAULT_PATH"`, the vault-relative `--target`, and a temporary `--body-file`.
+   Include `--session-link-date` for session notes and `--daily-path Daily` when
+   linking the daily note. Its INDEX link is written by the keeper, not by hand.
+   On a `partial` outcome, rerun the same insert with `--recover` and report the
+   recovery state; never report success from a note-only write. A domain MOC
+   that is not the folder's `INDEX.md` is still a manual append.
+4. Unknown fields → add `[ask]` markers to the note body and invoke
+   `scripts/keeper append` for each `Pending.md` entry (with `--vault`, a vault-relative
+   `--target`, `--section`, and `--body-file`). Do not append Pending rows by
+   hand: defer the question without interrogating the user mid-task.
 5. Refresh the touched INDEX: ``vault_index_apply "$VAULT_PATH" "$FOLDER" "$FOLDER/INDEX.md"`` —
    this is what links the new note.
 6. Return what you wrote, where, and a one-line summary.

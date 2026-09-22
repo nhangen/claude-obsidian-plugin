@@ -19,13 +19,23 @@ views:
 EOF
 }
 
-base_view_write() {
-  local target="$1" tmp
+_base_view_write_locked() {
+  local vault="$1" target="$2" tmp canonical_parent
+  [ ! -L "$target" ] || return 1
+  canonical_parent="$(cd "$(dirname "$target")" 2>/dev/null && pwd -P)" || return 1
+  [ "$canonical_parent" = "$vault" ] || return 1
+  target="$vault/$(basename "$target")"
   tmp="$(mktemp "$(dirname "$target")/.base-XXXXXX")" || return 1
-  base_view_content > "$tmp"
+  base_view_content > "$tmp" || { rm -f "$tmp"; return 1; }
   if [ -f "$target" ] && cmp -s "$tmp" "$target"; then
     rm -f "$tmp"
     return 0
   fi
   keeper_swap_or_clean "$tmp" "$target"
+}
+
+base_view_write() {
+  local vault="$1" target="$2" canonical
+  canonical="$(cd "$vault" 2>/dev/null && pwd -P)" || return 1
+  keeper_with_lock "$canonical" _base_view_write_locked "$canonical" "$target"
 }

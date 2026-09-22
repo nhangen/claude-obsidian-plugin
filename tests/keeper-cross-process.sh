@@ -3,6 +3,7 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 KEEPER="$ROOT_DIR/scripts/keeper"
+BUNDLED_KEEPER="$ROOT_DIR/packages/codex/skills/commit-capture/scripts/keeper"
 fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/keeper-cross-process-XXXXXX")"
 trap 'rm -rf "$TMP"' EXIT
@@ -34,6 +35,40 @@ run_parallel_append() {
 }
 
 run_parallel_append competing-processes
+
+# The real watcher entrypoint and the bundled commit-capture keeper share the
+# canonical vault lock. Pause the watcher after lock publication and verify the
+# hook process cannot commit until that lock is released.
+WV="$TMP/watcher-vault"; mkdir -p "$WV/.obsidian" "$WV/Inbox"
+printf -- '---\ntags: [test]\ntype: note\n---\nbody\n' > "$WV/note.md"
+WCFG="$TMP/watcher-config.md"
+cat > "$WCFG" <<EOF
+---
+vault_path: $WV
+frontmatter_required: tags type
+keeper_host_priority: test-host
+keeper_interval_secs: 900
+---
+EOF
+WPAUSE="$TMP/watcher-pause"; mkdir -p "$WPAUSE"
+OBSIDIAN_LOCAL_MD="$WCFG" VAULTKEEPER_HOST=test-host \
+  XDG_CACHE_HOME="$TMP/watcher-cache" \
+  KEEPER_TEST_PAUSE_POINT=after_lock_owner KEEPER_TEST_PAUSE_DIR="$WPAUSE" \
+  bash "$ROOT_DIR/scripts/vaultkeeper-tick.sh" >"$TMP/watcher.out" 2>&1 & watcher_pid=$!
+for _ in $(seq 1 500); do [ -e "$WPAUSE/ready" ] && break; sleep 0.01; done
+[ -e "$WPAUSE/ready" ] || fail "watcher never entered the canonical vault lock"
+(
+  bash "$BUNDLED_KEEPER" append --vault "$WV" --target 'Hook/capture.md' \
+    --section 'hook capture abc117' --body-file "$TMP/body.md" --skip-if-hash abc117 \
+    --format json > "$TMP/hook.json"
+  : > "$TMP/hook-done"
+) & hook_pid=$!
+sleep 0.1
+[ ! -e "$TMP/hook-done" ] || fail "hook write committed while the watcher held the vault lock"
+: > "$WPAUSE/continue"
+wait "$watcher_pid" || fail "watcher entrypoint failed during keeper contention: $(cat "$TMP/watcher.out")"
+wait "$hook_pid" || fail "bundled hook keeper failed after watcher contention"
+[ -f "$WV/Hook/capture.md" ] || fail "hook write was lost after watcher contention"
 
 for n in $(seq 1 24); do
   bash -c '

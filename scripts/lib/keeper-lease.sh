@@ -6,9 +6,20 @@
 
 keeper_claim_path()  { printf '%s/.keeper-claim-%s\n' "$1" "$2"; }
 
+_keeper_claim_write_locked() {
+  local vault="$1" lease="$2" host="$3" claim
+  [ ! -L "$lease" ] || return 1
+  mkdir -p "$lease" || return 1
+  [ "$(cd "$lease" 2>/dev/null && pwd -P)" = "$lease" ] || return 1
+  claim="$(keeper_claim_path "$lease" "$host")"
+  now_epoch > "$claim"
+}
+
 keeper_claim_write() {
-  mkdir -p "$1"
-  now_epoch > "$(keeper_claim_path "$1" "$2")"
+  local lease="$1" host="$2" vault
+  vault="$(cd "$(dirname "$lease")" 2>/dev/null && pwd -P)" || return 1
+  lease="$vault/$(basename "$lease")"
+  keeper_with_lock "$vault" _keeper_claim_write_locked "$vault" "$lease" "$host"
 }
 
 keeper_live_hosts() {
@@ -54,12 +65,17 @@ keeper_is_owner() {
   [ -n "$owner" ] && [ "$owner" = "$2" ]
 }
 
-keeper_quarantine_conflicts() {
-  local vault="$1" q="$1/.vaultkeeper-quarantine" c base
+_keeper_quarantine_conflicts_locked() {
+  local vault="$1" q="$1/.vaultkeeper-quarantine" c base parent
+  [ ! -L "$q" ] || return 1
+  mkdir -p "$q" || return 1
+  [ "$(cd "$q" 2>/dev/null && pwd -P)" = "$q" ] || return 1
   while IFS= read -r c; do
     base="$(basename "$c")"
     if printf '%s\n' "$base" | grep -qE '^Librarian\.sync-conflict-|^Pending\.sync-conflict-|^_vaultkeeper\.base\.sync-conflict-|^_vaultkeeper\.sync-conflict-.*\.base$'; then
-      mkdir -p "$q"
+      [ ! -L "$c" ] || { printf 'keeper_quarantine_conflicts: refusing symlink %s\n' "$c" >&2; return 1; }
+      parent="$(cd "$(dirname "$c")" 2>/dev/null && pwd -P)" || return 1
+      case "$parent" in "$vault"|"$vault"/*) : ;; *) return 1 ;; esac
       if ! mv "$c" "$q/$(now_epoch)-$base"; then
         printf 'keeper_quarantine_conflicts: failed to quarantine %s\n' "$c" >&2
         continue
@@ -68,4 +84,10 @@ keeper_quarantine_conflicts() {
     fi
   done < <(find "$vault" -maxdepth 2 -type f -name '*.sync-conflict-*' \
             ! -path '*/.vaultkeeper-quarantine/*' 2>/dev/null)
+}
+
+keeper_quarantine_conflicts() {
+  local vault="$1" canonical
+  canonical="$(cd "$vault" 2>/dev/null && pwd -P)" || return 1
+  keeper_with_lock "$canonical" _keeper_quarantine_conflicts_locked "$canonical"
 }

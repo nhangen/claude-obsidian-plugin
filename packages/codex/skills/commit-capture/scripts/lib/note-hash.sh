@@ -72,63 +72,122 @@ keeper_test_pause() {
 }
 
 keeper_lock_acquire() {
-  local key="$1" root lock start now owner marker
+  local key="$1" root lock candidate start now owner owner_token age stale reap token published reaped_owner reaped_token lock_kind
   local timeout="${KEEPER_LOCK_TIMEOUT_SECONDS:-30}"
+  local stale_after="${KEEPER_LOCK_STALE_SECONDS:-2}"
   case "$timeout" in ''|*[!0-9]*) timeout=30 ;; esac
+  case "$stale_after" in ''|*[!0-9]*) stale_after=2 ;; esac
   root="/tmp/claude-obsidian-keeper-$(id -u)"
   mkdir -p "$root" || return 1
   chmod 700 "$root" 2>/dev/null || true
   lock="$root/$(keeper_sha256_text "$key").lock"
+  token="$$.$(now_epoch).${RANDOM:-0}"
+  candidate="$root/.keeper-candidate-$$-${RANDOM:-0}"
+  if ! printf '%s\n%s\n' "$$" "$token" > "$candidate"; then
+    rm -f "$candidate" 2>/dev/null || true
+    return 1
+  fi
+  if ! keeper_test_pause before_lock_owner; then
+    rm -f "$candidate" 2>/dev/null || true
+    return 1
+  fi
   start="$(now_epoch)"
-  while ! mkdir "$lock" 2>/dev/null; do
-    owner="$(sed -n '1p' "$lock/owner" 2>/dev/null || true)"
-    case "$owner" in
-      ''|*[!0-9]*) : ;;
-      *)
-        if ! kill -0 "$owner" 2>/dev/null; then
-          marker="$lock/owner.reaping.$$"
-          # Moving the owner file is the reclaim claim. Other reclaimers then
-          # see an ownerless directory and cannot remove it. The final rmdir
-          # succeeds only while this exact stale lock remains empty.
-          if mv "$lock/owner" "$marker" 2>/dev/null; then
-            if [ "$(sed -n '1p' "$marker" 2>/dev/null || true)" = "$owner" ] \
-               && ! kill -0 "$owner" 2>/dev/null; then
-              rm -f "$marker" 2>/dev/null || true
-              rmdir "$lock" 2>/dev/null || true
-            else
-              mv "$marker" "$lock/owner" 2>/dev/null || true
-            fi
-          fi
+  while :; do
+    owner=""
+    owner_token=""
+    lock_kind=""
+    if [ -d "$lock" ]; then
+      lock_kind=dir
+      owner="$(sed -n '1p' "$lock/owner" 2>/dev/null || true)"
+      owner_token="$(sed -n '2p' "$lock/owner" 2>/dev/null || true)"
+    elif [ -f "$lock" ]; then
+      lock_kind=file
+      owner="$(sed -n '1p' "$lock" 2>/dev/null || true)"
+      owner_token="$(sed -n '2p' "$lock" 2>/dev/null || true)"
+    else
+      if ln "$candidate" "$lock" 2>/dev/null; then
+        rm -f "$candidate" 2>/dev/null || true
+        if ! keeper_test_pause after_lock_owner; then
+          rm -f "$lock" 2>/dev/null || true
+          return 1
         fi
-        ;;
-    esac
-    if [ ! -d "$lock" ]; then
+        printf '%s|%s\n' "$lock" "$token"
+        return 0
+      fi
+      if [ ! -e "$lock" ] && [ ! -L "$lock" ]; then
+        continue
+      fi
+      sleep 0.05
       continue
     fi
     now="$(now_epoch)"
+    age=0
+    if [ "$lock_kind" = dir ] || [ "$lock_kind" = file ]; then
+      published="$(file_mtime "$lock" 2>/dev/null || printf '%s' "$now")"
+      age=$(( now - published ))
+    fi
+    stale=0
+    case "$owner" in
+      ''|*[!0-9]*) [ "$age" -ge "$stale_after" ] && stale=1 ;;
+      *)
+        if [ "$age" -ge "$stale_after" ] && ! kill -0 "$owner" 2>/dev/null; then
+          stale=1
+        fi
+        ;;
+    esac
+    if [ "$stale" = 1 ]; then
+      reap="$lock.reaping.$$.$now.${RANDOM:-0}"
+      if mv "$lock" "$reap" 2>/dev/null; then
+        keeper_test_pause after_lock_reap || {
+          rm -f "$candidate" 2>/dev/null || true
+          return 1
+        }
+        if [ "$lock_kind" = dir ]; then
+          reaped_owner="$(sed -n '1p' "$reap/owner" 2>/dev/null || true)"
+          reaped_token="$(sed -n '2p' "$reap/owner" 2>/dev/null || true)"
+        else
+          reaped_owner="$(sed -n '1p' "$reap" 2>/dev/null || true)"
+          reaped_token="$(sed -n '2p' "$reap" 2>/dev/null || true)"
+        fi
+        if [ "$reaped_owner" != "$owner" ] || [ "$reaped_token" != "$owner_token" ]; then
+          [ -e "$lock" ] || mv "$reap" "$lock" 2>/dev/null || true
+        else
+          if [ "$lock_kind" = dir ]; then
+            rm -f "$reap/owner" 2>/dev/null || true
+            rmdir "$reap" 2>/dev/null || true
+          else
+            rm -f "$reap" 2>/dev/null || true
+          fi
+        fi
+      fi
+    fi
     if [ $(( now - start )) -ge "$timeout" ]; then
       printf 'keeper: timed out waiting for local write lock\n' >&2
+      rm -f "$candidate" 2>/dev/null || true
       return 1
     fi
     sleep 0.05
   done
-  # An ownerless directory is never reclaimed. Pausing here therefore blocks
-  # every later acquirer instead of admitting one during owner publication.
-  if ! keeper_test_pause before_lock_owner \
-     || ! printf '%s\n' "$$" > "$lock/owner"; then
-    rm -f "$lock/owner" 2>/dev/null || true
-    rmdir "$lock" 2>/dev/null || true
-    return 1
-  fi
-  printf '%s\n' "$lock"
 }
 
 keeper_lock_release() {
-  local lock="$1" owner
-  owner="$(sed -n '1p' "$lock/owner" 2>/dev/null || true)"
-  [ "$owner" = "$$" ] || return 1
-  rm -f "$lock/owner" 2>/dev/null || return 1
-  rmdir "$lock" 2>/dev/null
+  local record="$1" lock token owner published
+  lock="${record%%|*}"
+  token="${record#*|}"
+  if [ -d "$lock" ]; then
+    owner="$(sed -n '1p' "$lock/owner" 2>/dev/null || true)"
+    published="$(sed -n '2p' "$lock/owner" 2>/dev/null || true)"
+  else
+    owner="$(sed -n '1p' "$lock" 2>/dev/null || true)"
+    published="$(sed -n '2p' "$lock" 2>/dev/null || true)"
+  fi
+  [ "$owner" = "$$" ] && [ "$published" = "$token" ] || return 1
+  if [ -d "$lock" ]; then
+    rm -f "$lock/owner" 2>/dev/null || return 1
+    rmdir "$lock" 2>/dev/null
+  else
+    rm -f "$lock" 2>/dev/null
+  fi
 }
 
 keeper_with_lock() {
