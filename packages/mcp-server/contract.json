@@ -92,7 +92,7 @@
       "readOnly": true,
       "scope": "repo:read",
       "privacy": "sanitized-git-metadata",
-      "repositoryRoots": "MCP_REPOSITORY_ROOTS, a path-delimited allowlist defaulting to the adapter repository root",
+      "repositoryRoots": "Source checkouts default to the adapter repository root; installed packages default to no roots; MCP_REPOSITORY_ROOTS is an explicit path-delimited allowlist.",
       "inputSchema": {
         "type": "object",
         "additionalProperties": false,
