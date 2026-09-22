@@ -35,7 +35,7 @@ slice is one or two domain folders, never the whole vault.
 ## QUERY — "what do we know about X / where is Y / what did we decide about Z"
 
 1. Route the question to its slice (folder + INDEX).
-2. Refresh the slice: ``ADDED="$(vault_index_apply "$FOLDER" "$FOLDER/INDEX.md")"``.
+2. Refresh the slice: ``ADDED="$(vault_index_apply "$VAULT_PATH" "$FOLDER" "$FOLDER/INDEX.md")"``.
    `vault_index_apply` writes the links itself (append-only), as
    ``- [[<path/from/vault/root>]]`` — a bare basename is ambiguous once two notes
    in different subfolders share one. Do **not** append them by hand; that is a
@@ -100,7 +100,7 @@ deduped.)
    is not the folder's `INDEX.md` is still a manual append.
 4. Unknown fields → `[ask]` markers in the note + entries in `Pending.md`
    (defer the question; do not interrogate the user mid-task).
-5. Refresh the touched INDEX: ``vault_index_apply "$FOLDER" "$FOLDER/INDEX.md"`` —
+5. Refresh the touched INDEX: ``vault_index_apply "$VAULT_PATH" "$FOLDER" "$FOLDER/INDEX.md"`` —
    this is what links the new note.
 6. Return what you wrote, where, and a one-line summary.
 

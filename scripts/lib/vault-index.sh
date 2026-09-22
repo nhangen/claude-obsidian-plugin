@@ -275,11 +275,35 @@ _vault_index_apply_locked() {
   (( ${#added[@]} )) && printf '%s\n' "${added[@]}" || true
 }
 
-vault_index_apply() {
-  local folder="$1" idx="$2" canonical
-  canonical="$(cd "$folder" 2>/dev/null && pwd -P)" || return 1
+_vault_index_apply_guarded() {
+  local folder="$1" idx="$2"
   [ ! -L "$idx" ] || { printf 'vault_index_apply: refusing symlink INDEX: %s\n' "$idx" >&2; return 1; }
   [ ! -L "$(index_state_file "$idx")" ] \
     || { printf 'vault_index_apply: refusing symlink state: %s\n' "$(index_state_file "$idx")" >&2; return 1; }
-  keeper_with_lock "$canonical/$(basename "$idx")" _vault_index_apply_locked "$folder" "$idx"
+  _vault_index_apply_locked "$folder" "$idx"
+}
+
+vault_index_apply_held() {
+  local vault="$1" folder="$2" idx="$3" canonical_vault canonical idx_parent canonical_idx_parent canonical_idx
+  canonical_vault="$(cd "$vault" 2>/dev/null && pwd -P)" || return 1
+  canonical="$(cd "$folder" 2>/dev/null && pwd -P)" || return 1
+  case "$canonical" in
+    "$canonical_vault"|"$canonical_vault"/*) : ;;
+    *) printf 'vault_index_apply: indexed folder is outside the configured vault: %s\n' "$folder" >&2; return 1 ;;
+  esac
+  idx_parent="$(dirname "$idx")"
+  canonical_idx_parent="$(cd "$idx_parent" 2>/dev/null && pwd -P)" || return 1
+  if [ "$canonical_idx_parent" != "$canonical" ]; then
+    printf 'vault_index_apply: INDEX must be inside its indexed folder: %s\n' "$idx" >&2
+    return 1
+  fi
+  canonical_idx="$canonical/$(basename "$idx")"
+  _vault_index_apply_guarded "$canonical" "$canonical_idx"
+}
+
+vault_index_apply() {
+  local vault="$1" canonical_vault
+  canonical_vault="$(cd "$vault" 2>/dev/null && pwd -P)" || return 1
+  shift
+  keeper_with_lock "$canonical_vault" vault_index_apply_held "$canonical_vault" "$@"
 }

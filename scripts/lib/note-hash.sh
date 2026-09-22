@@ -62,8 +62,18 @@ keeper_sha256_text() {
   printf '%s\n' "$out"
 }
 
+keeper_test_pause() {
+  local point="$1" dir="${KEEPER_TEST_PAUSE_DIR:-}"
+  [ "${KEEPER_TEST_PAUSE_POINT:-}" = "$point" ] || return 0
+  [ -n "$dir" ] || return 0
+  mkdir -p "$dir" || return 1
+  : > "$dir/ready" || return 1
+  while [ ! -e "$dir/continue" ]; do sleep 0.01; done
+}
+
 keeper_lock_acquire() {
-  local key="$1" root lock start now owner stale timeout="${KEEPER_LOCK_TIMEOUT_SECONDS:-30}"
+  local key="$1" root lock start now owner marker
+  local timeout="${KEEPER_LOCK_TIMEOUT_SECONDS:-30}"
   case "$timeout" in ''|*[!0-9]*) timeout=30 ;; esac
   root="/tmp/claude-obsidian-keeper-$(id -u)"
   mkdir -p "$root" || return 1
@@ -72,25 +82,42 @@ keeper_lock_acquire() {
   start="$(now_epoch)"
   while ! mkdir "$lock" 2>/dev/null; do
     owner="$(sed -n '1p' "$lock/owner" 2>/dev/null || true)"
-    if [ -n "$owner" ] && ! kill -0 "$owner" 2>/dev/null; then
-      stale="$lock.stale.$$.$(now_epoch)"
-      if mv "$lock" "$stale" 2>/dev/null; then rm -rf "$stale"; fi
+    case "$owner" in
+      ''|*[!0-9]*) : ;;
+      *)
+        if ! kill -0 "$owner" 2>/dev/null; then
+          marker="$lock/owner.reaping.$$"
+          # Moving the owner file is the reclaim claim. Other reclaimers then
+          # see an ownerless directory and cannot remove it. The final rmdir
+          # succeeds only while this exact stale lock remains empty.
+          if mv "$lock/owner" "$marker" 2>/dev/null; then
+            if [ "$(sed -n '1p' "$marker" 2>/dev/null || true)" = "$owner" ] \
+               && ! kill -0 "$owner" 2>/dev/null; then
+              rm -f "$marker" 2>/dev/null || true
+              rmdir "$lock" 2>/dev/null || true
+            else
+              mv "$marker" "$lock/owner" 2>/dev/null || true
+            fi
+          fi
+        fi
+        ;;
+    esac
+    if [ ! -d "$lock" ]; then
       continue
     fi
     now="$(now_epoch)"
-    if [ -z "$owner" ] && [ $(( now - start )) -ge 5 ]; then
-      stale="$lock.stale.$$.$now"
-      if mv "$lock" "$stale" 2>/dev/null; then rm -rf "$stale"; fi
-      continue
-    fi
     if [ $(( now - start )) -ge "$timeout" ]; then
       printf 'keeper: timed out waiting for local write lock\n' >&2
       return 1
     fi
     sleep 0.05
   done
-  if ! printf '%s\n' "$$" > "$lock/owner"; then
-    rm -rf "$lock"
+  # An ownerless directory is never reclaimed. Pausing here therefore blocks
+  # every later acquirer instead of admitting one during owner publication.
+  if ! keeper_test_pause before_lock_owner \
+     || ! printf '%s\n' "$$" > "$lock/owner"; then
+    rm -f "$lock/owner" 2>/dev/null || true
+    rmdir "$lock" 2>/dev/null || true
     return 1
   fi
   printf '%s\n' "$lock"
@@ -110,7 +137,7 @@ keeper_with_lock() {
   lock="$(keeper_lock_acquire "$key")" || return 1
   if "$@"; then rc=0; else rc=$?; fi
   keeper_lock_release "$lock" \
-    || printf 'keeper: warning — local write lock will be reclaimed after process exit\n' >&2
+    || printf 'keeper: warning — local write lock release failed; manual cleanup may be required\n' >&2
   return "$rc"
 }
 

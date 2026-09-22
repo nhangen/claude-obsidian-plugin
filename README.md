@@ -226,6 +226,8 @@ Claude Code supplies `${CLAUDE_PLUGIN_ROOT}`. The Codex skill resolves its bundl
 
 - The Stop hook requires `claude` on `PATH` for background summarization. If absent, the session save no-ops with a logged warning.
 - Commit capture asks `git` about a HEAD snapshot taken before the call, so a failed or dry-run commit is not captured. A call that makes more than `OBSIDIAN_COMMIT_MAX_RECORDS` commits (20 by default) captures the oldest of them and names the shas it skipped rather than truncating silently. The append is idempotent per commit sha, read from the note itself, so a re-run or a second host does not duplicate a record.
+- Keeper containment and atomic publication cover cooperating same-host writers using the canonical vault lock. The portable shell implementation rejects symlink components and revalidates immediately before rename, but it does not claim protection from an unrelated process replacing filesystem components outside that lock.
+- The MCP stdio and HTTP transports remain read-only. Their tests pin that boundary; real transport-writer competition is deferred until the mutation capability is introduced.
 - Routing is keyword-based, not semantic. Intent inference records confidence and evidence, but folder placement still depends on taxonomy/routing rules; ambiguous sessions can still land in `Inbox/`.
 
 ## License

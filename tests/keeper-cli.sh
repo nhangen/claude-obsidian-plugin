@@ -411,12 +411,12 @@ else
     --body-file "$TMP/note.md" --title "Blocked Index" --recover --format json >/dev/null \
     || fail "unusable INDEX partial was not recoverable"
 
-  # I10c: when vault_index_apply returns a non-zero rc, insert reports the rc suffix.
+  # I10c: when the locked INDEX apply returns a non-zero rc, insert reports the rc suffix.
   FIDX="$TMP/fault-idx"; mkdir -p "$FIDX/lib"
   cp "${ROOT_DIR}/scripts/keeper" "$FIDX/"
   cp "${ROOT_DIR}/scripts/lib/"* "$FIDX/lib/"
   cat >> "$FIDX/lib/vault-index.sh" <<'EOF'
-vault_index_apply() { return 42; }
+vault_index_apply_held() { return 42; }
 EOF
   set +e
   bash "$FIDX/keeper" insert --vault "$V" --target "Notes/2026-06-29-rc-fail.md" \

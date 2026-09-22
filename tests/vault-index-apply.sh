@@ -13,8 +13,25 @@ printf 'note A\n' > "$F/a.md"
 printf 'note B\n' > "$F/b.md"
 STATE="$(index_state_file "$IDX")"
 
+OUTSIDE_IDX="$TMP/outside-INDEX.md"
+if vault_index_apply "$TMP" "$F" "$OUTSIDE_IDX" >/dev/null 2>&1; then
+  fail "vault_index_apply accepted an INDEX outside its indexed folder"
+fi
+[ ! -e "$OUTSIDE_IDX" ] || fail "vault_index_apply wrote outside its indexed folder"
+
+mkdir -p "$TMP/configured-vault" "$TMP/outside-vault"
+if vault_index_apply "$TMP/configured-vault" "$TMP/outside-vault" "$TMP/outside-vault/INDEX.md" >/dev/null 2>&1; then
+  fail "vault_index_apply accepted a folder outside the configured vault"
+fi
+[ ! -e "$TMP/outside-vault/INDEX.md" ] || fail "vault_index_apply escaped the configured vault"
+ln -s "$TMP/outside-vault" "$TMP/configured-vault/escape"
+if vault_index_apply "$TMP/configured-vault" "$TMP/configured-vault/escape" "$TMP/configured-vault/escape/INDEX.md" >/dev/null 2>&1; then
+  fail "vault_index_apply accepted a symlink escape from the configured vault"
+fi
+[ ! -e "$TMP/outside-vault/INDEX.md" ] || fail "vault_index_apply wrote through a symlink escape"
+
 # Cold start: no state -> both notes are ADD.
-ADDED="$(vault_index_apply "$F" "$IDX")"
+ADDED="$(vault_index_apply "$TMP" "$F" "$IDX")"
 grep -qxF "a.md" <<<"$ADDED" || fail "expected a.md in ADD output"
 grep -qxF "b.md" <<<"$ADDED" || fail "expected b.md in ADD output"
 [ -f "$STATE" ] || fail "state file not created"
@@ -29,14 +46,14 @@ note_hash_valid "$(state_hash_for "$STATE" "a.md")" || fail "a.md hash not store
 # Idempotent: second apply with no changes -> empty plan, no new ADD.
 # Use explicit timestamps instead of sleep to avoid wall-clock dependency.
 touch -t 202001010000 "$F/a.md" "$F/b.md"
-ADDED2="$(vault_index_apply "$F" "$IDX")"
+ADDED2="$(vault_index_apply "$TMP" "$F" "$IDX")"
 [ -z "$ADDED2" ] || fail "second apply should add nothing, got: $ADDED2"
 PLAN="$(vault_index_plan "$F" "$IDX")"
 [ -z "$PLAN" ] || fail "plan should be empty after apply, got: $PLAN"
 
 # DROP: delete a note, apply -> state entry removed.
 rm "$F/b.md"
-vault_index_apply "$F" "$IDX" >/dev/null
+vault_index_apply "$TMP" "$F" "$IDX" >/dev/null
 [ -z "$(state_hash_for "$STATE" "b.md")" ] || fail "b.md should be dropped from state"
 
 # Substring collision regression: b.md must survive when only b.md.md changes.
@@ -48,7 +65,7 @@ printf 'content-bdouble\n' > "$F2/b.md.md"
 STATE2="$(index_state_file "$IDX2")"
 
 # First apply: seeds both entries.
-vault_index_apply "$F2" "$IDX2" >/dev/null
+vault_index_apply "$TMP2" "$F2" "$IDX2" >/dev/null
 note_hash_valid "$(state_hash_for "$STATE2" "b.md")"    || fail "setup: b.md hash missing"
 note_hash_valid "$(state_hash_for "$STATE2" "b.md.md")" || fail "setup: b.md.md hash missing"
 
@@ -57,7 +74,7 @@ touch -t 197001010000 "$F2/b.md"
 printf 'content-bdouble-changed\n' > "$F2/b.md.md"
 
 # Apply again: plan touches b.md.md (CHANGED), not b.md.
-vault_index_apply "$F2" "$IDX2" >/dev/null
+vault_index_apply "$TMP2" "$F2" "$IDX2" >/dev/null
 
 # b.md's state entry must still exist.
 note_hash_valid "$(state_hash_for "$STATE2" "b.md")" \
@@ -73,7 +90,7 @@ STATE3="$(index_state_file "$IDX3")"
 
 # Make unreadable.md unreadable before the first apply.
 chmod 000 "$F3/unreadable.md"
-WARN="$(vault_index_apply "$F3" "$IDX3" 2>&1 >/dev/null)" || true
+WARN="$(vault_index_apply "$TMP3" "$F3" "$IDX3" 2>&1 >/dev/null)" || true
 # Restore perms immediately so trap cleanup works.
 chmod 644 "$F3/unreadable.md"
 
@@ -92,10 +109,10 @@ if command -v zsh >/dev/null 2>&1; then
   ZT="$(mktemp -d "${TMPDIR:-/tmp}/vault-zsh-XXXXXX")"
   ZF="$ZT/Z"; mkdir -p "$ZF"; printf '# Z Index\n' > "$ZF/INDEX.md"
   printf 'zsh note\n' > "$ZF/z.md"
-  ZERR="$(ROOT_DIR="$ROOT_DIR" ZF="$ZF" zsh -c '
+  ZERR="$(ROOT_DIR="$ROOT_DIR" ZT="$ZT" ZF="$ZF" zsh -c '
     . "$ROOT_DIR/scripts/lib/note-hash.sh"
     . "$ROOT_DIR/scripts/lib/vault-index.sh"
-    vault_index_apply "$ZF" "$ZF/INDEX.md" >/dev/null
+    vault_index_apply "$ZT" "$ZF" "$ZF/INDEX.md" >/dev/null
   ' 2>&1 >/dev/null)" || true
   case "$ZERR" in
     *"undefined signal"*) fail "vault-index.sh uses a bash-only trap under zsh: $ZERR" ;;

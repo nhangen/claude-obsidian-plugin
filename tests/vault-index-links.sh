@@ -16,7 +16,7 @@ printf 'note A\n' > "$F/a.md"
 printf 'note B\n' > "$F/b.md"
 STATE="$(index_state_file "$IDX")"
 
-vault_index_apply "$F" "$IDX" >/dev/null
+vault_index_apply "$TMP" "$F" "$IDX" >/dev/null
 grep -qxF -- '- [[a]]' "$IDX" || fail "apply did not write link for a.md"$'\n'"$(cat "$IDX")"
 grep -qxF -- '- [[b]]' "$IDX" || fail "apply did not write link for b.md"
 # Append-only: the pre-existing header survives, at the top.
@@ -24,7 +24,7 @@ grep -qxF -- '- [[b]]' "$IDX" || fail "apply did not write link for b.md"
 
 # --- idempotent: a second apply adds no duplicate link ---
 touch -t 202001010000 "$F/a.md" "$F/b.md"
-vault_index_apply "$F" "$IDX" >/dev/null
+vault_index_apply "$TMP" "$F" "$IDX" >/dev/null
 [ "$(grep -cxF -- '- [[a]]' "$IDX")" = 1 ] || fail "duplicate link appended for a.md"
 
 # --- self-heal: state ahead of INDEX (the issue-30 drift) must reappear as ADD ---
@@ -37,7 +37,7 @@ PLAN="$(vault_index_plan "$F" "$IDX")"
 grep -qxF "ADD"$'\t'"a.md" <<<"$PLAN" \
   || fail "hashed-but-unlinked note must plan as ADD, got:"$'\n'"$PLAN"
 
-ADDED="$(vault_index_apply "$F" "$IDX")"
+ADDED="$(vault_index_apply "$TMP" "$F" "$IDX")"
 grep -qxF "a.md" <<<"$ADDED" || fail "drifted note must be reported in the ADD set"
 grep -qxF -- '- [[a]]' "$IDX" || fail "apply did not re-add the missing link"
 
@@ -45,14 +45,14 @@ grep -qxF -- '- [[a]]' "$IDX" || fail "apply did not re-add the missing link"
 F2="$TMP/Hand"; mkdir -p "$F2"
 IDX2="$F2/INDEX.md"; printf '# Hand Index\n- [[h]]\n' > "$IDX2"
 printf 'hand note\n' > "$F2/h.md"
-vault_index_apply "$F2" "$IDX2" >/dev/null
+vault_index_apply "$TMP" "$F2" "$IDX2" >/dev/null
 [ "$(grep -cxF -- '- [[h]]' "$IDX2")" = 1 ] || fail "apply duplicated a hand-written link"
 
 # Link variants (alias / heading) count as linked.
 F3="$TMP/Variants"; mkdir -p "$F3"
 IDX3="$F3/INDEX.md"; printf '# V Index\n- [[v1|Alias]]\n- [[v2#Section]]\n' > "$IDX3"
 printf 'v1\n' > "$F3/v1.md"; printf 'v2\n' > "$F3/v2.md"
-vault_index_apply "$F3" "$IDX3" >/dev/null
+vault_index_apply "$TMP" "$F3" "$IDX3" >/dev/null
 [ "$(grep -c -- '\[\[v1' "$IDX3")" = 1 ] || fail "aliased link not recognized as coverage"
 [ "$(grep -c -- '\[\[v2' "$IDX3")" = 1 ] || fail "heading link not recognized as coverage"
 
@@ -60,18 +60,18 @@ vault_index_apply "$F3" "$IDX3" >/dev/null
 F4="$TMP/Meta"; mkdir -p "$F4"
 IDX4="$F4/INDEX.md"; printf '# Meta Index\n' > "$IDX4"
 printf 'meta\n' > "$F4/2026-07-27 notes (draft) [v1+2].md"
-vault_index_apply "$F4" "$IDX4" >/dev/null
+vault_index_apply "$TMP" "$F4" "$IDX4" >/dev/null
 grep -qxF -- '- [[2026-07-27 notes (draft) [v1+2]]]' "$IDX4" \
   || fail "metachar title not linked literally:"$'\n'"$(cat "$IDX4")"
 touch -t 202001010000 "$F4/2026-07-27 notes (draft) [v1+2].md"
-vault_index_apply "$F4" "$IDX4" >/dev/null
+vault_index_apply "$TMP" "$F4" "$IDX4" >/dev/null
 [ "$(grep -c -- '\[\[2026-07-27' "$IDX4")" = 1 ] || fail "metachar title link duplicated"
 
 # --- missing INDEX.md is created, not silently skipped ---
 F5="$TMP/Fresh"; mkdir -p "$F5"
 IDX5="$F5/INDEX.md"
 printf 'fresh\n' > "$F5/f.md"
-vault_index_apply "$F5" "$IDX5" >/dev/null
+vault_index_apply "$TMP" "$F5" "$IDX5" >/dev/null
 [ -f "$IDX5" ] || fail "apply did not create a missing INDEX.md"
 grep -qxF -- '- [[f]]' "$IDX5" || fail "apply did not link into the created INDEX.md"
 
@@ -86,12 +86,12 @@ case "$WARN" in *coverage*) : ;; *) fail "coverage defect not reported on stderr
 
 # apply runs the check itself, so the defect cannot be skipped by a caller that
 # forgets to ask — and it heals the gap it just reported.
-vault_index_apply "$F" "$IDX" >/dev/null
+vault_index_apply "$TMP" "$F" "$IDX" >/dev/null
 vault_index_coverage_check "$F" "$IDX" 2>/dev/null || fail "apply left a coverage defect behind"
 
 # --- empty folder: neither state nor INDEX exists yet; must not abort set -e ---
 F6="$TMP/Empty"; mkdir -p "$F6"
-vault_index_apply "$F6" "$F6/INDEX.md" >/dev/null
+vault_index_apply "$TMP" "$F6" "$F6/INDEX.md" >/dev/null
 vault_index_coverage_check "$F6" "$F6/INDEX.md" 2>/dev/null \
   || fail "coverage check failed on an empty folder"
 
@@ -106,7 +106,7 @@ printf 'one\n'   > "$R/sub/one.md"
 printf 'two\n'   > "$R/sub/deep/two.md"
 RSTATE="$(index_state_file "$RIDX")"
 
-vault_index_apply "$R" "$RIDX" >/dev/null
+vault_index_apply "$TMP" "$R" "$RIDX" >/dev/null
 for n in flat sub/one sub/deep/two; do
   grep -qxF -- "- [[$n]]" "$RIDX" || fail "recursion: no link written for $n"$'\n'"$(cat "$RIDX")"
 done
@@ -119,7 +119,7 @@ grep -qF 'sub/deep/two.md' "$RSTATE" || fail "recursion: state not keyed by rela
 grep -qF -- '- [[two]]' "$RIDX" && fail "recursion: link written as bare basename"
 
 # settled: a second apply is a no-op
-vault_index_apply "$R" "$RIDX" >/dev/null
+vault_index_apply "$TMP" "$R" "$RIDX" >/dev/null
 [ -z "$(vault_index_plan "$R" "$RIDX")" ] || fail "recursion: not idempotent"$'\n'"$(vault_index_plan "$R" "$RIDX")"
 
 # --- has_link matches a path-form link, so apply does not duplicate ----------
@@ -129,18 +129,18 @@ P="$TMP/PathForm"; mkdir -p "$P/sub"
 PIDX="$P/INDEX.md"
 printf '# PathForm Index\n- [[PathForm/sub/note]]\n' > "$PIDX"
 printf 'note\n' > "$P/sub/note.md"
-vault_index_apply "$P" "$PIDX" >/dev/null
+vault_index_apply "$TMP" "$P" "$PIDX" >/dev/null
 [ "$(grep -cF -- '- [[' "$PIDX")" = "1" ] || fail "path-form link was duplicated"$'\n'"$(cat "$PIDX")"
 
 # --- a note moved into a subfolder re-keys instead of losing coverage --------
 M="$TMP/Moved"; mkdir -p "$M"
 MIDX="$M/INDEX.md"; printf '# Moved Index\n' > "$MIDX"
 printf 'mover\n' > "$M/mover.md"
-vault_index_apply "$M" "$MIDX" >/dev/null
+vault_index_apply "$TMP" "$M" "$MIDX" >/dev/null
 MSTATE="$(index_state_file "$MIDX")"
 grep -qxF -- 'mover.md' <(cut -f1 "$MSTATE" | grep -v '^#') || fail "moved: not tracked before move"
 mkdir -p "$M/bucket" && mv "$M/mover.md" "$M/bucket/mover.md"
-vault_index_apply "$M" "$MIDX" >/dev/null
+vault_index_apply "$TMP" "$M" "$MIDX" >/dev/null
 grep -qF 'bucket/mover.md' "$MSTATE" || fail "moved: not re-keyed to new path"$'\n'"$(cat "$MSTATE")"
 [ "$(grep -vc '^#' "$MSTATE")" = "1" ] || fail "moved: stale key left behind"$'\n'"$(cat "$MSTATE")"
 [ "$(grep -cF -- '- [[' "$MIDX")" = "1" ] || fail "moved: link duplicated after move"$'\n'"$(cat "$MIDX")"
@@ -154,7 +154,7 @@ grep -qF 'bucket/mover.md' "$MSTATE" || fail "moved: not re-keyed to new path"$'
 C="$TMP/Collide"; mkdir -p "$C/a" "$C/b" "$C/c/deep"
 CIDX="$C/INDEX.md"; printf '# Collide Index\n' > "$CIDX"
 for d in a b c/deep; do printf 'dated\n' > "$C/$d/2026-05-31.md"; done
-vault_index_apply "$C" "$CIDX" >/dev/null 2>"$TMP/collide.err"
+vault_index_apply "$TMP" "$C" "$CIDX" >/dev/null 2>"$TMP/collide.err"
 CSTATE="$(index_state_file "$CIDX")"
 [ "$(grep -vc '^#' "$CSTATE")" = "3" ] || fail "collide: expected 3 tracked"$'\n'"$(cat "$CSTATE")"
 [ "$(grep -cF -- '- [[' "$CIDX")" = "3" ] \
@@ -163,7 +163,7 @@ for d in a b c/deep; do
   grep -qxF -- "- [[$d/2026-05-31]]" "$CIDX" || fail "collide: no distinct link for $d"$'\n'"$(cat "$CIDX")"
 done
 [ -s "$TMP/collide.err" ] && fail "collide: coverage defect reported"$'\n'"$(cat "$TMP/collide.err")"
-vault_index_apply "$C" "$CIDX" >/dev/null 2>&1
+vault_index_apply "$TMP" "$C" "$CIDX" >/dev/null 2>&1
 [ "$(grep -cF -- '- [[' "$CIDX")" = "3" ] || fail "collide: second apply duplicated links"$'\n'"$(cat "$CIDX")"
 
 # --- a legacy bare link does not satisfy its namesakes -----------------------
@@ -173,7 +173,7 @@ vault_index_apply "$C" "$CIDX" >/dev/null 2>&1
 L="$TMP/Legacy"; mkdir -p "$L/a" "$L/b"
 LIDX="$L/INDEX.md"; printf '# Legacy Index\n- [[2026-05-31]]\n' > "$LIDX"
 for d in a b; do printf 'dated\n' > "$L/$d/2026-05-31.md"; done
-vault_index_apply "$L" "$LIDX" >/dev/null 2>&1
+vault_index_apply "$TMP" "$L" "$LIDX" >/dev/null 2>&1
 for d in a b; do
   grep -qxF -- "- [[$d/2026-05-31]]" "$LIDX" \
     || fail "legacy: bare link absorbed $d/2026-05-31"$'\n'"$(cat "$LIDX")"
@@ -186,7 +186,7 @@ done
 U="$TMP/Unique"; mkdir -p "$U/a"
 UIDX="$U/INDEX.md"; printf '# Unique Index\n- [[solo]]\n' > "$UIDX"
 printf 'solo\n' > "$U/a/solo.md"
-vault_index_apply "$U" "$UIDX" >/dev/null 2>&1
+vault_index_apply "$TMP" "$U" "$UIDX" >/dev/null 2>&1
 [ "$(grep -cF -- '- [[' "$UIDX")" = "1" ] \
   || fail "unique: bare link duplicated"$'\n'"$(cat "$UIDX")"
 
@@ -196,7 +196,7 @@ vault_index_apply "$U" "$UIDX" >/dev/null 2>&1
 V="$TMP/Vault"; mkdir -p "$V/.obsidian" "$V/Proj/sub"
 VIDX="$V/Proj/INDEX.md"
 printf 'note\n' > "$V/Proj/sub/note.md"; printf 'flat\n' > "$V/Proj/flat.md"
-vault_index_apply "$V/Proj" "$VIDX" >/dev/null
+vault_index_apply "$TMP" "$V/Proj" "$VIDX" >/dev/null
 grep -qxF -- '- [[Proj/sub/note]]' "$VIDX" || fail "vault-relative: nested target wrong"$'\n'"$(cat "$VIDX")"
 grep -qxF -- '- [[Proj/flat]]'     "$VIDX" || fail "vault-relative: root target wrong"$'\n'"$(cat "$VIDX")"
 
@@ -211,7 +211,7 @@ printf 'top\n'    > "$O/P/top.md"
 printf 'owned\n'  > "$O/P/child/owned.md"
 printf 'deep\n'   > "$O/P/child/deeper-owned.md"
 printf 'loose\n'  > "$O/P/loose/deeper/loose.md"
-vault_index_apply "$O/P" "$OIDX" >/dev/null 2>&1
+vault_index_apply "$TMP" "$O/P" "$OIDX" >/dev/null 2>&1
 OSTATE="$(index_state_file "$OIDX")"
 grep -qxF -- '- [[P/top]]' "$OIDX"              || fail "owned: parent lost its own note"$'\n'"$(cat "$OIDX")"
 grep -qxF -- '- [[P/loose/deeper/loose]]' "$OIDX" \
@@ -220,7 +220,7 @@ grep -qF -- 'child/owned' "$OIDX" && fail "owned: parent indexed a note owned by
 grep -qF -- 'child/' "$OSTATE"    && fail "owned: parent tracked a note owned by child/INDEX.md"$'\n'"$(cat "$OSTATE")"
 [ "$(grep -vc '^#' "$OSTATE")" = "2" ] || fail "owned: expected 2 tracked, got $(grep -vc '^#' "$OSTATE")"
 # The child index still covers its own notes.
-vault_index_apply "$O/P/child" "$CIDX" >/dev/null 2>&1
+vault_index_apply "$TMP" "$O/P/child" "$CIDX" >/dev/null 2>&1
 grep -qxF -- '- [[P/child/owned]]' "$CIDX" || fail "owned: child index missing its own note"$'\n'"$(cat "$CIDX")"
 # Coverage is clean on both, and the parent does not claim the child's notes.
 vault_index_coverage_check "$O/P" "$OIDX" >/dev/null 2>&1 || fail "owned: parent reports a defect"
@@ -230,11 +230,11 @@ vault_index_coverage_check "$O/P/child" "$CIDX" >/dev/null 2>&1 || fail "owned: 
 N="$TMP/NewChild"; mkdir -p "$N/.obsidian" "$N/P/sub"
 NIDX="$N/P/INDEX.md"; printf '# N Index\n' > "$NIDX"
 printf 'a\n' > "$N/P/sub/a.md"
-vault_index_apply "$N/P" "$NIDX" >/dev/null 2>&1
+vault_index_apply "$TMP" "$N/P" "$NIDX" >/dev/null 2>&1
 NSTATE="$(index_state_file "$NIDX")"
 grep -qF -- 'sub/a.md' "$NSTATE" || fail "newchild: not tracked before the child index existed"
 printf '# Sub Index\n' > "$N/P/sub/INDEX.md"
-vault_index_apply "$N/P" "$NIDX" >/dev/null 2>&1
+vault_index_apply "$TMP" "$N/P" "$NIDX" >/dev/null 2>&1
 grep -qF -- 'sub/a.md' "$NSTATE" && fail "newchild: parent still tracks a note the child now owns"$'\n'"$(cat "$NSTATE")"
 vault_index_coverage_check "$N/P" "$NIDX" >/dev/null 2>&1 \
   || fail "newchild: parent reports a defect for a note it handed off"
@@ -250,7 +250,7 @@ else
   printf 'ro\n' > "$RO/ro.md"
   chmod 444 "$ROIDX"
   set +e
-  vault_index_apply "$RO" "$ROIDX" >"$TMP/ro.out" 2>"$TMP/ro.err"
+  vault_index_apply "$TMP" "$RO" "$ROIDX" >"$TMP/ro.out" 2>"$TMP/ro.err"
   RORC=$?
   set -e
   chmod 644 "$ROIDX"
@@ -272,10 +272,10 @@ fi
 SU="$TMP/Surplus"; mkdir -p "$SU"
 SUIDX="$SU/INDEX.md"; printf '# S Index\n' > "$SUIDX"
 printf 'one\n' > "$SU/one.md"; printf 'two\n' > "$SU/two.md"
-vault_index_apply "$SU" "$SUIDX" >/dev/null 2>&1
+vault_index_apply "$TMP" "$SU" "$SUIDX" >/dev/null 2>&1
 rm "$SU/two.md"                          # its link stays (append-only), state drops it
 printf 'three\n' > "$SU/three.md"        # new note, tracked below
-vault_index_apply "$SU" "$SUIDX" >/dev/null 2>&1
+vault_index_apply "$TMP" "$SU" "$SUIDX" >/dev/null 2>&1
 grep -vF -- '- [[S/three]]' "$SUIDX" | grep -vF -- '- [[three]]' > "$SUIDX.tmp" && mv "$SUIDX.tmp" "$SUIDX"
 if UNLINKED="$(vault_index_coverage_check "$SU" "$SUIDX" 2>/dev/null)"; then
   fail "surplus stale link paid for a missing one; INDEX:"$'\n'"$(cat "$SUIDX")"

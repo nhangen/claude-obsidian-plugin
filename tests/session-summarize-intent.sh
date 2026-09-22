@@ -87,6 +87,8 @@ cleanup_case() {
 }
 
 run_summarizer() {
+  printf '%s\n' '{"type":"user","message":{"content":"read these papers and update research substrate"}}' \
+    > "${CASE_DIR}/transcript.jsonl"
   PATH="${BIN_DIR}:$PATH" \
     PROMPT_CAPTURE="${CASE_DIR}/prompt.txt" \
     FAKE_CLAUDE_OUTPUT="$1" \
@@ -416,6 +418,58 @@ tags: [research]
   assert_not_contains "$note" "research_state_change: kinda"
 }
 
+test_hook_writer_recovers_and_preserves_collision() {
+  setup_case
+  trap cleanup_case RETURN
+
+  output='---
+date: 2026-05-22
+domain: Research
+vault_folder: Projects/Physics-AI-ML/
+slug: keeper-hook-entry
+session_intent: execution
+session_intent_score: 0.90
+session_intent_confidence: high
+capture_action: project_note
+capture_action_score: 0.88
+capture_action_confidence: high
+capture_needs_confirmation: false
+research_state_change: none
+substrate_object: ""
+tags: [execution]
+---
+
+# Keeper Hook Entry
+
+## Summary
+- Written through the live hook summarizer entry point.'
+
+  run_summarizer "$output" >/dev/null
+  note="${VAULT_DIR}/Projects/Physics-AI-ML/${TODAY}-keeper-hook-entry.md"
+  index="${VAULT_DIR}/Projects/Physics-AI-ML/INDEX.md"
+  state="${VAULT_DIR}/Projects/Physics-AI-ML/.INDEX.state"
+  daily="${VAULT_DIR}/Daily/${TODAY}.md"
+  assert_file "$note"
+  assert_contains "$index" "[[${TODAY}-keeper-hook-entry]]"
+  assert_contains "$state" "${TODAY}-keeper-hook-entry.md"
+  assert_contains "$daily" "[[Projects/Physics-AI-ML/${TODAY}-keeper-hook-entry|Keeper Hook Entry]]"
+
+  rm -f "$index" "$state" "$daily"
+  printf '%s\n' '{"type":"user","message":{"content":"replay the keeper hook"}}' > "${CASE_DIR}/transcript.jsonl"
+  run_summarizer "$output" >/dev/null
+  assert_contains "$index" "[[${TODAY}-keeper-hook-entry]]"
+  assert_contains "$state" "${TODAY}-keeper-hook-entry.md"
+  assert_contains "$daily" "[[Projects/Physics-AI-ML/${TODAY}-keeper-hook-entry|Keeper Hook Entry]]"
+
+  cp "$note" "${CASE_DIR}/committed-note.md"
+  printf '%s\n' '{"type":"user","message":{"content":"replay the keeper hook with different content"}}' > "${CASE_DIR}/transcript.jsonl"
+  if run_summarizer "${output/Written through the live hook summarizer entry point./different colliding content/}" >/dev/null 2>&1; then
+    fail "hook summarizer reported success for a differing same-target collision"
+  fi
+  cmp -s "$note" "${CASE_DIR}/committed-note.md" \
+    || fail "hook summarizer truncated a same-target collision"
+}
+
 test_substrate_metadata_note
 test_scratch_none_skips
 test_capture_none_skips_even_when_not_scratch
@@ -424,5 +478,6 @@ test_daily_only_uses_safe_daily_fallback
 test_operations_project_note_stays_project_note
 test_planning_decision_record_metadata
 test_invalid_research_state_falls_back_to_none
+test_hook_writer_recovers_and_preserves_collision
 
 printf 'session-summarize intent tests passed\n'

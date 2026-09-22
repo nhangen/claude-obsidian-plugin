@@ -12,7 +12,7 @@ printf 'body\n' > "$TMP/body.md"
 
 run_parallel_append() {
   local label="$1" out="$TMP/$1-results" caller round n=0
-  local callers=(watcher hook stdio http)
+  local callers=(keeper-a keeper-b keeper-c keeper-d)
   mkdir -p "$out"
   for round in $(seq 1 6); do
     for caller in "${callers[@]}"; do
@@ -70,7 +70,8 @@ OUTSIDE="$TMP/outside"
 mkdir -p "$OUTSIDE" "$V/Safe"
 ln -s "$OUTSIDE" "$V/Safe/escape"
 ln -s "$OUTSIDE/final.md" "$V/Safe/final-link.md"
-for target in '/absolute.md' '../traversal.md' $'Safe/new\nline.md' $'Safe/tab\tdelimiter.md' 'Safe/escape/gone.md' 'Safe/final-link.md'; do
+mkdir "$V/Safe/directory-target.md"
+for target in '/absolute.md' '../traversal.md' $'Safe/new\nline.md' $'Safe/tab\tdelimiter.md' 'Safe/escape/gone.md' 'Safe/final-link.md' 'Safe/directory-target.md'; do
   if bash "$KEEPER" append --vault "$V" --target "$target" --body-file "$TMP/body.md" --format json >/dev/null 2>&1; then
     fail "unsafe target was accepted: $target"
   fi
@@ -79,6 +80,40 @@ for target in '/absolute.md' '../traversal.md' $'Safe/new\nline.md' $'Safe/tab\t
   fi
 done
 [ -z "$(find "$OUTSIDE" -mindepth 1 -print -quit)" ] || fail "symlink escape wrote outside the vault"
+
+# Hold the canonical vault lock after target validation. A cooperating process
+# trying to replace that path with a symlink cannot enter until the staged write
+# commits; the next keeper write then rejects the symlink component.
+RACE_PAUSE="$TMP/path-race"
+mkdir -p "$RACE_PAUSE" "$V/RaceSafe"
+KEEPER_TEST_PAUSE_POINT=after_target_prepare KEEPER_TEST_PAUSE_DIR="$RACE_PAUSE" \
+  bash "$KEEPER" append --vault "$V" --target 'RaceSafe/note.md' \
+    --section 'race-safe' --body-file "$TMP/body.md" --format json \
+    > "$RACE_PAUSE/writer.json" & writer_pid=$!
+for _ in $(seq 1 500); do [ -e "$RACE_PAUSE/ready" ] && break; sleep 0.01; done
+[ -e "$RACE_PAUSE/ready" ] || fail "writer did not pause after target validation"
+bash -c '
+  set -e
+  . "$1"
+  mutate() {
+    : > "$3/mutator-entered"
+    while [ ! -e "$3/mutate-now" ]; do sleep 0.01; done
+    rm -rf "$1/RaceSafe"
+    ln -s "$2" "$1/RaceSafe"
+  }
+  keeper_with_lock "$2" mutate "$2" "$3" "$4"
+' _ "$ROOT_DIR/scripts/lib/note-hash.sh" "$V" "$OUTSIDE" "$RACE_PAUSE" & mutator_pid=$!
+: > "$RACE_PAUSE/continue"
+wait "$writer_pid" || fail "locked path-race writer failed"
+for _ in $(seq 1 500); do [ -e "$RACE_PAUSE/mutator-entered" ] && break; sleep 0.01; done
+[ -f "$V/RaceSafe/note.md" ] || fail "cooperating mutator entered before the keeper commit"
+: > "$RACE_PAUSE/mutate-now"
+wait "$mutator_pid"
+if bash "$KEEPER" append --vault "$V" --target 'RaceSafe/second.md' \
+  --body-file "$TMP/body.md" --format json >/dev/null 2>&1; then
+  fail "keeper accepted a symlink component after the cooperating race"
+fi
+[ -z "$(find "$OUTSIDE" -mindepth 1 -print -quit)" ] || fail "cooperating path race wrote outside the vault"
 
 set +e
 bash "$KEEPER" append --vault "$V" --target '../failed.md' \

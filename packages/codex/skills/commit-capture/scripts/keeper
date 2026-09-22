@@ -69,7 +69,7 @@ keeper_select_format() {
         KEEPER_FORMAT="$2"
         shift 2 ;;
       --recover) shift ;;
-      --vault|--target|--date|--section|--body-file|--init-file|--skip-if-hash|--title|--session-link-date)
+      --vault|--target|--date|--section|--body-file|--init-file|--skip-if-hash|--title|--session-link-date|--daily-path)
         [ $# -ge 2 ] || break
         shift 2 ;;
       *) shift ;;
@@ -103,39 +103,53 @@ keeper_guard_target() {
   esac
 }
 
-# Resolve the nearest existing ancestor before mkdir, then resolve the final
-# parent afterwards. This rejects symlink escapes without realpath and without
-# creating missing directories through an outside-vault symlink.
+# Create and validate each target directory while the caller holds the
+# canonical vault lock. Symlink components are rejected even when they resolve
+# back inside the vault; accepting them would reopen a check/use swap window.
 keeper_prepare_target() {
-  local vault="$1" target="$2" full parent probe canonical next
-  full="$vault/$target"
-  parent="$(dirname "$full")"
-  probe="$parent"
-  while [ ! -d "$probe" ]; do
-    if [ -e "$probe" ] || [ -L "$probe" ]; then
+  local vault="$1" target="$2" rel current component next canonical full
+  rel="$(dirname "$target")"
+  current="$vault"
+  while [ "$rel" != "." ] && [ -n "$rel" ]; do
+    component="${rel%%/*}"
+    if [ "$component" = "$rel" ]; then rel=""; else rel="${rel#*/}"; fi
+    [ -n "$component" ] && [ "$component" != "." ] || continue
+    next="$current/$component"
+    if [ -L "$next" ]; then
+      printf 'keeper: refusing symlink target component: %s\n' "$target" >&2
+      return 1
+    fi
+    if [ -e "$next" ] && [ ! -d "$next" ]; then
       printf 'keeper: target parent is not a directory: %s\n' "$target" >&2
       return 1
     fi
-    next="$(dirname "$probe")"
-    [ "$next" != "$probe" ] || return 1
-    probe="$next"
+    [ -d "$next" ] || mkdir "$next" || return 1
+    canonical="$(cd "$next" 2>/dev/null && pwd -P)" || return 1
+    [ "$canonical" = "$next" ] || {
+      printf 'keeper: target component changed during validation: %s\n' "$target" >&2
+      return 1
+    }
+    current="$next"
   done
-  canonical="$(cd "$probe" 2>/dev/null && pwd -P)" || return 1
-  case "$canonical" in "$vault"|"$vault"/*) : ;; *)
-    printf 'keeper: target escapes the configured vault: %s\n' "$target" >&2
-    return 1 ;;
-  esac
-  mkdir -p "$parent" || return 1
-  canonical="$(cd "$parent" 2>/dev/null && pwd -P)" || return 1
-  case "$canonical" in "$vault"|"$vault"/*) : ;; *)
-    printf 'keeper: target escapes the configured vault: %s\n' "$target" >&2
-    return 1 ;;
-  esac
-  [ ! -L "$full" ] || {
+  full="$current/$(basename "$target")"
+  if [ -L "$full" ]; then
     printf 'keeper: refusing symlink target: %s\n' "$target" >&2
     return 1
-  }
-  printf '%s/%s\n' "$canonical" "$(basename "$full")"
+  fi
+  if [ -e "$full" ] && [ ! -f "$full" ]; then
+    printf 'keeper: target is not a regular file: %s\n' "$target" >&2
+    return 1
+  fi
+  printf '%s\n' "$full"
+}
+
+keeper_commit_staged() {
+  local vault="$1" target="$2" expected="$3" tmp="$4" fresh staged_parent
+  fresh="$(keeper_prepare_target "$vault" "$target")" || return 1
+  [ "$fresh" = "$expected" ] || return 1
+  staged_parent="$(cd "$(dirname "$tmp")" 2>/dev/null && pwd -P)" || return 1
+  [ "$staged_parent" = "$(dirname "$fresh")" ] || return 1
+  keeper_swap_or_clean "$tmp" "$fresh"
 }
 
 # Does any section heading in $1 name the sha $2? Heading-only (a context bullet
@@ -172,6 +186,8 @@ _cmd_append_locked() {
   local skip_hash="$6" skip_given="$7" full tmp body
   full="$(keeper_prepare_target "$vault_abs" "$target")" \
     || { keeper_fail_locked "append target is not writable inside the vault"; return 1; }
+  keeper_test_pause after_target_prepare \
+    || { keeper_fail_locked "append target validation pause failed"; return 1; }
 
   if [ "$skip_given" = 1 ] && [ -f "$full" ] \
      && keeper_heading_has_sha "$full" "$skip_hash"; then
@@ -198,7 +214,7 @@ _cmd_append_locked() {
   fi
   printf '\n%s\n\n%s\n' "$section" "$body" >> "$tmp" \
     || { rm -f "$tmp"; keeper_fail_locked "could not stage append for $target"; return 1; }
-  keeper_swap_or_clean "$tmp" "$full" \
+  keeper_commit_staged "$vault_abs" "$target" "$full" "$tmp" \
     || { keeper_fail_locked "could not commit append for $target"; return 1; }
   keeper_emit_outcome committed "$full"
 }
@@ -277,17 +293,16 @@ cmd_append() {
 # write a pre-resolved new note + INDEX link (+ optional daily Session Links).
 # Refuses to overwrite an existing target — the caller owns dedup/collision.
 keeper_daily_link_locked() {
-  local vault_abs="$1" target="$2" title="$3" sldate="$4"
-  local daily_rel="Daily/$sldate.md" daily folder ltarget link tmp
+  local vault_abs="$1" target="$2" title="$3" sldate="$4" daily_path="$5"
+  local daily_rel="$daily_path/$sldate.md" daily ltarget link tmp
   daily="$(keeper_prepare_target "$vault_abs" "$daily_rel")" || return 1
   if [ ! -f "$daily" ]; then
     tmp="$(mktemp "$(dirname "$daily")/.keeper-daily-XXXXXX")" || return 1
     printf -- '---\ndate: %s\ntags: [daily]\n---\n\n# %s\n' "$sldate" "$sldate" > "$tmp" \
       || { rm -f "$tmp"; return 1; }
-    keeper_swap_or_clean "$tmp" "$daily" || return 1
+    keeper_commit_staged "$vault_abs" "$daily_rel" "$daily" "$tmp" || return 1
   fi
-  folder="$(dirname "$vault_abs/$target")"
-  ltarget="$(vault_link_target "$folder" "$(basename "$target" .md)")"
+  ltarget="${target%.md}"
   link="- [[$ltarget]]"
   [ "$title" = "$(basename "$target" .md)" ] || link="- [[$ltarget|$title]]"
   if grep -qF -- "[[$ltarget]]" "$daily" || grep -qF -- "[[$ltarget|" "$daily"; then
@@ -301,11 +316,11 @@ keeper_daily_link_locked() {
     { cat "$daily"; printf '\n## Session Links\n%s\n' "$link"; } > "$tmp" \
       || { rm -f "$tmp"; return 1; }
   fi
-  keeper_swap_or_clean "$tmp" "$daily"
+  keeper_commit_staged "$vault_abs" "$daily_rel" "$daily" "$tmp"
 }
 
 _cmd_insert_locked() {
-  local vault_abs="$1" target="$2" body_file="$3" title="$4" sldate="$5" recover="$6"
+  local vault_abs="$1" target="$2" body_file="$3" title="$4" sldate="$5" recover="$6" daily_path="$7"
   local full folder idx tmp wrote_note=0
   full="$(keeper_prepare_target "$vault_abs" "$target")" \
     || { keeper_fail_locked "insert target is not writable inside the vault"; return 1; }
@@ -325,7 +340,7 @@ _cmd_insert_locked() {
       || { keeper_fail_locked "could not stage insert for $target"; return 1; }
     cp "$body_file" "$tmp" \
       || { rm -f "$tmp"; keeper_fail_locked "could not stage insert for $target"; return 1; }
-    keeper_swap_or_clean "$tmp" "$full" \
+    keeper_commit_staged "$vault_abs" "$target" "$full" "$tmp" \
       || { keeper_fail_locked "could not commit insert for $target"; return 1; }
     wrote_note=1
   fi
@@ -336,7 +351,7 @@ _cmd_insert_locked() {
   fi
 
   idx="$folder/INDEX.md"
-  if ! vault_index_apply "$folder" "$idx" >/dev/null; then
+  if ! vault_index_apply_held "$vault_abs" "$folder" "$idx" >/dev/null; then
     keeper_partial_locked "$target was written but INDEX reconciliation is incomplete"
     return 2
   fi
@@ -346,7 +361,7 @@ _cmd_insert_locked() {
   if [ -n "$sldate" ]; then
     keeper_fault before_daily \
       || { keeper_partial_locked "$target and INDEX were written but the daily backlink remains"; return 2; }
-    if ! keeper_daily_link_locked "$vault_abs" "$target" "$title" "$sldate"; then
+    if ! keeper_daily_link_locked "$vault_abs" "$target" "$title" "$sldate" "$daily_path"; then
       keeper_partial_locked "$target and INDEX were written but the daily backlink failed"
       return 2
     fi
@@ -358,7 +373,7 @@ _cmd_insert_locked() {
 }
 
 cmd_insert() {
-  local vault="" target="" body_file="" title="" sldate="" recover=0 format="text"
+  local vault="" target="" body_file="" title="" sldate="" daily_path="Daily" recover=0 format="text"
   keeper_select_format "$@"
   while [ $# -gt 0 ]; do
     case "$1" in
@@ -367,6 +382,7 @@ cmd_insert() {
       --body-file)          body_file="${2:-}"; shift 2 ;;
       --title)              title="${2:-}";     shift 2 ;;
       --session-link-date)  sldate="${2:-}";    shift 2 ;;
+      --daily-path)         daily_path="${2:-}"; shift 2 ;;
       --recover)            recover=1;           shift ;;
       --format)             format="${2:-}";    shift 2 ;;
       *) keeper_die "insert: unknown arg: $1" ;;
@@ -384,13 +400,14 @@ cmd_insert() {
       [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]) : ;;
       *) keeper_die "insert: --session-link-date must be YYYY-MM-DD: $sldate" ;;
     esac
+    keeper_guard_target "$daily_path/$sldate.md"
   fi
 
   [ -n "$title" ] || title="$(basename "$target" .md)"
   local rc=0
   KEEPER_OUTCOME_EMITTED=0
   keeper_with_lock "$vault_abs" _cmd_insert_locked \
-    "$vault_abs" "$target" "$body_file" "$title" "$sldate" "$recover" || rc=$?
+    "$vault_abs" "$target" "$body_file" "$title" "$sldate" "$recover" "$daily_path" || rc=$?
   if [ "$rc" -ne 0 ] && [ "$KEEPER_OUTCOME_EMITTED" = 0 ]; then
     printf 'keeper: insert failed before an outcome was produced\n' >&2
     keeper_emit_outcome failed
