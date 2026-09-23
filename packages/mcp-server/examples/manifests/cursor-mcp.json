@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "obsidian": {
+      "command": "/absolute/path/to/node_modules/.bin/claude-obsidian-mcp",
+      "args": [],
+      "env": {
+        "OBSIDIAN_LOCAL_MD": "/absolute/path/to/obsidian.local.md",
+        "MCP_REPOSITORY_ROOTS": "/absolute/path/to/repository"
+      }
+    }
+  }
+}

@@ -120,6 +120,28 @@ The keeper writes only to the Obsidian vault (`vault_path` from `obsidian.local.
 
 Both hooks are gated — they inspect the Bash command first and exit silently for non-commit calls, so they don't interrupt normal tool flow.
 
+The optional `scripts/install-git-hook.sh` installer adds a non-blocking native
+`post-commit` hook for clients that do not expose the Claude hook pair. Its scope
+is the resolved hooks directory, so every repository or worktree using that same
+directory runs the installed hook:
+
+- A local install with no custom `core.hooksPath` writes to the repository's
+  common Git hooks directory and therefore affects the main worktree and every
+  linked worktree.
+- A repository-local custom `core.hooksPath` is shared by its linked worktrees.
+  A worktree-scoped override affects only worktrees resolving to that path.
+- A global install writes to the existing global `core.hooksPath`, or sets it to
+  `~/.config/git/hooks` when unset. It affects every repository and worktree
+  without a local or worktree override. A shared custom global directory may
+  therefore have a system-wide blast radius for that user.
+
+Existing hooks in the resolved directory are preserved and chained.
+The installer copies the metadata and keeper helpers to a stable user data
+directory, so the hook is not tied to a versioned plugin-cache checkout. Use
+`uninstall` to remove only the managed hook and restore installer-owned global
+configuration; pre-existing hook configuration is left unchanged. Capture
+failures are reported on stderr while the commit remains successful.
+
 **The two halves are one mechanism: register both or neither.** Whether a commit landed is decided by comparing `HEAD` before the call against `HEAD` after — the only signal that distinguishes a commit from a `git commit` that was rejected, aborted, short-circuited by `false &&`, or had nothing to commit. A tip that moved is necessary but not sufficient, so the post-hook also asks git *what* the move was: the old tip (or its parent, for an amend) has to be reachable from the new one, and the new commit's committer has to be you — a `git pull` that fast-forwards in front of a failed commit leaves someone else's commit at the tip.
 
 With only the PostToolUse half wired up there is no "before". The hook says so, alongside every other reason a commit went uncaptured. Everything it says — the record and every diagnostic — is delivered as `hookSpecificOutput.additionalContext`, which is the only channel a PostToolUse hook has on exit 0: bare stdout goes to the debug log rather than the transcript. Only a line beginning `obsidian-commit-capture: hash=` is a record.
