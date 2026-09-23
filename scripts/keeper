@@ -30,6 +30,9 @@ KEEPER_RECOVERY_REQUIRED=false
 KEEPER_RECOVERY_ACTION=""
 KEEPER_ERROR_CODE=""
 KEEPER_RETRYABLE=false
+KEEPER_PENDING_KIND=""
+KEEPER_PENDING_PREIMAGE=""
+KEEPER_PENDING_POSTIMAGE=""
 
 keeper_json_escape() {
   printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g; s//\\r/g; s/	/\\t/g'
@@ -51,6 +54,7 @@ EOF
 
 keeper_emit_outcome() {
   local outcome="$1" value="${2:-}" recovery_action
+  [ "${KEEPER_CRASH_AFTER_LOCK:-0}" != 1 ] || return 0
   KEEPER_OUTCOME_EMITTED=1
   if [ "$KEEPER_FORMAT" = json ]; then
     recovery_action="$KEEPER_RECOVERY_ACTION"
@@ -80,10 +84,20 @@ keeper_die() {
   exit 1
 }
 
+keeper_require_retry() {
+  KEEPER_RETRYABLE=true
+  KEEPER_RECOVERY_REQUIRED=true
+  if [ -n "$KEEPER_IDEMPOTENCY_KEY" ]; then
+    KEEPER_RECOVERY_ACTION="retry with the same idempotency_key"
+  else
+    KEEPER_RECOVERY_ACTION="retry the write"
+  fi
+}
+
 keeper_fail_locked() {
   printf 'keeper: %s\n' "$1" >&2
   [ -n "$KEEPER_ERROR_CODE" ] || KEEPER_ERROR_CODE=WRITE_FAILED
-  KEEPER_RETRYABLE=true
+  keeper_require_retry
   keeper_emit_outcome failed
   return 1
 }
@@ -167,8 +181,11 @@ keeper_idempotency_record() {
 }
 
 keeper_idempotency_begin() {
-  local vault="$1" payload_hash="$2" record stored_hash stored_state tmp
+  local vault="$1" payload_hash="$2" record stored_hash stored_state stored_kind stored_preimage stored_postimage tmp
   [ -n "$KEEPER_IDEMPOTENCY_KEY" ] || return 0
+  KEEPER_PENDING_KIND=""
+  KEEPER_PENDING_PREIMAGE=""
+  KEEPER_PENDING_POSTIMAGE=""
   record="$(keeper_idempotency_record "$vault")" || return 1
   if [ -f "$record" ]; then
     stored_hash="$(sed -n '1p' "$record")"
@@ -182,12 +199,36 @@ keeper_idempotency_begin() {
       keeper_emit_outcome skipped "$KEEPER_PRIMARY_PATH"
       return 10
     fi
+    stored_kind="$(sed -n '3p' "$record")"
+    stored_preimage="$(sed -n '4p' "$record")"
+    stored_postimage="$(sed -n '5p' "$record")"
+    if [ "$stored_state" = pending ] && [ "$stored_kind" = append ]; then
+      if keeper_valid_file_state "$stored_preimage" true; then
+        KEEPER_PENDING_PREIMAGE="$stored_preimage"
+      fi
+      if keeper_valid_file_state "$stored_postimage" false; then
+        KEEPER_PENDING_POSTIMAGE="$stored_postimage"
+      fi
+      if [ -n "$KEEPER_PENDING_PREIMAGE" ] && [ -n "$KEEPER_PENDING_POSTIMAGE" ]; then
+        KEEPER_PENDING_KIND=append
+      fi
+    fi
     KEEPER_RECOVERY_REQUIRED=true
     KEEPER_RECOVERY_ACTION="retry with the same idempotency_key"
     return 0
   fi
   tmp="$(mktemp "$(dirname "$record")/.keeper-idempotency-XXXXXX")" || return 1
   printf '%s\npending\n' "$payload_hash" > "$tmp" \
+    || { rm -f "$tmp"; return 1; }
+  keeper_swap_or_clean "$tmp" "$record"
+}
+
+keeper_idempotency_record_append_evidence() {
+  local vault="$1" payload_hash="$2" preimage="$3" postimage="$4" record tmp
+  [ -n "$KEEPER_IDEMPOTENCY_KEY" ] || return 0
+  record="$(keeper_idempotency_record "$vault")" || return 1
+  tmp="$(mktemp "$(dirname "$record")/.keeper-idempotency-XXXXXX")" || return 1
+  printf '%s\npending\nappend\n%s\n%s\n' "$payload_hash" "$preimage" "$postimage" > "$tmp" \
     || { rm -f "$tmp"; return 1; }
   keeper_swap_or_clean "$tmp" "$record"
 }
@@ -200,6 +241,28 @@ keeper_idempotency_commit() {
   printf '%s\ncommitted\n' "$payload_hash" > "$tmp" \
     || { rm -f "$tmp"; return 1; }
   keeper_swap_or_clean "$tmp" "$record"
+}
+
+keeper_file_state() {
+  local path="$1" hash
+  if [ ! -e "$path" ]; then
+    printf 'absent\n'
+    return 0
+  fi
+  [ -f "$path" ] || return 1
+  hash="$(sha256_of "$path")" || return 1
+  printf 'sha256:%s\n' "$hash"
+}
+
+keeper_valid_file_state() {
+  local value="$1" allow_absent="$2" digest
+  if [ "$value" = absent ]; then
+    [ "$allow_absent" = true ]
+    return
+  fi
+  case "$value" in sha256:*) digest="${value#sha256:}" ;; *) return 1 ;; esac
+  [ "${#digest}" -eq 64 ] || return 1
+  case "$digest" in *[!0-9a-fA-F]*) return 1 ;; *) return 0 ;; esac
 }
 
 # Create and validate each target directory while the caller holds the
@@ -282,14 +345,11 @@ keeper_heading_has_sha() {
 # append a timestamped section to a dated note, creating it on absence.
 _cmd_append_locked() {
   local vault_abs="$1" target="$2" section="$3" body_file="$4" init_file="$5"
-  local skip_hash="$6" skip_given="$7" payload_hash="$8" full tmp body idem_rc=0
+  local skip_hash="$6" skip_given="$7" payload_hash="$8" full tmp fragment body
+  local preimage postimage current_state idem_rc=0
   keeper_idempotency_begin "$vault_abs" "$payload_hash" || idem_rc=$?
   [ "$idem_rc" -ne 10 ] || return 0
   [ "$idem_rc" -eq 0 ] || return "$idem_rc"
-  if [ "$KEEPER_RECOVERY_REQUIRED" = true ]; then
-    keeper_partial_locked "a prior append attempt may have written $target; verify the note before retrying"
-    return 2
-  fi
   full="$(keeper_prepare_target "$vault_abs" "$target")" \
     || { keeper_fail_locked "append target is not writable inside the vault"; return 1; }
   keeper_test_pause after_target_prepare \
@@ -322,10 +382,50 @@ _cmd_append_locked() {
     body="$(cat)" \
       || { rm -f "$tmp"; keeper_fail_locked "could not read stdin"; return 1; }
   fi
-  printf '\n%s\n\n%s\n' "$section" "$body" >> "$tmp" \
-    || { rm -f "$tmp"; keeper_fail_locked "could not stage append for $target"; return 1; }
+  fragment="$(mktemp "$(dirname "$full")/.keeper-section-XXXXXX")" \
+    || { rm -f "$tmp"; keeper_fail_locked "could not stage append section for $target"; return 1; }
+  printf '\n%s\n\n%s\n' "$section" "$body" > "$fragment" \
+    || { rm -f "$tmp" "$fragment"; keeper_fail_locked "could not stage append section for $target"; return 1; }
+  cat "$fragment" >> "$tmp" \
+    || { rm -f "$tmp" "$fragment"; keeper_fail_locked "could not stage append for $target"; return 1; }
+  rm -f "$fragment"
+  if [ -n "$KEEPER_IDEMPOTENCY_KEY" ]; then
+    preimage="$(keeper_file_state "$full")" \
+      || { rm -f "$tmp"; keeper_fail_locked "could not inspect append preimage for $target"; return 1; }
+    postimage="$(keeper_file_state "$tmp")" \
+      || { rm -f "$tmp"; keeper_fail_locked "could not inspect append postimage for $target"; return 1; }
+    if [ "$KEEPER_RECOVERY_REQUIRED" = true ]; then
+      current_state="$preimage"
+      if [ "$KEEPER_PENDING_KIND" != append ]; then
+        rm -f "$tmp"
+        keeper_partial_locked "the pending append for $target lacks attempt-specific recovery evidence"
+        return 2
+      fi
+      if [ "$current_state" = "$KEEPER_PENDING_POSTIMAGE" ]; then
+        rm -f "$tmp"
+        keeper_idempotency_commit "$vault_abs" "$payload_hash" \
+          || { keeper_partial_locked "$target was written but idempotency recovery remains"; return 2; }
+        KEEPER_RECOVERY_REQUIRED=false
+        KEEPER_RECOVERY_ACTION=""
+        keeper_emit_outcome skipped "$full"
+        return 0
+      fi
+      if [ "$current_state" != "$KEEPER_PENDING_PREIMAGE" ] || [ "$postimage" != "$KEEPER_PENDING_POSTIMAGE" ]; then
+        rm -f "$tmp"
+        keeper_partial_locked "the pending append state for $target is ambiguous"
+        return 2
+      fi
+    else
+      keeper_idempotency_record_append_evidence "$vault_abs" "$payload_hash" "$preimage" "$postimage" \
+        || { rm -f "$tmp"; keeper_fail_locked "could not record append recovery evidence for $target"; return 1; }
+    fi
+  fi
+  keeper_fault before_append \
+    || { rm -f "$tmp"; keeper_partial_locked "$target was not written and append recovery remains"; return 2; }
   keeper_commit_staged "$vault_abs" "$target" "$full" "$tmp" \
     || { keeper_fail_locked "could not commit append for $target"; return 1; }
+  keeper_fault after_append \
+    || { keeper_partial_locked "$target was written but idempotency recovery remains"; return 2; }
   keeper_idempotency_commit "$vault_abs" "$payload_hash" \
     || { keeper_partial_locked "$target was written but idempotency recovery remains"; return 2; }
   KEEPER_RECOVERY_REQUIRED=false
@@ -421,7 +521,7 @@ cmd_append() {
   if [ "$rc" -ne 0 ] && [ "$KEEPER_OUTCOME_EMITTED" = 0 ]; then
     printf 'keeper: append failed before an outcome was produced\n' >&2
     KEEPER_ERROR_CODE=WRITE_FAILED
-    KEEPER_RETRYABLE=true
+    keeper_require_retry
     keeper_emit_outcome failed
   fi
   [ -z "$staged_body" ] || rm -f "$staged_body"
@@ -579,7 +679,7 @@ $daily_path/$sldate.md"
   if [ "$rc" -ne 0 ] && [ "$KEEPER_OUTCOME_EMITTED" = 0 ]; then
     printf 'keeper: insert failed before an outcome was produced\n' >&2
     KEEPER_ERROR_CODE=WRITE_FAILED
-    KEEPER_RETRYABLE=true
+    keeper_require_retry
     keeper_emit_outcome failed
   fi
   [ -z "$staged_body" ] || rm -f "$staged_body"

@@ -197,12 +197,18 @@ keeper_with_lock() {
   if "$@"; then rc=0; else rc=$?; fi
   keeper_lock_release "$lock" \
     || printf 'keeper: warning — local write lock release failed; manual cleanup may be required\n' >&2
+  if [ "${KEEPER_CRASH_AFTER_LOCK:-0}" = 1 ]; then
+    kill -KILL "$$"
+  fi
   return "$rc"
 }
 
 keeper_fault() {
   [ "${KEEPER_FAULT_INJECT:-}" = "$1" ] || return 0
   printf 'keeper: injected fault at %s\n' "$1" >&2
+  if [ "${KEEPER_FAULT_MODE:-}" = crash ]; then
+    KEEPER_CRASH_AFTER_LOCK=1
+  fi
   return 91
 }
 

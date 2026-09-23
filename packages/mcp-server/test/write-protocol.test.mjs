@@ -110,11 +110,10 @@ exit 9
     const response = await next(id);
     assert.equal(response.result.isError, true, idempotencyKey);
     const result = JSON.parse(response.result.content[0].text);
-    const uncertainWrite = idempotencyKey === "empty-key";
     assert.equal(result.code, "KEEPER_PROTOCOL_ERROR", idempotencyKey);
-    assert.equal(result.status, uncertainWrite ? "partial" : "failed", idempotencyKey);
+    assert.equal(result.status, "partial", idempotencyKey);
     assert.equal(result.error_code, "KEEPER_PROTOCOL_ERROR", idempotencyKey);
-    assert.equal(result.recovery.required, uncertainWrite, idempotencyKey);
-    assert.equal(result.retryable, uncertainWrite, idempotencyKey);
+    assert.equal(result.recovery.required, true, idempotencyKey);
+    assert.equal(result.retryable, true, idempotencyKey);
   }
 });

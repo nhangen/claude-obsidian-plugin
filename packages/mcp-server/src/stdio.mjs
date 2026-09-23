@@ -62,7 +62,10 @@ function codedError(code, detail, outcome) {
 }
 
 function childEnvironment() {
-  const allowed = ["PATH", "HOME", "XDG_CONFIG_HOME", "OBSIDIAN_LOCAL_MD", "CLAUDE_PLUGIN_ROOT", "LANG", "LC_ALL", "MCP_GIT_MARKER"];
+  const allowed = [
+    "PATH", "HOME", "XDG_CONFIG_HOME", "OBSIDIAN_LOCAL_MD", "CLAUDE_PLUGIN_ROOT", "LANG", "LC_ALL", "MCP_GIT_MARKER",
+    "KEEPER_FAULT_INJECT", "KEEPER_FAULT_MODE",
+  ];
   return Object.fromEntries(allowed.filter((key) => process.env[key] !== undefined).map((key) => [key, process.env[key]]));
 }
 
@@ -350,22 +353,23 @@ function emptyWriteOutcome(requestId, idempotencyKey, path, affectedPaths) {
   };
 }
 
-function failedWriteOutcome(fallback, errorCode, detail, parsed) {
+function failedWriteOutcome(fallback, errorCode, detail, parsed, recoverable = false) {
   if (parsed && ["partial", "conflict", "failed"].includes(parsed.status)) {
     return { ...parsed, warnings: [...parsed.warnings, detail] };
   }
+  const recoveryRequired = recoverable || errorCode === "SUBPROCESS_TIMEOUT" || errorCode === "CANCELLED";
   return {
     ...fallback,
-    status: "failed",
+    status: recoverable ? "partial" : "failed",
     warnings: [...fallback.warnings, detail],
     recovery: {
-      required: errorCode === "SUBPROCESS_TIMEOUT" || errorCode === "CANCELLED",
-      action: errorCode === "SUBPROCESS_TIMEOUT" || errorCode === "CANCELLED"
+      required: recoveryRequired,
+      action: recoveryRequired
         ? "verify affected_paths, then retry with the same idempotency_key"
         : "",
     },
     error_code: errorCode,
-    retryable: errorCode === "SUBPROCESS_TIMEOUT" || errorCode === "CANCELLED",
+    retryable: recoveryRequired,
   };
 }
 
@@ -488,8 +492,11 @@ async function executeKeeperWrite(args, bodyContent, signal, fallback) {
       });
       child.on("error", (error) => {
         if (!stopping) {
-          const outcome = failedWriteOutcome(fallback, "WRITE_FAILED", "keeper process failed");
-          finish(reject, codedError("WRITE_FAILED", error.message, outcome));
+          const recoverable = Boolean(fallback.idempotency_key);
+          const errorCode = recoverable ? "KEEPER_PROTOCOL_ERROR" : "WRITE_FAILED";
+          const detail = recoverable ? "keeper result was missing or invalid" : "keeper process failed";
+          const outcome = failedWriteOutcome(fallback, errorCode, detail, undefined, recoverable);
+          finish(reject, codedError(errorCode, recoverable ? detail : error.message, outcome));
         }
       });
       child.on("close", (code) => {
@@ -505,17 +512,20 @@ async function executeKeeperWrite(args, bodyContent, signal, fallback) {
           return;
         }
         if (!parsed) {
-          const outcome = failedWriteOutcome(fallback, "KEEPER_PROTOCOL_ERROR", "keeper result was missing or invalid");
+          const recoverable = Boolean(fallback.idempotency_key);
+          const outcome = failedWriteOutcome(fallback, "KEEPER_PROTOCOL_ERROR", "keeper result was missing or invalid", undefined, recoverable);
           finish(reject, codedError("KEEPER_PROTOCOL_ERROR", "keeper result was missing or invalid", outcome));
           return;
         }
         if (parsed.request_id !== fallback.request_id || parsed.idempotency_key !== fallback.idempotency_key) {
-          const outcome = failedWriteOutcome(fallback, "KEEPER_PROTOCOL_ERROR", "keeper result did not match the request identity");
+          const recoverable = Boolean(fallback.idempotency_key);
+          const outcome = failedWriteOutcome(fallback, "KEEPER_PROTOCOL_ERROR", "keeper result did not match the request identity", undefined, recoverable);
           finish(reject, codedError("KEEPER_PROTOCOL_ERROR", "keeper result did not match the request identity", outcome));
           return;
         }
         if (!compatibleKeeperExit(code, parsed)) {
-          const outcome = failedWriteOutcome(fallback, "KEEPER_PROTOCOL_ERROR", "keeper result contradicted its exit status", parsed);
+          const recoverable = Boolean(fallback.idempotency_key);
+          const outcome = failedWriteOutcome(fallback, "KEEPER_PROTOCOL_ERROR", "keeper result contradicted its exit status", undefined, recoverable);
           finish(reject, codedError("KEEPER_PROTOCOL_ERROR", "keeper result contradicted its exit status", outcome));
           return;
         }
