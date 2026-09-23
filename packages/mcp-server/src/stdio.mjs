@@ -1,8 +1,9 @@
 #!/usr/bin/env node
 
 import { spawn, spawnSync } from "node:child_process";
-import { constants as fsConstants, existsSync, readFileSync, realpathSync, statSync } from "node:fs";
+import { constants as fsConstants, existsSync, readFileSync, realpathSync, statSync, writeFileSync, rmSync, mkdtempSync } from "node:fs";
 import { lstat, open, readdir } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { delimiter, dirname, extname, isAbsolute, join, relative, resolve } from "node:path";
 import { McpServer, ResourceTemplate } from "@modelcontextprotocol/server";
@@ -36,6 +37,7 @@ function helperPath(...segments) {
 
 const configResolver = helperPath("lib", "resolve-config.sh");
 const metadataScript = helperPath("commit-meta.sh");
+const keeperScript = helperPath("keeper");
 const maxResults = 5;
 const maxPreviewLength = 240;
 const maxFileBytes = 4 * 1024 * 1024;
@@ -323,6 +325,144 @@ function commitMetadata(repository, approvedRoots, signal) {
   });
 }
 
+function makeVaultRelative(vaultPath, fullPath) {
+  if (!fullPath) return "";
+  if (isAbsolute(fullPath) && isContained(vaultPath, fullPath)) {
+    return relative(vaultPath, fullPath).split("\\").join("/");
+  }
+  return fullPath.split("\\").join("/");
+}
+
+async function executeKeeperWrite(args, bodyContent, vaultPath, signal, targetPathHint) {
+  throwIfAborted(signal);
+  for (let i = 0; i < args.length; i++) {
+    if (args[i] === "--target" && args[i + 1]) {
+      const relTarget = args[i + 1];
+      if (relTarget.includes("..") || relTarget.startsWith("/")) {
+        throw codedError("PATH_INVALID", "requested path is not allowed");
+      }
+    }
+  }
+  const tempDir = mkdtempSync(join(tmpdir(), "mcp-keeper-"));
+  const bodyFile = join(tempDir, "body.md");
+  try {
+    writeFileSync(bodyFile, bodyContent, "utf8");
+    const fullArgs = [...args, "--body-file", bodyFile, "--format", "json"];
+    return await new Promise((resolveResult, reject) => {
+      const child = spawn("bash", [keeperScript, ...fullArgs], {
+        env: childEnvironment(),
+        detached: process.platform !== "win32",
+        shell: false,
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+      activeChildren.add(child);
+      let stdout = "";
+      let stderrOutput = "";
+      let settled = false;
+      let stopping = false;
+      let timer;
+      const finish = (callback, value) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        signal?.removeEventListener("abort", onAbort);
+        activeChildren.delete(child);
+        callback(value);
+      };
+      const onAbort = () => {
+        stopping = true;
+        void terminateChild(child).then(() => finish(reject, codedError("CANCELLED", "request cancelled")));
+      };
+      const stop = (error) => {
+        if (settled || stopping) return;
+        stopping = true;
+        void terminateChild(child).then(() => finish(reject, error));
+      };
+      if (signal) {
+        signal.addEventListener("abort", onAbort, { once: true });
+        if (signal.aborted) onAbort();
+      }
+      timer = setTimeout(() => stop(codedError("SUBPROCESS_TIMEOUT", "keeper write timed out")), subprocessTimeoutMs);
+      child.stdout.on("data", (chunk) => {
+        stdout += chunk.toString();
+        if (Buffer.byteLength(stdout, "utf8") > maxChildOutput) stop(codedError("SUBPROCESS_OUTPUT_LIMIT", "keeper exceeded output limit"));
+      });
+      child.stderr.on("data", (chunk) => {
+        stderrOutput += chunk.toString();
+        if (Buffer.byteLength(stderrOutput, "utf8") > maxChildOutput) stop(codedError("SUBPROCESS_OUTPUT_LIMIT", "keeper exceeded output limit"));
+      });
+      child.on("error", (error) => {
+        if (!stopping) finish(reject, codedError("WRITE_FAILED", error.message));
+      });
+      child.on("close", (code) => {
+        if (stopping) return;
+        let parsed = null;
+        try {
+          parsed = JSON.parse(stdout.trim());
+        } catch {}
+        if (code !== 0) {
+          if (stderrOutput.includes("must be vault-relative") || stderrOutput.includes("escapes the configured vault") || stderrOutput.includes("refusing symlink") || stderrOutput.includes("must not contain")) {
+            finish(reject, codedError("PATH_INVALID", stderrOutput.trim() || "requested path is not allowed"));
+            return;
+          }
+          if (parsed?.status === "conflict" || stderrOutput.includes("already exists") || stderrOutput.includes("conflict")) {
+            finish(reject, codedError("CONFLICT", stderrOutput.trim() || "write conflict"));
+            return;
+          }
+          if (parsed?.status === "partial") {
+            finish(reject, codedError("PARTIAL", stderrOutput.trim() || "partial write occurred"));
+            return;
+          }
+          finish(reject, codedError("WRITE_FAILED", stderrOutput.trim() || `keeper exited with code ${code}`));
+          return;
+        }
+        const resolvedPath = parsed?.path ? makeVaultRelative(vaultPath, parsed.path) : targetPathHint;
+        if (parsed?.status) {
+          finish(resolveResult, { status: parsed.status, path: resolvedPath });
+        } else {
+          finish(resolveResult, { status: "committed", path: resolvedPath });
+        }
+      });
+    });
+  } finally {
+    try { rmSync(tempDir, { recursive: true, force: true }); } catch {}
+  }
+}
+
+async function keeperSave({ title, body, folder_hint, type, links }, vaultPath, signal) {
+  let targetFolder = "Inbox";
+  if (folder_hint && folder_hint.trim()) {
+    targetFolder = folder_hint.trim().replace(/^\/+|\/+$/g, "");
+  }
+  const cleanTitle = title.trim().replace(/\.md$/i, "");
+  const targetPath = `${targetFolder}/${cleanTitle}.md`;
+
+  let formattedBody = body;
+  const headerLines = [];
+  if (type) headerLines.push(`type: ${type}`);
+  if (links && links.length > 0) headerLines.push(`links: ${links.join(", ")}`);
+  if (headerLines.length > 0) {
+    formattedBody = `---\n${headerLines.join("\n")}\n---\n\n${body}`;
+  }
+
+  return executeKeeperWrite(
+    ["insert", "--vault", vaultPath, "--target", targetPath, "--title", cleanTitle],
+    formattedBody,
+    vaultPath,
+    signal,
+    targetPath
+  );
+}
+
+async function dailyAppend({ content, section, date, skip_if_hash }, vaultPath, dailyPath, signal) {
+  const targetDate = date || new Date().toISOString().slice(0, 10);
+  const targetPath = `${(dailyPath || "Daily/").replace(/\/+$/, "")}/${targetDate}.md`;
+  const args = ["append", "--vault", vaultPath, "--date", targetDate];
+  if (section) args.push("--section", section);
+  if (skip_if_hash) args.push("--skip-if-hash", skip_if_hash);
+  return executeKeeperWrite(args, content, vaultPath, signal, targetPath);
+}
+
 async function readBounded(path, signal, maxBytes = maxResourceBytes) {
   throwIfAborted(signal);
   return readRegularFile(path, signal, maxBytes);
@@ -407,11 +547,19 @@ function successResult(value) {
 }
 
 function errorResult(error) {
-  const knownCodes = new Set(["INVALID_INPUT", "PATH_INVALID", "READ_FAILED", "SCAN_LIMIT", "METADATA_INCOMPLETE", "SUBPROCESS_TIMEOUT", "SUBPROCESS_OUTPUT_LIMIT", "CANCELLED"]);
+  const knownCodes = new Set([
+    "INVALID_INPUT", "PATH_INVALID", "READ_FAILED", "SCAN_LIMIT",
+    "METADATA_INCOMPLETE", "SUBPROCESS_TIMEOUT", "SUBPROCESS_OUTPUT_LIMIT",
+    "CANCELLED", "FORBIDDEN", "CONFLICT", "PARTIAL", "WRITE_FAILED"
+  ]);
   const code = knownCodes.has(error?.code) ? error.code : "READ_FAILED";
   const detail = {
     INVALID_INPUT: "invalid tool input",
     PATH_INVALID: "requested path is not allowed",
+    FORBIDDEN: "insufficient scope",
+    CONFLICT: "write conflict",
+    PARTIAL: "partial write occurred",
+    WRITE_FAILED: "write failed",
     READ_FAILED: "read failed",
     SCAN_LIMIT: "vault scan limit exceeded",
     METADATA_INCOMPLETE: "commit metadata was incomplete",
@@ -441,8 +589,27 @@ const metadataOutput = z.strictObject({
   time: z.string(),
   subject: z.string(),
 });
+const writeOutput = z.strictObject({
+  status: z.enum(["committed", "skipped", "conflict", "partial", "failed"]),
+  path: z.string(),
+});
+
 const searchInput = z.strictObject({ query: z.string().trim().min(1).max(240) });
 const metadataInput = z.strictObject({ repository: z.string().trim().min(1).max(maxRepositoryPathCharacters) });
+const keeperSaveInput = z.strictObject({
+  title: z.string().trim().min(1).max(240),
+  body: z.string().min(1).max(65536),
+  folder_hint: z.string().max(1024).optional(),
+  type: z.string().max(100).optional(),
+  links: z.array(z.string()).max(20).optional(),
+});
+
+const dailyAppendInput = z.strictObject({
+  content: z.string().min(1).max(65536),
+  section: z.string().max(240).optional(),
+  date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+  skip_if_hash: z.string().regex(/^[0-9a-fA-F]+$/).optional(),
+});
 
 export function createServer({ supportedProtocolVersions = protocolVersions } = {}) {
   const configuration = loadConfiguration();
@@ -478,6 +645,40 @@ export function createServer({ supportedProtocolVersions = protocolVersions } = 
       try {
         const { repository } = parseToolInput(metadataInput, args);
         return successResult(await commitMetadata(repository, configuration.repositoryRoots, ctx.mcpReq.signal));
+      } catch (error) {
+        return errorResult(error);
+      }
+    },
+  );
+  server.registerTool(
+    "obsidian_keeper_save",
+    {
+      title: "Save Obsidian note",
+      description: "Save a structured note to the Obsidian vault.",
+      inputSchema: z.unknown(),
+      outputSchema: writeOutput,
+    },
+    async (args, ctx) => {
+      try {
+        const input = parseToolInput(keeperSaveInput, args);
+        return successResult(await keeperSave(input, configuration.vaultPath, ctx.mcpReq.signal));
+      } catch (error) {
+        return errorResult(error);
+      }
+    },
+  );
+  server.registerTool(
+    "obsidian_daily_append",
+    {
+      title: "Append to daily note",
+      description: "Append a section to today's daily note in the Obsidian vault.",
+      inputSchema: z.unknown(),
+      outputSchema: writeOutput,
+    },
+    async (args, ctx) => {
+      try {
+        const input = parseToolInput(dailyAppendInput, args);
+        return successResult(await dailyAppend(input, configuration.vaultPath, configuration.dailyPath, ctx.mcpReq.signal));
       } catch (error) {
         return errorResult(error);
       }

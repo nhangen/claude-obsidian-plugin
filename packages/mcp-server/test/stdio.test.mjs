@@ -144,7 +144,7 @@ test("stdio server exposes read-only tools with clean MCP framing", async (t) =>
     2,
   );
   const toolNames = tools.result.tools.map((tool) => tool.name);
-  assert.deepEqual(toolNames.sort(), ["obsidian_commit_meta", "obsidian_find_notes"]);
+  assert.deepEqual(toolNames.sort(), ["obsidian_commit_meta", "obsidian_daily_append", "obsidian_find_notes", "obsidian_keeper_save"]);
   const searchTool = tools.result.tools.find((tool) => tool.name === "obsidian_find_notes");
   const metadataTool = tools.result.tools.find((tool) => tool.name === "obsidian_commit_meta");
   assert.equal(searchTool.outputSchema.properties.matches.type, "array");

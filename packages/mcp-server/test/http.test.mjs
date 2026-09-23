@@ -175,7 +175,7 @@ test("authenticated Streamable HTTP is read-only and enforces transport boundari
 
   const insufficientScope = await fetch(`${url}/mcp`, {
     method: "POST",
-    headers: requestHeaders(url, token({ scope: "vault:write" })),
+    headers: requestHeaders(url, token({ scope: "other:scope" })),
     body: JSON.stringify(initializeRequest()),
   });
   assert.equal(insufficientScope.status, 403);
@@ -205,7 +205,7 @@ test("authenticated Streamable HTTP is read-only and enforces transport boundari
   });
   assert.equal(listed.status, 200);
   const toolNames = (await listed.json()).result.tools.map((tool) => tool.name).sort();
-  assert.deepEqual(toolNames, ["obsidian_commit_meta", "obsidian_find_notes"]);
+  assert.deepEqual(toolNames, ["obsidian_commit_meta", "obsidian_daily_append", "obsidian_find_notes", "obsidian_keeper_save"]);
 
   const search = await fetch(`${url}/mcp`, {
     method: "POST",

@@ -12,7 +12,7 @@ test("pins the MCP protocol and transport boundary", () => {
   assert.deepEqual(contract.protocol.transports.mvp, ["stdio", "streamable-http"]);
   assert.deepEqual(contract.protocol.transports.planned, []);
   assert.deepEqual(contract.protocol.transports.compatibilityOnly, ["http+sse"]);
-  assert.deepEqual(contract.scopes.streamableHttp, ["vault:read", "repo:read"]);
+  assert.deepEqual(contract.scopes.streamableHttp, ["vault:read", "repo:read", "vault:write"]);
   assert.equal(contract.http.defaultBind, "127.0.0.1");
   assert.equal(contract.http.authentication, "HS256 bearer JWT on every request");
   assert.equal(contract.http.queryCredentials, false);
@@ -23,15 +23,21 @@ test("pins the MCP protocol and transport boundary", () => {
   });
 });
 
-test("pins the initial read-only tool surface", () => {
-  assert.deepEqual(Object.keys(contract.tools), ["obsidian_find_notes", "obsidian_commit_meta"]);
-  for (const tool of Object.values(contract.tools)) {
-    assert.equal(tool.status, "mvp");
-    assert.equal(tool.readOnly, true);
-    assert.equal(tool.idempotency, "not-required-read-only");
-  }
+test("pins tool surface including write tools", () => {
+  assert.deepEqual(Object.keys(contract.tools), [
+    "obsidian_find_notes",
+    "obsidian_commit_meta",
+    "obsidian_keeper_save",
+    "obsidian_daily_append"
+  ]);
+  assert.equal(contract.tools.obsidian_find_notes.readOnly, true);
+  assert.equal(contract.tools.obsidian_commit_meta.readOnly, true);
+  assert.equal(contract.tools.obsidian_keeper_save.readOnly, false);
+  assert.equal(contract.tools.obsidian_daily_append.readOnly, false);
   assert.equal(contract.tools.obsidian_find_notes.scope, "vault:read");
   assert.equal(contract.tools.obsidian_commit_meta.scope, "repo:read");
+  assert.equal(contract.tools.obsidian_keeper_save.scope, "vault:write");
+  assert.equal(contract.tools.obsidian_daily_append.scope, "vault:write");
   assert.deepEqual(fixtures.toolCalls.map(({ name }) => name), Object.keys(contract.tools));
 });
 
@@ -43,7 +49,7 @@ test("keeps future resources, prompts, and writes gated", () => {
   );
   assert.equal(contract.prompts.obsidian_ask.serverModel, false);
   assert.equal(contract.prompts.reorganize_vault.status, "excluded-from-mcp-mvp");
-  assert.equal(contract.writes.mvp, false);
+  assert.equal(contract.writes.mvp, true);
   assert.deepEqual(contract.writes.statuses, fixtures.writeStatuses);
   assert.ok(fixtures.errors.every(({ isError }) => isError === true));
   assert.ok(contract.cancellation.handlerSignal.includes("mcpReq.signal"));
