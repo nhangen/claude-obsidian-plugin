@@ -113,7 +113,26 @@ STATUS_LEGACY_AFTER="$("${INSTALLER}" status "$LEGACY_REPO")"
 
 [ -f "$LEGACY_LOG" ] || { echo "FAIL: legacy hook did not execute" >&2; exit 1; }
 
-# 4. Collision refusal when both post-commit and post-commit.legacy exist
+# 4. Marker text alone does not establish installer ownership.
+MARKER_REPO="${TEST_TMP}/marker-repo"
+git init -b main "$MARKER_REPO" >/dev/null
+mkdir -p "${MARKER_REPO}/.git/hooks"
+cat <<'EOF' > "${MARKER_REPO}/.git/hooks/post-commit"
+#!/usr/bin/env bash
+echo "foreign hook mentioning # obsidian-commit-capture-hook"
+EOF
+chmod +x "${MARKER_REPO}/.git/hooks/post-commit"
+cp "${MARKER_REPO}/.git/hooks/post-commit" "${TEST_TMP}/expected-marker-hook"
+
+STATUS_MARKER_BEFORE="$("${INSTALLER}" status "$MARKER_REPO" || true)"
+[ "$STATUS_MARKER_BEFORE" = "foreign-hook-detected" ] || { echo "FAIL: marker-containing foreign hook was treated as installer-owned" >&2; exit 1; }
+
+"${INSTALLER}" install "$MARKER_REPO" >/dev/null
+cmp -s "${TEST_TMP}/expected-marker-hook" "${MARKER_REPO}/.git/hooks/post-commit.legacy" || { echo "FAIL: marker-containing foreign hook was not preserved" >&2; exit 1; }
+"${INSTALLER}" uninstall "$MARKER_REPO" >/dev/null
+cmp -s "${TEST_TMP}/expected-marker-hook" "${MARKER_REPO}/.git/hooks/post-commit" || { echo "FAIL: marker-containing foreign hook was not restored" >&2; exit 1; }
+
+# 5. Collision refusal when both post-commit and post-commit.legacy exist
 COLLISION_REPO="${TEST_TMP}/collision-repo"
 git init -b main "$COLLISION_REPO" >/dev/null
 mkdir -p "${COLLISION_REPO}/.git/hooks"
@@ -125,7 +144,7 @@ if "${INSTALLER}" install "$COLLISION_REPO" >/dev/null 2>&1; then
   exit 1
 fi
 
-# 5. Git Worktree support
+# 6. Git Worktree support
 WORKTREE_REPO="${TEST_TMP}/worktree-repo"
 git init -b main "$WORKTREE_REPO" >/dev/null
 (
@@ -154,7 +173,7 @@ case "$WT_NOTE_CONTENT" in
   *) echo "FAIL: note content missing worktree commit message" >&2; exit 1 ;;
 esac
 
-# 6. Respect a repository/worktree-specific core.hooksPath.
+# 7. Respect a repository/worktree-specific core.hooksPath.
 CUSTOM_REPO="${TEST_TMP}/custom-hooks-repo"
 CUSTOM_HOOKS="${TEST_TMP}/custom-hooks"
 GLOBAL_HOOKS_FOR_LOCAL="${TEST_TMP}/global-hooks-for-local"
@@ -170,7 +189,7 @@ git -C "$CUSTOM_REPO" config core.hooksPath "$CUSTOM_HOOKS"
 [ ! -e "${CUSTOM_HOOKS}/post-commit" ] || { echo "FAIL: custom hook was not removed" >&2; exit 1; }
 git config --global --unset core.hooksPath
 
-# 7. Global scope preserves a pre-existing hooksPath.
+# 8. Global scope preserves a pre-existing hooksPath.
 PREEXISTING_GLOBAL_HOOKS="${TEST_TMP}/preexisting-global-hooks"
 mkdir -p "$PREEXISTING_GLOBAL_HOOKS"
 git config --global core.hooksPath "$PREEXISTING_GLOBAL_HOOKS"
@@ -180,7 +199,7 @@ git config --global core.hooksPath "$PREEXISTING_GLOBAL_HOOKS"
 [ "$(git config --global core.hooksPath)" = "$PREEXISTING_GLOBAL_HOOKS" ] || { echo "FAIL: pre-existing global hooksPath was unset" >&2; exit 1; }
 git config --global --unset core.hooksPath
 
-# 8. Global scope test
+# 9. Global scope test
 GLOBAL_STATUS_BEFORE="$("${INSTALLER}" status --scope global || true)"
 [ "$GLOBAL_STATUS_BEFORE" = "not-installed" ] || { echo "FAIL: global status before expected not-installed, got $GLOBAL_STATUS_BEFORE" >&2; exit 1; }
 
@@ -192,7 +211,7 @@ GLOBAL_STATUS_AFTER="$("${INSTALLER}" status --scope global)"
 GLOBAL_STATUS_UNINSTALLED="$("${INSTALLER}" status --scope global || true)"
 [ "$GLOBAL_STATUS_UNINSTALLED" = "not-installed" ] || { echo "FAIL: global status uninstalled expected not-installed, got $GLOBAL_STATUS_UNINSTALLED" >&2; exit 1; }
 
-# 9. Non-blocking error handling and surfaced capture failures
+# 10. Non-blocking error handling and surfaced capture failures
 BROKEN_HOOK_DIR="${TEST_TMP}/broken-hook-dir"
 mkdir -p "$BROKEN_HOOK_DIR"
 "${INSTALLER}" render "/nonexistent/path/commit-meta.sh" "/nonexistent/path/keeper" > "${BROKEN_HOOK_DIR}/post-commit"
