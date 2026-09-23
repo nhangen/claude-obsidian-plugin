@@ -469,6 +469,112 @@ test("stdio preserves recoverable partial keeper outcomes", async (t) => {
   assert.match(await readFile(join(vaultPath, "Blocked", "Needs Recovery.md"), "utf8"), /Written before INDEX failure/);
 });
 
+test("stdio recovers an insert when the keeper dies after writing the note", async (t) => {
+  const { root, vaultPath, configPath } = await createFixtureVault();
+  const crashServer = startStdioServer(configPath, { KEEPER_FAULT_INJECT: "after_note", KEEPER_FAULT_MODE: "crash" });
+  let recoveryServer;
+  t.after(async () => {
+    for (const server of [crashServer, recoveryServer]) {
+      if (!server) continue;
+      if (!server.child.killed) server.child.stdin.end();
+      await once(server.child, "close").catch(() => {});
+    }
+    await rm(root, { recursive: true, force: true });
+  });
+
+  await crashServer.request({
+    jsonrpc: "2.0", id: 1, method: "initialize",
+    params: { protocolVersion: "2025-11-25", capabilities: {}, clientInfo: { name: "test", version: "1.0" } },
+  }, 1);
+  crashServer.notification({ jsonrpc: "2.0", method: "notifications/initialized" });
+  const crashed = await crashServer.request({
+    jsonrpc: "2.0", id: 2, method: "tools/call",
+    params: {
+      name: "obsidian_keeper_save",
+      arguments: { title: "Crash Recovery", body: "Written before keeper death", idempotency_key: "crash-insert-1", request_id: "crash-insert-request" },
+    },
+  }, 2);
+  const crashedOutcome = JSON.parse(crashed.result.content[0].text);
+  assert.equal(crashed.result.isError, true);
+  assert.equal(crashedOutcome.code, "KEEPER_PROTOCOL_ERROR");
+  assert.equal(crashedOutcome.status, "partial");
+  assert.equal(crashedOutcome.recovery.required, true);
+  assert.equal(crashedOutcome.retryable, true);
+  assert.match(await readFile(join(vaultPath, "Inbox", "Crash Recovery.md"), "utf8"), /Written before keeper death/);
+
+  crashServer.child.stdin.end();
+  await once(crashServer.child, "close");
+  recoveryServer = startStdioServer(configPath);
+  await recoveryServer.request({
+    jsonrpc: "2.0", id: 3, method: "initialize",
+    params: { protocolVersion: "2025-11-25", capabilities: {}, clientInfo: { name: "test", version: "1.0" } },
+  }, 3);
+  recoveryServer.notification({ jsonrpc: "2.0", method: "notifications/initialized" });
+  const recovered = await recoveryServer.request({
+    jsonrpc: "2.0", id: 4, method: "tools/call",
+    params: {
+      name: "obsidian_keeper_save",
+      arguments: { title: "Crash Recovery", body: "Written before keeper death", idempotency_key: "crash-insert-1", request_id: "crash-insert-retry" },
+    },
+  }, 4);
+  assert.equal(recovered.result.isError, false);
+  assert.equal(recovered.result.structuredContent.status, "committed");
+  assert.match(await readFile(join(vaultPath, "Inbox", "INDEX.md"), "utf8"), /Crash Recovery/);
+});
+
+test("stdio recovers an append when the keeper dies after writing the section", async (t) => {
+  const { root, vaultPath, configPath } = await createFixtureVault();
+  const crashServer = startStdioServer(configPath, { KEEPER_FAULT_INJECT: "after_append", KEEPER_FAULT_MODE: "crash" });
+  let recoveryServer;
+  t.after(async () => {
+    for (const server of [crashServer, recoveryServer]) {
+      if (!server) continue;
+      if (!server.child.killed) server.child.stdin.end();
+      await once(server.child, "close").catch(() => {});
+    }
+    await rm(root, { recursive: true, force: true });
+  });
+
+  await crashServer.request({
+    jsonrpc: "2.0", id: 1, method: "initialize",
+    params: { protocolVersion: "2025-11-25", capabilities: {}, clientInfo: { name: "test", version: "1.0" } },
+  }, 1);
+  crashServer.notification({ jsonrpc: "2.0", method: "notifications/initialized" });
+  const crashed = await crashServer.request({
+    jsonrpc: "2.0", id: 2, method: "tools/call",
+    params: {
+      name: "obsidian_daily_append",
+      arguments: { content: "Append written before keeper death", section: "## Crash Append", date: "2026-09-23", idempotency_key: "crash-append-1", request_id: "crash-append-request" },
+    },
+  }, 2);
+  const crashedOutcome = JSON.parse(crashed.result.content[0].text);
+  assert.equal(crashed.result.isError, true);
+  assert.equal(crashedOutcome.code, "KEEPER_PROTOCOL_ERROR");
+  assert.equal(crashedOutcome.status, "partial");
+  assert.equal(crashedOutcome.recovery.required, true);
+  assert.equal(crashedOutcome.retryable, true);
+
+  crashServer.child.stdin.end();
+  await once(crashServer.child, "close");
+  recoveryServer = startStdioServer(configPath);
+  await recoveryServer.request({
+    jsonrpc: "2.0", id: 3, method: "initialize",
+    params: { protocolVersion: "2025-11-25", capabilities: {}, clientInfo: { name: "test", version: "1.0" } },
+  }, 3);
+  recoveryServer.notification({ jsonrpc: "2.0", method: "notifications/initialized" });
+  const recovered = await recoveryServer.request({
+    jsonrpc: "2.0", id: 4, method: "tools/call",
+    params: {
+      name: "obsidian_daily_append",
+      arguments: { content: "Append written before keeper death", section: "## Crash Append", date: "2026-09-23", idempotency_key: "crash-append-1", request_id: "crash-append-retry" },
+    },
+  }, 4);
+  assert.equal(recovered.result.isError, false);
+  assert.equal(recovered.result.structuredContent.status, "skipped");
+  const note = await readFile(join(vaultPath, "Daily", "2026-09-23.md"), "utf8");
+  assert.equal(note.match(/^## Crash Append$/gm)?.length, 1);
+});
+
 test("stdio timeout and cancellation never report false write success and keep same-key retry safe", async (t) => {
   const { root, vaultPath, configPath } = await createFixtureVault();
   const server = startStdioServer(configPath);
