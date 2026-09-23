@@ -210,6 +210,7 @@ function requiredScopes(message) {
     if (item.method === "tools/call" && item.params?.name === "obsidian_find_notes") scopes.add("vault:read");
     if (item.method === "tools/call" && item.params?.name === "obsidian_commit_meta") scopes.add("repo:read");
     if (typeof item.method === "string" && item.method.startsWith("resources/")) scopes.add("vault:read");
+    if (typeof item.method === "string" && item.method.startsWith("prompts/")) scopes.add("vault:read");
   }
   return scopes;
 }

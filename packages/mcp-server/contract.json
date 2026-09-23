@@ -156,11 +156,17 @@
     }
   },
   "prompts": {
-    "obsidian_ask": {
-      "status": "planned-client-side",
+    "ask_vault_librarian": {
+      "status": "mvp",
       "serverModel": false,
       "scope": "vault:read",
-      "semantics": "Return bounded context for the client to apply its own prompt flow."
+      "semantics": "Return client-side instructions limited to MCP read resources and bounded search previews; cite returned paths, report coverage gaps, and refuse every vault mutation request."
+    },
+    "summarize_session": {
+      "status": "mvp",
+      "serverModel": false,
+      "scope": "vault:read",
+      "semantics": "Accept a transcript and return the client-side provider instructions for the existing SKIP-or-Markdown session summary contract; the MCP server performs no model call or vault write."
     },
     "reorganize_vault": {
       "status": "excluded-from-mcp-mvp",
