@@ -205,7 +205,7 @@ test("authenticated Streamable HTTP is read-only and enforces transport boundari
   });
   assert.equal(listed.status, 200);
   const toolNames = (await listed.json()).result.tools.map((tool) => tool.name).sort();
-  assert.deepEqual(toolNames, ["obsidian_commit_meta", "obsidian_daily_append", "obsidian_find_notes", "obsidian_keeper_save"]);
+  assert.deepEqual(toolNames, ["obsidian_commit_meta", "obsidian_find_notes"]);
 
   const search = await fetch(`${url}/mcp`, {
     method: "POST",

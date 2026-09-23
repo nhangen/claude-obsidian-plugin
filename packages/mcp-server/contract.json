@@ -133,20 +133,34 @@
           "body": { "type": "string", "minLength": 1, "maxLength": 65536 },
           "folder_hint": { "type": "string", "maxLength": 1024 },
           "type": { "type": "string", "maxLength": 100 },
-          "links": { "type": "array", "items": { "type": "string" }, "maxItems": 20 }
+          "links": { "type": "array", "items": { "type": "string" }, "maxItems": 20 },
+          "idempotency_key": { "type": "string", "minLength": 1, "maxLength": 240, "pattern": "^[A-Za-z0-9._:-]+$" },
+          "request_id": { "type": "string", "minLength": 1, "maxLength": 240, "pattern": "^[A-Za-z0-9._:-]+$" }
         }
       },
       "resultSchema": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["status", "path"],
+        "required": ["status", "request_id", "idempotency_key", "path", "affected_paths", "warnings", "recovery", "error_code", "retryable"],
         "properties": {
           "status": { "type": "string", "enum": ["committed", "skipped", "conflict", "partial", "failed"] },
-          "path": { "type": "string" }
+          "request_id": { "type": "string" },
+          "idempotency_key": { "type": "string" },
+          "path": { "type": "string" },
+          "affected_paths": { "type": "array", "items": { "type": "string" } },
+          "warnings": { "type": "array", "items": { "type": "string" } },
+          "recovery": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["required", "action"],
+            "properties": { "required": { "type": "boolean" }, "action": { "type": "string" } }
+          },
+          "error_code": { "type": ["string", "null"] },
+          "retryable": { "type": "boolean" }
         }
       },
-      "idempotency": "optional-title-and-folder-dedup",
-      "errors": ["INVALID_INPUT", "PATH_INVALID", "FORBIDDEN", "CONFLICT", "PARTIAL", "WRITE_FAILED", "SUBPROCESS_TIMEOUT"]
+      "idempotency": "required for Streamable HTTP writes and optional for local stdio compatibility; same key and payload skips, same key with a different payload conflicts",
+      "errors": ["INVALID_INPUT", "PATH_INVALID", "CONFIG_INVALID", "FORBIDDEN", "IDEMPOTENCY_CONFLICT", "CONFLICT", "PARTIAL", "WRITE_FAILED", "KEEPER_PROTOCOL_ERROR", "SUBPROCESS_TIMEOUT", "CANCELLED"]
     },
     "obsidian_daily_append": {
       "status": "mvp",
@@ -161,20 +175,34 @@
           "content": { "type": "string", "minLength": 1, "maxLength": 65536 },
           "section": { "type": "string", "maxLength": 240 },
           "date": { "type": "string", "pattern": "^\\d{4}-\\d{2}-\\d{2}$" },
-          "skip_if_hash": { "type": "string", "pattern": "^[0-9a-fA-F]+$" }
+          "skip_if_hash": { "type": "string", "pattern": "^[0-9a-fA-F]+$" },
+          "idempotency_key": { "type": "string", "minLength": 1, "maxLength": 240, "pattern": "^[A-Za-z0-9._:-]+$" },
+          "request_id": { "type": "string", "minLength": 1, "maxLength": 240, "pattern": "^[A-Za-z0-9._:-]+$" }
         }
       },
       "resultSchema": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["status", "path"],
+        "required": ["status", "request_id", "idempotency_key", "path", "affected_paths", "warnings", "recovery", "error_code", "retryable"],
         "properties": {
           "status": { "type": "string", "enum": ["committed", "skipped", "conflict", "partial", "failed"] },
-          "path": { "type": "string" }
+          "request_id": { "type": "string" },
+          "idempotency_key": { "type": "string" },
+          "path": { "type": "string" },
+          "affected_paths": { "type": "array", "items": { "type": "string" } },
+          "warnings": { "type": "array", "items": { "type": "string" } },
+          "recovery": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["required", "action"],
+            "properties": { "required": { "type": "boolean" }, "action": { "type": "string" } }
+          },
+          "error_code": { "type": ["string", "null"] },
+          "retryable": { "type": "boolean" }
         }
       },
-      "idempotency": "skip-if-hash-sha",
-      "errors": ["INVALID_INPUT", "PATH_INVALID", "FORBIDDEN", "CONFLICT", "PARTIAL", "WRITE_FAILED", "SUBPROCESS_TIMEOUT"]
+      "idempotency": "required for Streamable HTTP writes and optional for local stdio compatibility; same key and payload skips, same key with a different payload conflicts",
+      "errors": ["INVALID_INPUT", "PATH_INVALID", "CONFIG_INVALID", "FORBIDDEN", "IDEMPOTENCY_CONFLICT", "CONFLICT", "PARTIAL", "WRITE_FAILED", "KEEPER_PROTOCOL_ERROR", "SUBPROCESS_TIMEOUT", "CANCELLED"]
     }
   },
   "resources": {
@@ -238,14 +266,28 @@
     ]
   },
   "errors": {
-    "codes": ["INVALID_INPUT", "PATH_INVALID", "READ_FAILED", "SCAN_LIMIT", "METADATA_INCOMPLETE", "SUBPROCESS_TIMEOUT", "SUBPROCESS_OUTPUT_LIMIT", "CANCELLED"],
+    "codes": ["INVALID_INPUT", "PATH_INVALID", "CONFIG_INVALID", "READ_FAILED", "SCAN_LIMIT", "METADATA_INCOMPLETE", "FORBIDDEN", "IDEMPOTENCY_CONFLICT", "CONFLICT", "PARTIAL", "WRITE_FAILED", "KEEPER_PROTOCOL_ERROR", "SUBPROCESS_TIMEOUT", "SUBPROCESS_OUTPUT_LIMIT", "CANCELLED"],
     "schema": {
       "type": "object",
       "additionalProperties": false,
       "required": ["code", "detail"],
       "properties": {
         "code": { "type": "string" },
-        "detail": { "type": "string", "maxLength": 240 }
+        "detail": { "type": "string", "maxLength": 240 },
+        "status": { "type": "string", "enum": ["conflict", "partial", "failed"] },
+        "request_id": { "type": "string" },
+        "idempotency_key": { "type": "string" },
+        "path": { "type": "string" },
+        "affected_paths": { "type": "array", "items": { "type": "string" } },
+        "warnings": { "type": "array", "items": { "type": "string" } },
+        "recovery": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["required", "action"],
+          "properties": { "required": { "type": "boolean" }, "action": { "type": "string" } }
+        },
+        "error_code": { "type": "string" },
+        "retryable": { "type": "boolean" }
       }
     },
     "transport": "Use standard JSON-RPC/MCP errors for invalid requests and stable tool codes for execution failures.",

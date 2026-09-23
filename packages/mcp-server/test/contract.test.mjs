@@ -38,6 +38,16 @@ test("pins tool surface including write tools", () => {
   assert.equal(contract.tools.obsidian_commit_meta.scope, "repo:read");
   assert.equal(contract.tools.obsidian_keeper_save.scope, "vault:write");
   assert.equal(contract.tools.obsidian_daily_append.scope, "vault:write");
+  assert.ok(!contract.tools.obsidian_keeper_save.inputSchema.required.includes("idempotency_key"));
+  assert.ok(!contract.tools.obsidian_daily_append.inputSchema.required.includes("idempotency_key"));
+  assert.match(contract.tools.obsidian_keeper_save.idempotency, /required for Streamable HTTP writes/);
+  assert.match(contract.tools.obsidian_daily_append.idempotency, /optional for local stdio compatibility/);
+  assert.deepEqual(contract.tools.obsidian_keeper_save.resultSchema.required, [
+    "status", "request_id", "idempotency_key", "path", "affected_paths", "warnings", "recovery", "error_code", "retryable"
+  ]);
+  assert.deepEqual(contract.tools.obsidian_daily_append.resultSchema.required, contract.tools.obsidian_keeper_save.resultSchema.required);
+  assert.ok(contract.tools.obsidian_keeper_save.errors.includes("KEEPER_PROTOCOL_ERROR"));
+  assert.ok(contract.tools.obsidian_daily_append.errors.includes("CONFIG_INVALID"));
   assert.deepEqual(fixtures.toolCalls.map(({ name }) => name), Object.keys(contract.tools));
 });
 
@@ -57,4 +67,10 @@ test("keeps future resources, prompts, and writes gated", () => {
   assert.equal(contract.tools.obsidian_commit_meta.resultSchema.properties.repositoryPath, undefined);
   assert.equal(contract.limits.maxScanEntries, 10000);
   assert.deepEqual(contract.errors.schema.required, ["code", "detail"]);
+});
+
+test("adapter contains no direct filesystem mutation path", async () => {
+  const source = `${await readFile(new URL("../src/stdio.mjs", import.meta.url), "utf8")}\n${await readFile(new URL("../src/http.mjs", import.meta.url), "utf8")}`;
+  assert.doesNotMatch(source, /\b(?:writeFile|writeFileSync|appendFile|appendFileSync|rename|renameSync|rm|rmSync|unlink|unlinkSync|mkdir|mkdirSync|mkdtemp|mkdtempSync)\b/);
+  assert.match(source, /spawn\("bash", \[keeperScript/);
 });

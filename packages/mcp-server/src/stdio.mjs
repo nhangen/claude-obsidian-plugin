@@ -1,9 +1,9 @@
 #!/usr/bin/env node
 
 import { spawn, spawnSync } from "node:child_process";
-import { constants as fsConstants, existsSync, readFileSync, realpathSync, statSync, writeFileSync, rmSync, mkdtempSync } from "node:fs";
+import { randomUUID } from "node:crypto";
+import { constants as fsConstants, existsSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { lstat, open, readdir } from "node:fs/promises";
-import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { delimiter, dirname, extname, isAbsolute, join, relative, resolve } from "node:path";
 import { McpServer, ResourceTemplate } from "@modelcontextprotocol/server";
@@ -54,9 +54,10 @@ function stderr(message) {
   process.stderr.write(`mcp-server: ${message}\n`);
 }
 
-function codedError(code, detail) {
+function codedError(code, detail, outcome) {
   const error = new Error(detail);
   error.code = code;
+  if (outcome) error.outcome = outcome;
   return error;
 }
 
@@ -115,9 +116,19 @@ function loadConfiguration() {
   if (!isAbsolute(vaultPath)) throw new Error("vault_path must be an absolute path");
   const resolvedVault = realpathSync(resolve(vaultPath));
   if (!statSync(resolvedVault).isDirectory()) throw new Error("configured vault_path is not a directory");
-  const dailyPath = frontmatterValue(config, "daily_path") || "Daily/";
-  if (isAbsolute(dailyPath) || !isContained(resolvedVault, resolve(resolvedVault, dailyPath))) {
-    throw new Error("daily_path must remain within the configured vault");
+  const configuredDailyPath = frontmatterValue(config, "daily_path");
+  let dailyPath = "";
+  let dailyPathError = "";
+  if (!configuredDailyPath) {
+    dailyPathError = "daily_path is missing from the Obsidian configuration";
+  } else if (isAbsolute(configuredDailyPath)
+    || configuredDailyPath.split(/[\\/]/).includes("..")
+    || /[\r\n\t]/.test(configuredDailyPath)
+    || !isContained(resolvedVault, resolve(resolvedVault, configuredDailyPath))) {
+    dailyPathError = "daily_path must remain within the configured vault";
+  } else {
+    dailyPath = configuredDailyPath.replace(/^\/+|\/+$/g, "");
+    if (!dailyPath) dailyPathError = "daily_path must identify a directory within the configured vault";
   }
   const configuredRoots = process.env.MCP_REPOSITORY_ROOTS?.split(delimiter).filter(Boolean);
   const defaultRoots = isSourceCheckout ? [sourceRepositoryRoot] : [];
@@ -130,7 +141,7 @@ function loadConfiguration() {
       throw new Error("MCP_REPOSITORY_ROOTS contains an invalid directory");
     }
   });
-  return { config, configPath, dailyPath: dailyPath.replace(/^\/+|\/+$/g, ""), repositoryRoots, vaultPath: resolvedVault };
+  return { config, configPath, dailyPath, dailyPathError, repositoryRoots, vaultPath: resolvedVault };
 }
 
 async function collectMarkdownFiles(root, current = root, files = [], signal, state = { entries: 0, bytes: 0 }) {
@@ -325,41 +336,121 @@ function commitMetadata(repository, approvedRoots, signal) {
   });
 }
 
-function makeVaultRelative(vaultPath, fullPath) {
-  if (!fullPath) return "";
-  if (isAbsolute(fullPath) && isContained(vaultPath, fullPath)) {
-    return relative(vaultPath, fullPath).split("\\").join("/");
-  }
-  return fullPath.split("\\").join("/");
+function emptyWriteOutcome(requestId, idempotencyKey, path, affectedPaths) {
+  return {
+    status: "failed",
+    request_id: requestId,
+    idempotency_key: idempotencyKey || "",
+    path,
+    affected_paths: affectedPaths,
+    warnings: [],
+    recovery: { required: false, action: "" },
+    error_code: null,
+    retryable: false,
+  };
 }
 
-async function executeKeeperWrite(args, bodyContent, vaultPath, signal, targetPathHint) {
-  throwIfAborted(signal);
-  for (let i = 0; i < args.length; i++) {
-    if (args[i] === "--target" && args[i + 1]) {
-      const relTarget = args[i + 1];
-      if (relTarget.includes("..") || relTarget.startsWith("/")) {
-        throw codedError("PATH_INVALID", "requested path is not allowed");
-      }
-    }
+function failedWriteOutcome(fallback, errorCode, detail, parsed) {
+  if (parsed && ["partial", "conflict", "failed"].includes(parsed.status)) {
+    return { ...parsed, warnings: [...parsed.warnings, detail] };
   }
-  const tempDir = mkdtempSync(join(tmpdir(), "mcp-keeper-"));
-  const bodyFile = join(tempDir, "body.md");
+  return {
+    ...fallback,
+    status: "failed",
+    warnings: [...fallback.warnings, detail],
+    recovery: {
+      required: errorCode === "SUBPROCESS_TIMEOUT" || errorCode === "CANCELLED",
+      action: errorCode === "SUBPROCESS_TIMEOUT" || errorCode === "CANCELLED"
+        ? "verify affected_paths, then retry with the same idempotency_key"
+        : "",
+    },
+    error_code: errorCode,
+    retryable: errorCode === "SUBPROCESS_TIMEOUT" || errorCode === "CANCELLED",
+  };
+}
+
+function writeRequestFallback(toolName, args, configuration) {
+  const values = args && typeof args === "object" && !Array.isArray(args) ? args : {};
+  const requestId = typeof values.request_id === "string" && /^[A-Za-z0-9._:-]{1,240}$/.test(values.request_id)
+    ? values.request_id
+    : randomUUID();
+  const idempotencyKey = typeof values.idempotency_key === "string" && values.idempotency_key.length <= 240
+    ? values.idempotency_key
+    : "";
+  if (toolName === "obsidian_keeper_save") {
+    const title = typeof values.title === "string" ? values.title.trim().replace(/\.md$/i, "") : "";
+    const folder = typeof values.folder_hint === "string" && values.folder_hint.trim()
+      ? values.folder_hint.trim().replace(/^\/+|\/+$/g, "")
+      : "Inbox";
+    const path = title ? `${folder}/${title}.md` : "";
+    return emptyWriteOutcome(requestId, idempotencyKey, path, path ? [path, `${folder}/INDEX.md`] : []);
+  }
+  const date = typeof values.date === "string" && /^\d{4}-\d{2}-\d{2}$/.test(values.date)
+    ? values.date
+    : new Date().toISOString().slice(0, 10);
+  const path = configuration.dailyPath ? `${configuration.dailyPath}/${date}.md` : "";
+  return emptyWriteOutcome(requestId, idempotencyKey, path, path ? [path] : []);
+}
+
+function requireWriteConfiguration(configuration) {
+  if (configuration.dailyPathError) throw codedError("CONFIG_INVALID", configuration.dailyPathError);
+}
+
+function writeErrorResult(error, fallback) {
+  if (error?.outcome) return errorResult(error);
+  const adapterCodes = new Set([
+    "INVALID_INPUT", "PATH_INVALID", "CONFIG_INVALID", "CONFLICT", "IDEMPOTENCY_CONFLICT",
+    "PARTIAL", "WRITE_FAILED", "KEEPER_PROTOCOL_ERROR", "SUBPROCESS_TIMEOUT",
+    "SUBPROCESS_OUTPUT_LIMIT", "CANCELLED",
+  ]);
+  const code = adapterCodes.has(error?.code) ? error.code : "WRITE_FAILED";
+  const detail = error instanceof Error ? error.message : "write failed";
+  return errorResult(codedError(code, detail, failedWriteOutcome(fallback, code, detail)));
+}
+
+function parseKeeperOutcome(stdout) {
+  const text = stdout.trim();
+  if (!text || text.split(/\r?\n/).length !== 1) throw codedError("KEEPER_PROTOCOL_ERROR", "keeper returned zero or multiple structured results");
+  let parsed;
   try {
-    writeFileSync(bodyFile, bodyContent, "utf8");
-    const fullArgs = [...args, "--body-file", bodyFile, "--format", "json"];
-    return await new Promise((resolveResult, reject) => {
+    parsed = JSON.parse(text);
+  } catch {
+    throw codedError("KEEPER_PROTOCOL_ERROR", "keeper returned malformed structured output");
+  }
+  const result = writeOutput.safeParse(parsed);
+  if (!result.success) throw codedError("KEEPER_PROTOCOL_ERROR", "keeper returned an invalid structured result");
+  if (result.data.path && (isAbsolute(result.data.path) || result.data.path.split("/").includes(".."))) {
+    throw codedError("KEEPER_PROTOCOL_ERROR", "keeper returned an invalid primary path");
+  }
+  for (const path of result.data.affected_paths) {
+    if (isAbsolute(path) || path.split("/").includes("..")) throw codedError("KEEPER_PROTOCOL_ERROR", "keeper returned an invalid affected path");
+  }
+  return result.data;
+}
+
+function compatibleKeeperExit(code, outcome) {
+  return (code === 0 && ["committed", "skipped"].includes(outcome.status))
+    || (code === 1 && outcome.status === "failed")
+    || (code === 2 && outcome.status === "partial")
+    || (code === 3 && outcome.status === "conflict");
+}
+
+async function executeKeeperWrite(args, bodyContent, signal, fallback) {
+  throwIfAborted(signal);
+  const fullArgs = [...args, "--format", "json"];
+  return await new Promise((resolveResult, reject) => {
       const child = spawn("bash", [keeperScript, ...fullArgs], {
         env: childEnvironment(),
         detached: process.platform !== "win32",
         shell: false,
-        stdio: ["ignore", "pipe", "pipe"],
+        stdio: ["pipe", "pipe", "pipe"],
       });
       activeChildren.add(child);
       let stdout = "";
       let stderrOutput = "";
       let settled = false;
       let stopping = false;
+      let stopError;
       let timer;
       const finish = (callback, value) => {
         if (settled) return;
@@ -371,18 +462,22 @@ async function executeKeeperWrite(args, bodyContent, vaultPath, signal, targetPa
       };
       const onAbort = () => {
         stopping = true;
-        void terminateChild(child).then(() => finish(reject, codedError("CANCELLED", "request cancelled")));
+        stopError = codedError("CANCELLED", "request cancelled");
+        void terminateChild(child);
       };
       const stop = (error) => {
         if (settled || stopping) return;
         stopping = true;
-        void terminateChild(child).then(() => finish(reject, error));
+        stopError = error;
+        void terminateChild(child);
       };
       if (signal) {
         signal.addEventListener("abort", onAbort, { once: true });
         if (signal.aborted) onAbort();
       }
       timer = setTimeout(() => stop(codedError("SUBPROCESS_TIMEOUT", "keeper write timed out")), subprocessTimeoutMs);
+      child.stdin.on("error", () => {});
+      child.stdin.end(bodyContent);
       child.stdout.on("data", (chunk) => {
         stdout += chunk.toString();
         if (Buffer.byteLength(stdout, "utf8") > maxChildOutput) stop(codedError("SUBPROCESS_OUTPUT_LIMIT", "keeper exceeded output limit"));
@@ -392,44 +487,48 @@ async function executeKeeperWrite(args, bodyContent, vaultPath, signal, targetPa
         if (Buffer.byteLength(stderrOutput, "utf8") > maxChildOutput) stop(codedError("SUBPROCESS_OUTPUT_LIMIT", "keeper exceeded output limit"));
       });
       child.on("error", (error) => {
-        if (!stopping) finish(reject, codedError("WRITE_FAILED", error.message));
+        if (!stopping) {
+          const outcome = failedWriteOutcome(fallback, "WRITE_FAILED", "keeper process failed");
+          finish(reject, codedError("WRITE_FAILED", error.message, outcome));
+        }
       });
       child.on("close", (code) => {
-        if (stopping) return;
-        let parsed = null;
+        let parsed;
         try {
-          parsed = JSON.parse(stdout.trim());
+          parsed = parseKeeperOutcome(stdout);
         } catch {}
-        if (code !== 0) {
-          if (stderrOutput.includes("must be vault-relative") || stderrOutput.includes("escapes the configured vault") || stderrOutput.includes("refusing symlink") || stderrOutput.includes("must not contain")) {
-            finish(reject, codedError("PATH_INVALID", stderrOutput.trim() || "requested path is not allowed"));
-            return;
-          }
-          if (parsed?.status === "conflict" || stderrOutput.includes("already exists") || stderrOutput.includes("conflict")) {
-            finish(reject, codedError("CONFLICT", stderrOutput.trim() || "write conflict"));
-            return;
-          }
-          if (parsed?.status === "partial") {
-            finish(reject, codedError("PARTIAL", stderrOutput.trim() || "partial write occurred"));
-            return;
-          }
-          finish(reject, codedError("WRITE_FAILED", stderrOutput.trim() || `keeper exited with code ${code}`));
+        if (stopping) {
+          const errorCode = stopError?.code || "WRITE_FAILED";
+          const detail = errorCode === "CANCELLED" ? "request cancelled" : "keeper write timed out";
+          const outcome = failedWriteOutcome(fallback, errorCode, detail, parsed);
+          finish(reject, codedError(errorCode, detail, outcome));
           return;
         }
-        const resolvedPath = parsed?.path ? makeVaultRelative(vaultPath, parsed.path) : targetPathHint;
-        if (parsed?.status) {
-          finish(resolveResult, { status: parsed.status, path: resolvedPath });
-        } else {
-          finish(resolveResult, { status: "committed", path: resolvedPath });
+        if (!parsed) {
+          const outcome = failedWriteOutcome(fallback, "KEEPER_PROTOCOL_ERROR", "keeper result was missing or invalid");
+          finish(reject, codedError("KEEPER_PROTOCOL_ERROR", "keeper result was missing or invalid", outcome));
+          return;
         }
+        if (parsed.request_id !== fallback.request_id || parsed.idempotency_key !== fallback.idempotency_key) {
+          const outcome = failedWriteOutcome(fallback, "KEEPER_PROTOCOL_ERROR", "keeper result did not match the request identity");
+          finish(reject, codedError("KEEPER_PROTOCOL_ERROR", "keeper result did not match the request identity", outcome));
+          return;
+        }
+        if (!compatibleKeeperExit(code, parsed)) {
+          const outcome = failedWriteOutcome(fallback, "KEEPER_PROTOCOL_ERROR", "keeper result contradicted its exit status", parsed);
+          finish(reject, codedError("KEEPER_PROTOCOL_ERROR", "keeper result contradicted its exit status", outcome));
+          return;
+        }
+        if (parsed.status === "committed" || parsed.status === "skipped") {
+          finish(resolveResult, parsed);
+          return;
+        }
+        finish(reject, codedError(parsed.error_code || "WRITE_FAILED", stderrOutput.trim() || parsed.status, parsed));
       });
     });
-  } finally {
-    try { rmSync(tempDir, { recursive: true, force: true }); } catch {}
-  }
 }
 
-async function keeperSave({ title, body, folder_hint, type, links }, vaultPath, signal) {
+async function keeperSave({ title, body, folder_hint, type, links, idempotency_key, request_id }, vaultPath, signal) {
   let targetFolder = "Inbox";
   if (folder_hint && folder_hint.trim()) {
     targetFolder = folder_hint.trim().replace(/^\/+|\/+$/g, "");
@@ -445,22 +544,26 @@ async function keeperSave({ title, body, folder_hint, type, links }, vaultPath, 
     formattedBody = `---\n${headerLines.join("\n")}\n---\n\n${body}`;
   }
 
+  const requestId = request_id || randomUUID();
+  const idempotencyKey = idempotency_key || "";
+  const fallback = emptyWriteOutcome(requestId, idempotencyKey, targetPath, [targetPath, `${targetFolder}/INDEX.md`]);
   return executeKeeperWrite(
-    ["insert", "--vault", vaultPath, "--target", targetPath, "--title", cleanTitle],
+    ["insert", "--vault", vaultPath, "--target", targetPath, "--title", cleanTitle, "--request-id", requestId, "--idempotency-key", idempotencyKey],
     formattedBody,
-    vaultPath,
     signal,
-    targetPath
+    fallback,
   );
 }
 
-async function dailyAppend({ content, section, date, skip_if_hash }, vaultPath, dailyPath, signal) {
+async function dailyAppend({ content, section, date, skip_if_hash, idempotency_key, request_id }, vaultPath, dailyPath, signal) {
   const targetDate = date || new Date().toISOString().slice(0, 10);
-  const targetPath = `${(dailyPath || "Daily/").replace(/\/+$/, "")}/${targetDate}.md`;
-  const args = ["append", "--vault", vaultPath, "--date", targetDate];
+  const targetPath = `${dailyPath.replace(/\/+$/, "")}/${targetDate}.md`;
+  const requestId = request_id || randomUUID();
+  const idempotencyKey = idempotency_key || "";
+  const args = ["append", "--vault", vaultPath, "--target", targetPath, "--request-id", requestId, "--idempotency-key", idempotencyKey];
   if (section) args.push("--section", section);
   if (skip_if_hash) args.push("--skip-if-hash", skip_if_hash);
-  return executeKeeperWrite(args, content, vaultPath, signal, targetPath);
+  return executeKeeperWrite(args, content, signal, emptyWriteOutcome(requestId, idempotencyKey, targetPath, [targetPath]));
 }
 
 async function readBounded(path, signal, maxBytes = maxResourceBytes) {
@@ -550,16 +653,19 @@ function errorResult(error) {
   const knownCodes = new Set([
     "INVALID_INPUT", "PATH_INVALID", "READ_FAILED", "SCAN_LIMIT",
     "METADATA_INCOMPLETE", "SUBPROCESS_TIMEOUT", "SUBPROCESS_OUTPUT_LIMIT",
-    "CANCELLED", "FORBIDDEN", "CONFLICT", "PARTIAL", "WRITE_FAILED"
+    "CANCELLED", "FORBIDDEN", "CONFIG_INVALID", "CONFLICT", "IDEMPOTENCY_CONFLICT", "PARTIAL", "WRITE_FAILED", "KEEPER_PROTOCOL_ERROR"
   ]);
   const code = knownCodes.has(error?.code) ? error.code : "READ_FAILED";
   const detail = {
     INVALID_INPUT: "invalid tool input",
     PATH_INVALID: "requested path is not allowed",
+    CONFIG_INVALID: "Obsidian configuration is invalid",
     FORBIDDEN: "insufficient scope",
     CONFLICT: "write conflict",
+    IDEMPOTENCY_CONFLICT: "idempotency key conflicts with an earlier payload",
     PARTIAL: "partial write occurred",
     WRITE_FAILED: "write failed",
+    KEEPER_PROTOCOL_ERROR: "keeper result contract failed",
     READ_FAILED: "read failed",
     SCAN_LIMIT: "vault scan limit exceeded",
     METADATA_INCOMPLETE: "commit metadata was incomplete",
@@ -567,7 +673,8 @@ function errorResult(error) {
     SUBPROCESS_OUTPUT_LIMIT: "output limit exceeded",
     CANCELLED: "request cancelled",
   }[code];
-  return { content: [{ type: "text", text: JSON.stringify({ code, detail }) }], isError: true };
+  const payload = error?.outcome ? { code, detail, ...error.outcome } : { code, detail };
+  return { content: [{ type: "text", text: JSON.stringify(payload) }], isError: true, ...(error?.outcome ? { structuredContent: error.outcome } : {}) };
 }
 
 function parseToolInput(schema, args) {
@@ -591,7 +698,37 @@ const metadataOutput = z.strictObject({
 });
 const writeOutput = z.strictObject({
   status: z.enum(["committed", "skipped", "conflict", "partial", "failed"]),
+  request_id: z.string().min(1).max(240),
+  idempotency_key: z.string().max(240),
   path: z.string(),
+  affected_paths: z.array(z.string()),
+  warnings: z.array(z.string()),
+  recovery: z.strictObject({ required: z.boolean(), action: z.string() }),
+  error_code: z.string().nullable(),
+  retryable: z.boolean(),
+}).superRefine((value, context) => {
+  const successful = ["committed", "skipped"].includes(value.status);
+  const pathsAreComplete = value.path.length > 0
+    && value.affected_paths.length > 0
+    && value.affected_paths.every((path) => path.length > 0);
+  if (successful && (value.error_code !== null || value.recovery.required || value.retryable || !pathsAreComplete)) {
+    context.addIssue({ code: "custom", message: "successful keeper outcomes contain contradictory state" });
+  }
+  if (successful && value.recovery.action !== "") {
+    context.addIssue({ code: "custom", message: "successful keeper outcomes cannot carry a recovery action" });
+  }
+  if (!successful && (value.error_code === null || value.error_code.length === 0)) {
+    context.addIssue({ code: "custom", message: "failed keeper outcomes require an error code" });
+  }
+  if (value.status === "partial" && (!pathsAreComplete || !value.recovery.required || !value.retryable || value.recovery.action.length === 0)) {
+    context.addIssue({ code: "custom", message: "partial keeper outcomes require paths and recovery instructions" });
+  }
+  if (value.status === "conflict" && (value.recovery.required || value.retryable || value.recovery.action !== "")) {
+    context.addIssue({ code: "custom", message: "conflict keeper outcomes cannot request recovery" });
+  }
+  if (value.status === "failed" && (value.recovery.required !== value.retryable || value.recovery.required !== (value.recovery.action.length > 0))) {
+    context.addIssue({ code: "custom", message: "failed keeper outcome recovery fields disagree" });
+  }
 });
 
 const searchInput = z.strictObject({ query: z.string().trim().min(1).max(240) });
@@ -602,6 +739,8 @@ const keeperSaveInput = z.strictObject({
   folder_hint: z.string().max(1024).optional(),
   type: z.string().max(100).optional(),
   links: z.array(z.string()).max(20).optional(),
+  idempotency_key: z.string().min(1).max(240).regex(/^[A-Za-z0-9._:-]+$/).optional(),
+  request_id: z.string().min(1).max(240).regex(/^[A-Za-z0-9._:-]+$/).optional(),
 });
 
 const dailyAppendInput = z.strictObject({
@@ -609,15 +748,18 @@ const dailyAppendInput = z.strictObject({
   section: z.string().max(240).optional(),
   date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
   skip_if_hash: z.string().regex(/^[0-9a-fA-F]+$/).optional(),
+  idempotency_key: z.string().min(1).max(240).regex(/^[A-Za-z0-9._:-]+$/).optional(),
+  request_id: z.string().min(1).max(240).regex(/^[A-Za-z0-9._:-]+$/).optional(),
 });
 
-export function createServer({ supportedProtocolVersions = protocolVersions } = {}) {
+export function createServer({ supportedProtocolVersions = protocolVersions, scopes = ["vault:read", "repo:read", "vault:write"], requireWriteIdempotency = false } = {}) {
   const configuration = loadConfiguration();
+  const availableScopes = new Set(scopes);
   const server = new McpServer(
     { name: "claude-obsidian-mcp", version: "0.1.0" },
     { capabilities: { tools: {}, resources: { listChanged: false } }, supportedProtocolVersions },
   );
-  server.registerTool(
+  if (availableScopes.has("vault:read")) server.registerTool(
     "obsidian_find_notes",
     {
       title: "Find Obsidian notes",
@@ -633,7 +775,7 @@ export function createServer({ supportedProtocolVersions = protocolVersions } = 
       }
     },
   );
-  server.registerTool(
+  if (availableScopes.has("repo:read")) server.registerTool(
     "obsidian_commit_meta",
     {
       title: "Read commit metadata",
@@ -650,7 +792,7 @@ export function createServer({ supportedProtocolVersions = protocolVersions } = 
       }
     },
   );
-  server.registerTool(
+  if (availableScopes.has("vault:write")) server.registerTool(
     "obsidian_keeper_save",
     {
       title: "Save Obsidian note",
@@ -659,15 +801,18 @@ export function createServer({ supportedProtocolVersions = protocolVersions } = 
       outputSchema: writeOutput,
     },
     async (args, ctx) => {
+      const fallback = writeRequestFallback("obsidian_keeper_save", args, configuration);
       try {
+        requireWriteConfiguration(configuration);
         const input = parseToolInput(keeperSaveInput, args);
-        return successResult(await keeperSave(input, configuration.vaultPath, ctx.mcpReq.signal));
+        if (requireWriteIdempotency && !input.idempotency_key) throw codedError("INVALID_INPUT", "idempotency_key is required for remote writes");
+        return successResult(await keeperSave({ ...input, request_id: input.request_id || fallback.request_id }, configuration.vaultPath, ctx.mcpReq.signal));
       } catch (error) {
-        return errorResult(error);
+        return writeErrorResult(error, fallback);
       }
     },
   );
-  server.registerTool(
+  if (availableScopes.has("vault:write")) server.registerTool(
     "obsidian_daily_append",
     {
       title: "Append to daily note",
@@ -676,11 +821,14 @@ export function createServer({ supportedProtocolVersions = protocolVersions } = 
       outputSchema: writeOutput,
     },
     async (args, ctx) => {
+      const fallback = writeRequestFallback("obsidian_daily_append", args, configuration);
       try {
+        requireWriteConfiguration(configuration);
         const input = parseToolInput(dailyAppendInput, args);
-        return successResult(await dailyAppend(input, configuration.vaultPath, configuration.dailyPath, ctx.mcpReq.signal));
+        if (requireWriteIdempotency && !input.idempotency_key) throw codedError("INVALID_INPUT", "idempotency_key is required for remote writes");
+        return successResult(await dailyAppend({ ...input, request_id: input.request_id || fallback.request_id }, configuration.vaultPath, configuration.dailyPath, ctx.mcpReq.signal));
       } catch (error) {
-        return errorResult(error);
+        return writeErrorResult(error, fallback);
       }
     },
   );

@@ -3,10 +3,26 @@ import { copyFile, mkdir, mkdtemp, readFile, readdir, rm, stat, symlink, writeFi
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { spawn } from "node:child_process";
+import { createHmac } from "node:crypto";
 import { test } from "node:test";
 
 const packageRoot = resolve(dirname(new URL(import.meta.url).pathname), "..");
 const repositoryRoot = resolve(packageRoot, "../..");
+const httpSecret = "0123456789abcdef0123456789abcdef";
+const httpIssuer = "https://issuer.example";
+const httpAudience = "claude-obsidian";
+
+function httpToken() {
+  const header = Buffer.from(JSON.stringify({ alg: "HS256", typ: "JWT" })).toString("base64url");
+  const payload = Buffer.from(JSON.stringify({
+    aud: httpAudience,
+    exp: Math.floor(Date.now() / 1000) + 300,
+    iss: httpIssuer,
+    scope: "vault:read vault:write",
+  })).toString("base64url");
+  const signature = createHmac("sha256", httpSecret).update(`${header}.${payload}`).digest("base64url");
+  return `${header}.${payload}.${signature}`;
+}
 
 function collectOutput(child) {
   let stdout = "";
@@ -135,9 +151,10 @@ test("packed package exposes a built stdio launcher that works outside the insta
   await mkdir(installRoot);
   await mkdir(externalCwd);
   await mkdir(vault);
+  await mkdir(join(vault, "Journal", "Days"), { recursive: true });
   await run("git", ["init", "--quiet"], { cwd: externalCwd });
   await writeFile(join(vault, "note.md"), "# note\n");
-  await writeFile(config, `---\nvault_path: ${vault}\n---\n`);
+  await writeFile(config, `---\nvault_path: ${vault}\ndaily_path: Journal/Days/\n---\n`);
 
   await run("npm", ["pack", "--silent", "--ignore-scripts", "--pack-destination", fixture], { cwd: packageRoot });
   const tarball = join(fixture, (await readdir(fixture)).find((name) => name.endsWith(".tgz")));
@@ -145,8 +162,10 @@ test("packed package exposes a built stdio launcher that works outside the insta
 
   const installedPackage = join(installRoot, "node_modules", "@claude-obsidian", "mcp-server");
   const launcher = join(installRoot, "node_modules", ".bin", "claude-obsidian-mcp");
+  const httpLauncher = join(installRoot, "node_modules", ".bin", "claude-obsidian-mcp-http");
   const launcherStats = await stat(launcher);
   assert.ok((launcherStats.mode & 0o111) !== 0);
+  assert.ok(((await stat(httpLauncher)).mode & 0o111) !== 0);
   await stat(join(installedPackage, "dist", "stdio.mjs"));
   await stat(join(installedPackage, "dist", "helpers", "lib", "resolve-config.sh"));
   await stat(join(installedPackage, "dist", "helpers", "commit-meta.sh"));
@@ -196,8 +215,74 @@ test("packed package exposes a built stdio launcher that works outside the insta
   assert.equal(metadata.id, 3);
   assert.equal(metadata.result?.isError, false);
   assert.equal(metadata.result?.structuredContent?.repository, "nhangen/claude-obsidian-plugin");
+  explicitChild.stdin.write(`${JSON.stringify({
+    jsonrpc: "2.0",
+    id: 4,
+    method: "tools/call",
+    params: { name: "obsidian_daily_append", arguments: { content: "Packaged stdio write", date: "2026-09-24", idempotency_key: "packaged-stdio-1" } },
+  })}\n`);
+  const stdioWrite = JSON.parse(await explicitOutput.nextLine());
+  assert.equal(stdioWrite.result?.isError, false);
+  assert.equal(stdioWrite.result?.structuredContent?.path, "Journal/Days/2026-09-24.md");
+  assert.match(await readFile(join(vault, "Journal", "Days", "2026-09-24.md"), "utf8"), /Packaged stdio write/);
   await close(explicitChild, explicitOutput);
   assertMcpOutput(explicitOutput);
+
+  const httpChild = spawn(httpLauncher, [], {
+    cwd: externalCwd,
+    env: {
+      ...baseEnvironment,
+      OBSIDIAN_LOCAL_MD: config,
+      MCP_HTTP_BIND: "127.0.0.1",
+      MCP_HTTP_PORT: "0",
+      MCP_HTTP_JWT_SECRET: httpSecret,
+      MCP_HTTP_JWT_ISSUER: httpIssuer,
+      MCP_HTTP_JWT_AUDIENCE: httpAudience,
+      MCP_HTTP_ALLOWED_HOSTS: "127.0.0.1,localhost",
+      MCP_HTTP_ALLOWED_ORIGINS: "https://allowed.example",
+    },
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  let httpStderr = "";
+  let readyResolve;
+  const ready = new Promise((resolveReady) => { readyResolve = resolveReady; });
+  httpChild.stderr.setEncoding("utf8");
+  httpChild.stderr.on("data", (chunk) => {
+    httpStderr += chunk;
+    const match = httpStderr.match(/mcp-http-listening (http:\/\/127\.0\.0\.1:\d+)/);
+    if (match) readyResolve(match[1]);
+  });
+  t.after(() => { if (httpChild.exitCode === null) httpChild.kill("SIGTERM"); });
+  const httpUrl = await ready;
+  const headers = {
+    Accept: "application/json, text/event-stream",
+    Authorization: `Bearer ${httpToken()}`,
+    "Content-Type": "application/json",
+    Host: "127.0.0.1",
+    Origin: "https://allowed.example",
+  };
+  const initialized = await fetch(`${httpUrl}/mcp`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({
+      jsonrpc: "2.0", id: 10, method: "initialize",
+      params: { protocolVersion: "2025-11-25", capabilities: {}, clientInfo: { name: "package-boundary-test", version: "1" } },
+    }),
+  });
+  const sessionId = initialized.headers.get("mcp-session-id");
+  assert.equal(initialized.status, 200);
+  const httpWrite = await fetch(`${httpUrl}/mcp`, {
+    method: "POST",
+    headers: { ...headers, "MCP-Protocol-Version": "2025-11-25", "Mcp-Session-Id": sessionId },
+    body: JSON.stringify({
+      jsonrpc: "2.0", id: 11, method: "tools/call",
+      params: { name: "obsidian_daily_append", arguments: { content: "Packaged HTTP write", date: "2026-09-25", idempotency_key: "packaged-http-1" } },
+    }),
+  });
+  assert.equal(httpWrite.status, 200);
+  assert.equal((await httpWrite.json()).result?.structuredContent?.path, "Journal/Days/2026-09-25.md");
+  assert.match(await readFile(join(vault, "Journal", "Days", "2026-09-25.md"), "utf8"), /Packaged HTTP write/);
+  httpChild.kill("SIGTERM");
 });
 
 test("source entrypoint uses canonical helpers before a build exists", async (t) => {

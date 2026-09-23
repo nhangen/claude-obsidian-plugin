@@ -21,16 +21,53 @@ KEEPER_DIR="$(cd "$(dirname "$0")" && pwd -P)"
 
 KEEPER_FORMAT=text
 KEEPER_OUTCOME_EMITTED=0
+KEEPER_REQUEST_ID=""
+KEEPER_IDEMPOTENCY_KEY=""
+KEEPER_PRIMARY_PATH=""
+KEEPER_AFFECTED_PATHS=""
+KEEPER_WARNINGS=""
+KEEPER_RECOVERY_REQUIRED=false
+KEEPER_RECOVERY_ACTION=""
+KEEPER_ERROR_CODE=""
+KEEPER_RETRYABLE=false
+
+keeper_json_escape() {
+  printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g; s//\\r/g; s/	/\\t/g'
+}
+
+keeper_json_array() {
+  local values="$1" value first=1
+  printf '['
+  while IFS= read -r value; do
+    [ -n "$value" ] || continue
+    [ "$first" = 1 ] || printf ','
+    printf '"%s"' "$(keeper_json_escape "$value")"
+    first=0
+  done <<EOF
+$values
+EOF
+  printf ']'
+}
 
 keeper_emit_outcome() {
-  local outcome="$1" value="${2:-}"
+  local outcome="$1" value="${2:-}" recovery_action
   KEEPER_OUTCOME_EMITTED=1
   if [ "$KEEPER_FORMAT" = json ]; then
-    if [ "$outcome" = partial ]; then
-      printf '{"status":"partial","recovery":"rerun with --recover"}\n'
-    else
-      printf '{"status":"%s"}\n' "$outcome"
-    fi
+    recovery_action="$KEEPER_RECOVERY_ACTION"
+    [ "$outcome" != partial ] || {
+      KEEPER_RECOVERY_REQUIRED=true
+      [ -n "$recovery_action" ] || recovery_action="retry with the same idempotency_key"
+    }
+    printf '{"status":"%s","request_id":"%s","idempotency_key":"%s","path":"%s","affected_paths":' \
+      "$outcome" "$(keeper_json_escape "$KEEPER_REQUEST_ID")" \
+      "$(keeper_json_escape "$KEEPER_IDEMPOTENCY_KEY")" "$(keeper_json_escape "$KEEPER_PRIMARY_PATH")"
+    keeper_json_array "$KEEPER_AFFECTED_PATHS"
+    printf ',"warnings":'
+    keeper_json_array "$KEEPER_WARNINGS"
+    printf ',"recovery":{"required":%s,"action":"%s"},"error_code":%s,"retryable":%s}\n' \
+      "$KEEPER_RECOVERY_REQUIRED" "$(keeper_json_escape "$recovery_action")" \
+      "$(if [ -n "$KEEPER_ERROR_CODE" ]; then printf '"%s"' "$(keeper_json_escape "$KEEPER_ERROR_CODE")"; else printf null; fi)" \
+      "$KEEPER_RETRYABLE"
   elif [ -n "$value" ]; then
     printf '%s\n' "$value"
   fi
@@ -38,24 +75,32 @@ keeper_emit_outcome() {
 
 keeper_die() {
   printf 'keeper: %s\n' "$*" >&2
+  [ -n "$KEEPER_ERROR_CODE" ] || KEEPER_ERROR_CODE=WRITE_FAILED
   keeper_emit_outcome failed
   exit 1
 }
 
 keeper_fail_locked() {
   printf 'keeper: %s\n' "$1" >&2
+  [ -n "$KEEPER_ERROR_CODE" ] || KEEPER_ERROR_CODE=WRITE_FAILED
+  KEEPER_RETRYABLE=true
   keeper_emit_outcome failed
   return 1
 }
 
 keeper_partial_locked() {
   printf 'keeper: partial — %s; rerun the same insert with --recover\n' "$1" >&2
+  KEEPER_ERROR_CODE=PARTIAL
+  KEEPER_RECOVERY_REQUIRED=true
+  KEEPER_RECOVERY_ACTION="retry with the same idempotency_key"
+  KEEPER_RETRYABLE=true
   keeper_emit_outcome partial
   return 2
 }
 
 keeper_conflict_locked() {
   printf 'keeper: conflict — %s\n' "$1" >&2
+  [ -n "$KEEPER_ERROR_CODE" ] || KEEPER_ERROR_CODE=CONFLICT
   keeper_emit_outcome conflict
   return 3
 }
@@ -69,7 +114,7 @@ keeper_select_format() {
         KEEPER_FORMAT="$2"
         shift 2 ;;
       --recover) shift ;;
-      --vault|--target|--date|--section|--body-file|--init-file|--skip-if-hash|--title|--session-link-date|--daily-path)
+      --vault|--target|--date|--section|--body-file|--init-file|--skip-if-hash|--title|--session-link-date|--daily-path|--request-id|--idempotency-key)
         [ $# -ge 2 ] || break
         shift 2 ;;
       *) shift ;;
@@ -93,14 +138,68 @@ keeper_resolve_vault() {
 
 # Reject an absolute or '..'-bearing target (portable; no realpath).
 keeper_guard_target() {
-  [ -n "$1" ] || keeper_die "--target must not be empty"
+  [ -n "$1" ] || { KEEPER_ERROR_CODE=PATH_INVALID; keeper_die "--target must not be empty"; }
   case "$1" in
-    /*) keeper_die "--target must be vault-relative, not absolute: $1" ;;
-    *$'\n'*|*$'\r'*|*$'\t'*) keeper_die "--target contains a forbidden control delimiter" ;;
+    /*) KEEPER_ERROR_CODE=PATH_INVALID; keeper_die "--target must be vault-relative, not absolute: $1" ;;
+    *$'\n'*|*$'\r'*|*$'\t'*) KEEPER_ERROR_CODE=PATH_INVALID; keeper_die "--target contains a forbidden control delimiter" ;;
   esac
   case "/$1/" in
-    *"/../"*) keeper_die "--target must not contain a '..' component: $1" ;;
+    *"/../"*) KEEPER_ERROR_CODE=PATH_INVALID; keeper_die "--target must not contain a '..' component: $1" ;;
   esac
+}
+
+keeper_sha256_fields() {
+  local out value
+  if command -v shasum >/dev/null 2>&1; then
+    out="$({ for value in "$@"; do printf '%s:%s\n' "${#value}" "$value"; done; } | shasum -a 256 | awk '{print $1}')"
+  fi
+  if [ -z "${out:-}" ] && command -v sha256sum >/dev/null 2>&1; then
+    out="$({ for value in "$@"; do printf '%s:%s\n' "${#value}" "$value"; done; } | sha256sum | awk '{print $1}')"
+  fi
+  [ -n "${out:-}" ] || return 1
+  printf '%s\n' "$out"
+}
+
+keeper_idempotency_record() {
+  local vault="$1" key_hash
+  key_hash="$(keeper_sha256_fields "$KEEPER_IDEMPOTENCY_KEY")" || return 1
+  keeper_prepare_target "$vault" ".obsidian/keeper-idempotency/$key_hash"
+}
+
+keeper_idempotency_begin() {
+  local vault="$1" payload_hash="$2" record stored_hash stored_state tmp
+  [ -n "$KEEPER_IDEMPOTENCY_KEY" ] || return 0
+  record="$(keeper_idempotency_record "$vault")" || return 1
+  if [ -f "$record" ]; then
+    stored_hash="$(sed -n '1p' "$record")"
+    stored_state="$(sed -n '2p' "$record")"
+    if [ "$stored_hash" != "$payload_hash" ]; then
+      KEEPER_ERROR_CODE=IDEMPOTENCY_CONFLICT
+      keeper_conflict_locked "idempotency key was already used with a different payload"
+      return 3
+    fi
+    if [ "$stored_state" = committed ]; then
+      keeper_emit_outcome skipped "$KEEPER_PRIMARY_PATH"
+      return 10
+    fi
+    KEEPER_RECOVERY_REQUIRED=true
+    KEEPER_RECOVERY_ACTION="retry with the same idempotency_key"
+    return 0
+  fi
+  tmp="$(mktemp "$(dirname "$record")/.keeper-idempotency-XXXXXX")" || return 1
+  printf '%s\npending\n' "$payload_hash" > "$tmp" \
+    || { rm -f "$tmp"; return 1; }
+  keeper_swap_or_clean "$tmp" "$record"
+}
+
+keeper_idempotency_commit() {
+  local vault="$1" payload_hash="$2" record tmp
+  [ -n "$KEEPER_IDEMPOTENCY_KEY" ] || return 0
+  record="$(keeper_idempotency_record "$vault")" || return 1
+  tmp="$(mktemp "$(dirname "$record")/.keeper-idempotency-XXXXXX")" || return 1
+  printf '%s\ncommitted\n' "$payload_hash" > "$tmp" \
+    || { rm -f "$tmp"; return 1; }
+  keeper_swap_or_clean "$tmp" "$record"
 }
 
 # Create and validate each target directory while the caller holds the
@@ -183,7 +282,14 @@ keeper_heading_has_sha() {
 # append a timestamped section to a dated note, creating it on absence.
 _cmd_append_locked() {
   local vault_abs="$1" target="$2" section="$3" body_file="$4" init_file="$5"
-  local skip_hash="$6" skip_given="$7" full tmp body
+  local skip_hash="$6" skip_given="$7" payload_hash="$8" full tmp body idem_rc=0
+  keeper_idempotency_begin "$vault_abs" "$payload_hash" || idem_rc=$?
+  [ "$idem_rc" -ne 10 ] || return 0
+  [ "$idem_rc" -eq 0 ] || return "$idem_rc"
+  if [ "$KEEPER_RECOVERY_REQUIRED" = true ]; then
+    keeper_partial_locked "a prior append attempt may have written $target; verify the note before retrying"
+    return 2
+  fi
   full="$(keeper_prepare_target "$vault_abs" "$target")" \
     || { keeper_fail_locked "append target is not writable inside the vault"; return 1; }
   keeper_test_pause after_target_prepare \
@@ -192,6 +298,10 @@ _cmd_append_locked() {
   if [ "$skip_given" = 1 ] && [ -f "$full" ] \
      && keeper_heading_has_sha "$full" "$skip_hash"; then
     printf 'keeper: append skipped — %s already has a section for %s\n' "$target" "$skip_hash" >&2
+    keeper_idempotency_commit "$vault_abs" "$payload_hash" \
+      || { keeper_partial_locked "$target was already present but idempotency recovery remains"; return 2; }
+    KEEPER_RECOVERY_REQUIRED=false
+    KEEPER_RECOVERY_ACTION=""
     keeper_emit_outcome skipped "$full"
     return 0
   fi
@@ -216,11 +326,16 @@ _cmd_append_locked() {
     || { rm -f "$tmp"; keeper_fail_locked "could not stage append for $target"; return 1; }
   keeper_commit_staged "$vault_abs" "$target" "$full" "$tmp" \
     || { keeper_fail_locked "could not commit append for $target"; return 1; }
+  keeper_idempotency_commit "$vault_abs" "$payload_hash" \
+    || { keeper_partial_locked "$target was written but idempotency recovery remains"; return 2; }
+  KEEPER_RECOVERY_REQUIRED=false
+  KEEPER_RECOVERY_ACTION=""
   keeper_emit_outcome committed "$full"
 }
 
 cmd_append() {
   local vault="" target="" date="" section="" body_file="" init_file="" skip_hash="" skip_given=0 format="text"
+  local request_id="" idempotency_key="" body_hash payload_hash staged_body="" requested_section
   keeper_select_format "$@"
   while [ $# -gt 0 ]; do
     case "$1" in
@@ -231,6 +346,8 @@ cmd_append() {
       --body-file) body_file="${2:-}"; shift 2 ;;
       --init-file) init_file="${2:-}"; shift 2 ;;
       --skip-if-hash) skip_hash="${2:-}"; skip_given=1; shift 2 ;;
+      --request-id) request_id="${2:-}"; shift 2 ;;
+      --idempotency-key) idempotency_key="${2:-}"; shift 2 ;;
       --format)    format="${2:-}";      shift 2 ;;
       *) keeper_die "append: unknown arg: $1" ;;
     esac
@@ -242,7 +359,13 @@ cmd_append() {
   if [ -n "$target" ] && [ -n "$date" ]; then keeper_die "append: pass --target OR --date, not both"; fi
   if [ -z "$target" ] && [ -z "$date" ]; then keeper_die "append: --target or --date required"; fi
   [ -n "$date" ] && target="Daily/$date.md"
+  KEEPER_REQUEST_ID="$request_id"
+  KEEPER_IDEMPOTENCY_KEY="$idempotency_key"
   keeper_guard_target "$target"
+  KEEPER_PRIMARY_PATH="$target"
+  KEEPER_AFFECTED_PATHS="$target"
+  case "$request_id" in '') : ;; *[!A-Za-z0-9._:-]*) KEEPER_ERROR_CODE=INVALID_INPUT; keeper_die "append: invalid --request-id" ;; esac
+  case "$idempotency_key" in '') : ;; *[!A-Za-z0-9._:-]*) KEEPER_ERROR_CODE=INVALID_INPUT; keeper_die "append: invalid --idempotency-key" ;; esac
   [ "$format" = "$KEEPER_FORMAT" ] || keeper_die "append: invalid format"
   [ -z "$body_file" ] || [ -f "$body_file" ] || keeper_die "append: --body-file not found: $body_file"
   [ -z "$init_file" ] || [ -f "$init_file" ] || keeper_die "append: --init-file not found: $init_file"
@@ -270,6 +393,7 @@ cmd_append() {
   # heading-shaped --skip-if-hash gate above, which would then let the same
   # commit be captured twice. A value that already carries its own `#` prefix
   # is kept verbatim, so a caller can choose the level.
+  requested_section="$section"
   case "$section" in *[![:space:]]*) : ;; *) section="" ;; esac   # blanks == none
   [ -n "$section" ] || section="## $(date +%H:%M) — entry"
   section="${section#"${section%%[![:space:]]*}"}"                # trim indent
@@ -278,15 +402,29 @@ cmd_append() {
     '####'[[:space:]]*|'#####'[[:space:]]*|'######'[[:space:]]*) : ;;
     *) section="## $section" ;;
   esac
+  payload_hash=""
+  if [ -n "$idempotency_key" ]; then
+    if [ -z "$body_file" ]; then
+      staged_body="$(mktemp "${TMPDIR:-/tmp}/keeper-body-XXXXXX")" || keeper_die "append: could not stage body"
+      cat > "$staged_body" || { rm -f "$staged_body"; keeper_die "append: could not read stdin"; }
+      body_file="$staged_body"
+    fi
+    body_hash="$(sha256_of "$body_file")" || keeper_die "append: could not hash body"
+    payload_hash="$(keeper_sha256_fields append "$target" "$requested_section" "$skip_hash" "$body_hash")" \
+      || keeper_die "append: could not hash idempotency payload"
+  fi
 
   local rc=0
   KEEPER_OUTCOME_EMITTED=0
   keeper_with_lock "$vault_abs" _cmd_append_locked \
-    "$vault_abs" "$target" "$section" "$body_file" "$init_file" "$skip_hash" "$skip_given" || rc=$?
+    "$vault_abs" "$target" "$section" "$body_file" "$init_file" "$skip_hash" "$skip_given" "$payload_hash" || rc=$?
   if [ "$rc" -ne 0 ] && [ "$KEEPER_OUTCOME_EMITTED" = 0 ]; then
     printf 'keeper: append failed before an outcome was produced\n' >&2
+    KEEPER_ERROR_CODE=WRITE_FAILED
+    KEEPER_RETRYABLE=true
     keeper_emit_outcome failed
   fi
+  [ -z "$staged_body" ] || rm -f "$staged_body"
   return "$rc"
 }
 
@@ -321,7 +459,11 @@ keeper_daily_link_locked() {
 
 _cmd_insert_locked() {
   local vault_abs="$1" target="$2" body_file="$3" title="$4" sldate="$5" recover="$6" daily_path="$7"
-  local full folder idx tmp wrote_note=0
+  local payload_hash="$8" full folder idx tmp wrote_note=0 idem_rc=0
+  keeper_idempotency_begin "$vault_abs" "$payload_hash" || idem_rc=$?
+  [ "$idem_rc" -ne 10 ] || return 0
+  [ "$idem_rc" -eq 0 ] || return "$idem_rc"
+  [ "$KEEPER_RECOVERY_REQUIRED" != true ] || recover=1
   full="$(keeper_prepare_target "$vault_abs" "$target")" \
     || { keeper_fail_locked "insert target is not writable inside the vault"; return 1; }
   folder="$(dirname "$full")"
@@ -369,11 +511,16 @@ _cmd_insert_locked() {
       || { keeper_partial_locked "$target, INDEX, and daily backlink were written; recovery must verify them"; return 2; }
   fi
 
+  keeper_idempotency_commit "$vault_abs" "$payload_hash" \
+    || { keeper_partial_locked "$target was written but idempotency recovery remains"; return 2; }
+  KEEPER_RECOVERY_REQUIRED=false
+  KEEPER_RECOVERY_ACTION=""
   keeper_emit_outcome committed "$full"
 }
 
 cmd_insert() {
   local vault="" target="" body_file="" title="" sldate="" daily_path="Daily" recover=0 format="text"
+  local request_id="" idempotency_key="" body_hash payload_hash staged_body=""
   keeper_select_format "$@"
   while [ $# -gt 0 ]; do
     case "$1" in
@@ -383,6 +530,8 @@ cmd_insert() {
       --title)              title="${2:-}";     shift 2 ;;
       --session-link-date)  sldate="${2:-}";    shift 2 ;;
       --daily-path)         daily_path="${2:-}"; shift 2 ;;
+      --request-id)         request_id="${2:-}"; shift 2 ;;
+      --idempotency-key)    idempotency_key="${2:-}"; shift 2 ;;
       --recover)            recover=1;           shift ;;
       --format)             format="${2:-}";    shift 2 ;;
       *) keeper_die "insert: unknown arg: $1" ;;
@@ -391,9 +540,22 @@ cmd_insert() {
 
   local vault_abs; vault_abs="$(keeper_resolve_vault "$vault")"
   [ -n "$target" ]    || keeper_die "insert: --target required"
-  [ -n "$body_file" ] || keeper_die "insert: --body-file required"
+  if [ -z "$body_file" ]; then
+    staged_body="$(mktemp "${TMPDIR:-/tmp}/keeper-body-XXXXXX")" || keeper_die "insert: could not stage body"
+    cat > "$staged_body" || { rm -f "$staged_body"; keeper_die "insert: could not read stdin"; }
+    body_file="$staged_body"
+  fi
   [ -f "$body_file" ] || keeper_die "insert: --body-file not found: $body_file"
+  KEEPER_REQUEST_ID="$request_id"
+  KEEPER_IDEMPOTENCY_KEY="$idempotency_key"
   keeper_guard_target "$target"
+  KEEPER_PRIMARY_PATH="$target"
+  KEEPER_AFFECTED_PATHS="$target
+$(dirname "$target")/INDEX.md"
+  [ -z "$sldate" ] || KEEPER_AFFECTED_PATHS="$KEEPER_AFFECTED_PATHS
+$daily_path/$sldate.md"
+  case "$request_id" in '') : ;; *[!A-Za-z0-9._:-]*) KEEPER_ERROR_CODE=INVALID_INPUT; keeper_die "insert: invalid --request-id" ;; esac
+  case "$idempotency_key" in '') : ;; *[!A-Za-z0-9._:-]*) KEEPER_ERROR_CODE=INVALID_INPUT; keeper_die "insert: invalid --idempotency-key" ;; esac
   [ "$format" = "$KEEPER_FORMAT" ] || keeper_die "insert: invalid format"
   if [ -n "$sldate" ]; then
     case "$sldate" in
@@ -404,14 +566,23 @@ cmd_insert() {
   fi
 
   [ -n "$title" ] || title="$(basename "$target" .md)"
+  payload_hash=""
+  if [ -n "$idempotency_key" ]; then
+    body_hash="$(sha256_of "$body_file")" || keeper_die "insert: could not hash body"
+    payload_hash="$(keeper_sha256_fields insert "$target" "$title" "$sldate" "$daily_path" "$body_hash")" \
+      || keeper_die "insert: could not hash idempotency payload"
+  fi
   local rc=0
   KEEPER_OUTCOME_EMITTED=0
   keeper_with_lock "$vault_abs" _cmd_insert_locked \
-    "$vault_abs" "$target" "$body_file" "$title" "$sldate" "$recover" "$daily_path" || rc=$?
+    "$vault_abs" "$target" "$body_file" "$title" "$sldate" "$recover" "$daily_path" "$payload_hash" || rc=$?
   if [ "$rc" -ne 0 ] && [ "$KEEPER_OUTCOME_EMITTED" = 0 ]; then
     printf 'keeper: insert failed before an outcome was produced\n' >&2
+    KEEPER_ERROR_CODE=WRITE_FAILED
+    KEEPER_RETRYABLE=true
     keeper_emit_outcome failed
   fi
+  [ -z "$staged_body" ] || rm -f "$staged_body"
   return "$rc"
 }
 

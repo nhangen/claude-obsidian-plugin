@@ -1,10 +1,8 @@
 # MCP server
 
 This package is the isolated MCP adapter for `claude-obsidian-plugin`.
-It runs over stdio or authenticated Streamable HTTP and exposes the read-only `obsidian_find_notes` and
-`obsidian_commit_meta` tools plus bounded read-only resources for taxonomy,
-daily notes, the librarian index, and pending items. The existing root plugin,
-hooks, commands, and keeper remain unchanged.
+It runs over stdio or authenticated Streamable HTTP. The packaged hardened
+keeper performs every vault mutation.
 
 ```bash
 npm ci
@@ -74,7 +72,7 @@ stateful adapter does not classify modern envelopes; it is not advertised as
 supported.
 
 The server resolves `OBSIDIAN_LOCAL_MD` through the existing stable resolver.
-The stdio entrypoint does not start an HTTP listener. Neither entrypoint exposes vault mutation tools. In this
+The stdio entrypoint does not start an HTTP listener. In this
 repository's source checkout, the source entrypoint retains the documented
 behavior of defaulting repository metadata access to the repository root. An
 installed package never infers authorization from its install location or
@@ -85,8 +83,31 @@ The taxonomy resource returns only the project-taxonomy table. Tool arguments
 are validated inside the handlers so invalid input uses the stable structured
 error contract instead of leaking SDK validation text.
 
+## Write contract
+
+`obsidian_keeper_save` accepts `title`, `body`, optional `folder_hint`, `type`,
+and `links`, plus optional `idempotency_key` and `request_id`. Streamable HTTP
+writes require `idempotency_key`; local stdio calls retain keyless compatibility.
+`obsidian_daily_append` accepts `content`, optional `section`, `date`, and
+`skip_if_hash`, plus the same request fields. Daily writes use the configured
+`daily_path`, and results report the vault-relative path actually written. MCP
+writes fail with `CONFIG_INVALID` when `daily_path` is absent or invalid; the
+adapter never silently substitutes `Daily/`.
+
+Both tools return `status`, `request_id`, `idempotency_key`, `path`,
+`affected_paths`, `warnings`, `recovery`, `error_code`, and `retryable`.
+`committed` and `skipped` are successful. `conflict`, `partial`, and `failed`
+return `isError=true`.
+
+Reuse an idempotency key only for the same payload. A repeated key and payload
+returns `skipped`; a repeated key with different content returns
+`IDEMPOTENCY_CONFLICT`. After a retryable timeout, cancellation, or partial
+result, inspect `affected_paths` and `recovery`, then retry with the same key.
+If `recovery.required` remains true, follow its action before changing the key
+or editing affected files manually.
+
 The machine-readable contract is [`contract.json`](contract.json). Its fixture
 cases are in [`test/fixtures/contract-fixtures.json`](test/fixtures/contract-fixtures.json)
 and are checked by `test/contract.test.mjs`.
 
-Prompts, legacy HTTP+SSE, and writes remain explicitly gated in the contract.
+Prompts and legacy HTTP+SSE remain explicitly gated in the contract.

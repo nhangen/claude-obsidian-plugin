@@ -272,7 +272,7 @@ function createSession(configuration, auth) {
     absoluteExpiresAt: auth.expiresAt,
     expiryTimer: undefined,
     closed: false,
-    server: createServer({ supportedProtocolVersions: protocolVersions }),
+    server: createServer({ supportedProtocolVersions: protocolVersions, scopes: auth.scopes, requireWriteIdempotency: true }),
     transport,
   };
   return session;

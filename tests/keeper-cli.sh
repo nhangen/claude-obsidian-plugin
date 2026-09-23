@@ -442,4 +442,45 @@ if command -v zsh >/dev/null 2>&1; then
   grep -qxF -- '- [[Notes/2026-06-29-zinsert]]' "$V/Notes/INDEX.md" || fail "zsh keeper insert did not link INDEX"
 fi
 
+# 15. structured idempotency is enforced inside the keeper lock.
+printf 'idempotent body\n' > "$TMP/idempotent.md"
+bash "$KEEPER" insert --vault "$V" --target "Notes/idempotent.md" \
+  --body-file "$TMP/idempotent.md" --request-id request-1 --idempotency-key keeper-key-1 \
+  --format json > "$TMP/idempotent-first.json"
+grep -q '"status":"committed"' "$TMP/idempotent-first.json" || fail "first idempotent write did not commit"
+grep -q '"request_id":"request-1"' "$TMP/idempotent-first.json" || fail "structured outcome omitted request_id"
+grep -q '"affected_paths":' "$TMP/idempotent-first.json" || fail "structured outcome omitted affected_paths"
+bash "$KEEPER" insert --vault "$V" --target "Notes/idempotent.md" \
+  --body-file "$TMP/idempotent.md" --request-id request-2 --idempotency-key keeper-key-1 \
+  --format json > "$TMP/idempotent-skip.json"
+grep -q '"status":"skipped"' "$TMP/idempotent-skip.json" || fail "same key and payload did not skip"
+printf 'different body\n' > "$TMP/idempotent-different.md"
+set +e
+bash "$KEEPER" insert --vault "$V" --target "Notes/idempotent.md" \
+  --body-file "$TMP/idempotent-different.md" --request-id request-3 --idempotency-key keeper-key-1 \
+  --format json > "$TMP/idempotent-conflict.json"
+IDEMPOTENCY_RC=$?
+set -e
+[ "$IDEMPOTENCY_RC" = 3 ] || fail "different payload reused under one key did not conflict"
+grep -q '"error_code":"IDEMPOTENCY_CONFLICT"' "$TMP/idempotent-conflict.json" \
+  || fail "idempotency conflict omitted stable error code"
+
+cat > "$V/Daily/idempotent-existing.md" <<'EOF'
+## abc123 — existing
+
+already captured
+EOF
+printf 'same skipped body\n' > "$TMP/idempotent-skip-body.md"
+for request_id in skip-request-1 skip-request-2; do
+  bash "$KEEPER" append --vault "$V" --target "Daily/idempotent-existing.md" \
+    --section '## abc123 — existing' --body-file "$TMP/idempotent-skip-body.md" \
+    --skip-if-hash abc123 --request-id "$request_id" --idempotency-key keeper-skip-key \
+    --format json > "$TMP/$request_id.json" \
+    || fail "same-key existing-section replay returned partial"
+  grep -q '"status":"skipped"' "$TMP/$request_id.json" \
+    || fail "same-key existing-section replay was not skipped"
+  grep -q '"recovery":{"required":false,"action":""}' "$TMP/$request_id.json" \
+    || fail "same-key existing-section replay retained recovery state"
+done
+
 echo "PASS: keeper-cli"
