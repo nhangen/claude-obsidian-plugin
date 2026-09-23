@@ -396,7 +396,7 @@ function writeRequestFallback(toolName, args, configuration) {
   return emptyWriteOutcome(requestId, idempotencyKey, path, path ? [path] : []);
 }
 
-function requireWriteConfiguration(configuration) {
+function requireDailyWriteConfiguration(configuration) {
   if (configuration.dailyPathError) throw codedError("CONFIG_INVALID", configuration.dailyPathError);
 }
 
@@ -813,7 +813,6 @@ export function createServer({ supportedProtocolVersions = protocolVersions, sco
     async (args, ctx) => {
       const fallback = writeRequestFallback("obsidian_keeper_save", args, configuration);
       try {
-        requireWriteConfiguration(configuration);
         const input = parseToolInput(keeperSaveInput, args);
         if (requireWriteIdempotency && !input.idempotency_key) throw codedError("INVALID_INPUT", "idempotency_key is required for remote writes");
         return successResult(await keeperSave({ ...input, request_id: input.request_id || fallback.request_id }, configuration.vaultPath, ctx.mcpReq.signal));
@@ -833,7 +832,7 @@ export function createServer({ supportedProtocolVersions = protocolVersions, sco
     async (args, ctx) => {
       const fallback = writeRequestFallback("obsidian_daily_append", args, configuration);
       try {
-        requireWriteConfiguration(configuration);
+        requireDailyWriteConfiguration(configuration);
         const input = parseToolInput(dailyAppendInput, args);
         if (requireWriteIdempotency && !input.idempotency_key) throw codedError("INVALID_INPUT", "idempotency_key is required for remote writes");
         return successResult(await dailyAppend({ ...input, request_id: input.request_id || fallback.request_id }, configuration.vaultPath, configuration.dailyPath, ctx.mcpReq.signal));

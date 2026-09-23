@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { copyFile, mkdir, mkdtemp, readFile, readdir, rm, stat, symlink, writeFile } from "node:fs/promises";
+import { access, copyFile, mkdir, mkdtemp, readFile, readdir, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { spawn } from "node:child_process";
@@ -82,9 +82,21 @@ function run(command, args, options) {
     child.once("error", reject);
     child.once("close", (code) => {
       if (code === 0) resolveRun({ stdout, stderr });
-      else reject(new Error(`${command} exited with ${code}: ${stderr || stdout}`));
+      else reject(new Error(`${command} ${args.join(" ")} exited with ${code}: ${stderr || stdout}`));
     });
   });
+}
+
+async function waitForPath(path) {
+  const deadline = Date.now() + 5000;
+  while (Date.now() < deadline) {
+    try {
+      await access(path);
+      return;
+    } catch {}
+    await new Promise((resolveWait) => setTimeout(resolveWait, 10));
+  }
+  throw new Error(`timed out waiting for ${path}`);
 }
 
 async function initialize(child, output, id = 1) {
@@ -154,7 +166,7 @@ test("packed package exposes a built stdio launcher that works outside the insta
   await mkdir(join(vault, "Journal", "Days"), { recursive: true });
   await run("git", ["init", "--quiet"], { cwd: externalCwd });
   await writeFile(join(vault, "note.md"), "# note\n");
-  await writeFile(config, `---\nvault_path: ${vault}\ndaily_path: Journal/Days/\n---\n`);
+  await writeFile(config, `---\nvault_path: ${vault}\ndaily_path: Journal/Days/\nfrontmatter_required: tags type\nkeeper_host_priority: package-boundary-test\nkeeper_interval_secs: 900\n---\n`);
 
   await run("npm", ["pack", "--silent", "--ignore-scripts", "--pack-destination", fixture], { cwd: packageRoot });
   const tarball = join(fixture, (await readdir(fixture)).find((name) => name.endsWith(".tgz")));
@@ -296,7 +308,7 @@ test("packed stdio and HTTP entrypoints serialize contended keeper writes", asyn
   await mkdir(join(vault, ".obsidian"), { recursive: true });
   await mkdir(join(vault, "Journal", "Days"), { recursive: true });
   await mkdir(join(vault, "Inbox"), { recursive: true });
-  await writeFile(config, `---\nvault_path: ${vault}\ndaily_path: Journal/Days/\n---\n`);
+  await writeFile(config, `---\nvault_path: ${vault}\ndaily_path: Journal/Days/\nfrontmatter_required: tags type\nkeeper_host_priority: package-boundary-test\nkeeper_interval_secs: 900\n---\n`);
 
   await run("npm", ["pack", "--silent", "--ignore-scripts", "--pack-destination", fixture], { cwd: packageRoot });
   const tarball = join(fixture, (await readdir(fixture)).find((name) => name.endsWith(".tgz")));
@@ -305,7 +317,8 @@ test("packed stdio and HTTP entrypoints serialize contended keeper writes", asyn
   const installedPackage = join(installRoot, "node_modules", "@claude-obsidian", "mcp-server");
   const launcher = join(installRoot, "node_modules", ".bin", "claude-obsidian-mcp");
   const httpLauncher = join(installRoot, "node_modules", ".bin", "claude-obsidian-mcp-http");
-  assert.ok(((await stat(join(installedPackage, "dist", "helpers", "keeper"))).mode & 0o111) !== 0);
+  const installedKeeper = join(installedPackage, "dist", "helpers", "keeper");
+  assert.ok(((await stat(installedKeeper)).mode & 0o111) !== 0);
 
   const children = new Set();
   t.after(async () => {
@@ -322,16 +335,88 @@ test("packed stdio and HTTP entrypoints serialize contended keeper writes", asyn
   const environment = { ...process.env, OBSIDIAN_LOCAL_MD: config };
   delete environment.MCP_REPOSITORY_ROOTS;
 
-  async function startStdio() {
+  async function startStdio(overrides = {}) {
     const child = spawn(launcher, [], {
       cwd: externalCwd,
-      env: environment,
+      env: { ...environment, ...overrides },
       stdio: ["pipe", "pipe", "pipe"],
     });
     children.add(child);
     const output = collectOutput(child);
     await initialize(child, output);
     return { child, output };
+  }
+
+  async function startHttp(id, overrides = {}) {
+    const child = spawn(httpLauncher, [], {
+      cwd: externalCwd,
+      env: {
+        ...environment,
+        ...overrides,
+        MCP_HTTP_BIND: "127.0.0.1",
+        MCP_HTTP_PORT: "0",
+        MCP_HTTP_JWT_SECRET: httpSecret,
+        MCP_HTTP_JWT_ISSUER: httpIssuer,
+        MCP_HTTP_JWT_AUDIENCE: httpAudience,
+        MCP_HTTP_ALLOWED_HOSTS: "127.0.0.1,localhost",
+        MCP_HTTP_ALLOWED_ORIGINS: "https://allowed.example",
+      },
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    children.add(child);
+    let stderr = "";
+    let readyResolve;
+    let readyReject;
+    const ready = new Promise((resolveReady, rejectReady) => {
+      readyResolve = resolveReady;
+      readyReject = rejectReady;
+    });
+    child.stderr.setEncoding("utf8");
+    child.stderr.on("data", (chunk) => {
+      stderr += chunk;
+      const match = stderr.match(/mcp-http-listening (http:\/\/127\.0\.0\.1:\d+)/);
+      if (match) readyResolve(match[1]);
+    });
+    child.once("error", readyReject);
+    child.once("close", (code) => {
+      if (code !== 0 && code !== null) readyReject(new Error(`HTTP launcher exited with ${code}: ${stderr}`));
+    });
+    const url = await ready;
+    const headers = {
+      Accept: "application/json, text/event-stream",
+      Authorization: `Bearer ${httpToken()}`,
+      "Content-Type": "application/json",
+      Host: "127.0.0.1",
+      Origin: "https://allowed.example",
+    };
+    const initialized = await fetch(`${url}/mcp`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id,
+        method: "initialize",
+        params: { protocolVersion: "2025-11-25", capabilities: {}, clientInfo: { name: "package-contention-test", version: "1" } },
+      }),
+    });
+    assert.equal(initialized.status, 200);
+    const sessionId = initialized.headers.get("mcp-session-id");
+    assert.ok(sessionId);
+    return {
+      child,
+      url,
+      headers: { ...headers, "MCP-Protocol-Version": "2025-11-25", "Mcp-Session-Id": sessionId },
+    };
+  }
+
+  async function httpCall(server, id, name, args) {
+    const response = await fetch(`${server.url}/mcp`, {
+      method: "POST",
+      headers: server.headers,
+      body: JSON.stringify({ jsonrpc: "2.0", id, method: "tools/call", params: { name, arguments: args } }),
+    });
+    assert.equal(response.status, 200);
+    return response.json();
   }
 
   async function stdioCalls(server, calls) {
@@ -518,6 +603,130 @@ test("packed stdio and HTTP entrypoints serialize contended keeper writes", asyn
     assertMcpOutput(stdio.output);
     httpChild.kill("SIGTERM");
     await new Promise((resolveClose) => httpChild.once("close", resolveClose));
+  });
+
+  await t.test("stdio and packaged hook writes wait for the watcher lock and commit once", async () => {
+    const server = await startStdio();
+    const pause = join(fixture, "watcher-pause");
+    const bodyFile = join(fixture, "hook-body.md");
+    const target = "Journal/Days/2026-09-29.md";
+    const section = "## c3d4e5f6 — watcher hook contention";
+    await mkdir(pause);
+    await writeFile(bodyFile, "watcher and hook body");
+    const watcher = run("bash", [join(repositoryRoot, "scripts", "vaultkeeper-tick.sh")], {
+      cwd: externalCwd,
+      env: {
+        ...process.env,
+        OBSIDIAN_LOCAL_MD: config,
+        VAULTKEEPER_HOST: "package-boundary-test",
+        XDG_CACHE_HOME: join(fixture, "watcher-cache"),
+        KEEPER_TEST_PAUSE_POINT: "after_lock_owner",
+        KEEPER_TEST_PAUSE_DIR: pause,
+      },
+    });
+    await waitForPath(join(pause, "ready"));
+
+    const args = {
+      content: "watcher and hook body",
+      section,
+      date: "2026-09-29",
+      skip_if_hash: "c3d4e5f6",
+      idempotency_key: "watcher-hook-contention",
+      request_id: "mcp-watcher-contention",
+    };
+    const mcpWrite = stdioCall(server, 400, "obsidian_daily_append", args);
+    const hookWrite = run("bash", [
+      installedKeeper,
+      "append",
+      "--vault", vault,
+      "--target", target,
+      "--section", section,
+      "--body-file", bodyFile,
+      "--skip-if-hash", "c3d4e5f6",
+      "--request-id", "hook-watcher-contention",
+      "--idempotency-key", "watcher-hook-contention",
+      "--format", "json",
+    ], { cwd: externalCwd, env: process.env });
+
+    await new Promise((resolveWait) => setTimeout(resolveWait, 100));
+    await assert.rejects(stat(join(vault, target)));
+    await writeFile(join(pause, "continue"), "continue\n");
+    const [mcpResponse, hookResult] = await Promise.all([mcpWrite, hookWrite]);
+    await watcher;
+
+    const statuses = [writeOutcome(mcpResponse).status, JSON.parse(hookResult.stdout).status].sort();
+    assert.deepEqual(statuses, ["committed", "skipped"]);
+    const note = await readFile(join(vault, target), "utf8");
+    assert.equal(note.split(section).length - 1, 1);
+    await close(server.child, server.output);
+    assertMcpOutput(server.output);
+  });
+
+  await t.test("Streamable HTTP rejects symlinked parent and target paths without escaping the vault", async () => {
+    const outside = join(fixture, "outside");
+    await mkdir(outside);
+    await symlink(outside, join(vault, "Escape"));
+    await mkdir(join(vault, "Safe"));
+    await symlink(join(outside, "final.md"), join(vault, "Safe", "final.md"));
+    const server = await startHttp(500);
+
+    const parentResponse = await httpCall(server, 501, "obsidian_keeper_save", {
+      title: "parent",
+      body: "must remain contained",
+      folder_hint: "Escape",
+      idempotency_key: "symlink-parent",
+      request_id: "symlink-parent-request",
+    });
+    const targetResponse = await httpCall(server, 502, "obsidian_keeper_save", {
+      title: "final",
+      body: "must remain contained",
+      folder_hint: "Safe",
+      idempotency_key: "symlink-target",
+      request_id: "symlink-target-request",
+    });
+
+    for (const response of [parentResponse, targetResponse]) {
+      assert.equal(response.result?.isError, true);
+      const outcome = writeOutcome(response);
+      assert.equal(outcome.status, "failed");
+      assert.equal(outcome.error_code, "WRITE_FAILED");
+      assert.equal(outcome.retryable, true);
+    }
+    assert.deepEqual(await readdir(outside), []);
+    server.child.kill("SIGTERM");
+    await new Promise((resolveClose) => server.child.once("close", resolveClose));
+  });
+
+  await t.test("packaged stdio preserves crash recovery and keyed retry semantics", async () => {
+    const title = "Packaged Crash Recovery";
+    const args = {
+      title,
+      body: "written before packaged keeper death",
+      folder_hint: "Inbox",
+      idempotency_key: "packaged-crash-recovery",
+      request_id: "packaged-crash-request",
+    };
+    const httpCrashServer = await startHttp(700, { KEEPER_FAULT_INJECT: "after_note", KEEPER_FAULT_MODE: "crash" });
+    const crashed = await httpCall(httpCrashServer, 701, "obsidian_keeper_save", args);
+    const crashedOutcome = writeOutcome(crashed);
+    assert.equal(crashed.result?.isError, true);
+    assert.equal(crashedOutcome.status, "partial");
+    assert.equal(crashedOutcome.retryable, true);
+    assert.equal(crashedOutcome.recovery.required, true);
+    assert.match(await readFile(join(vault, "Inbox", `${title}.md`), "utf8"), /written before packaged keeper death/);
+
+    httpCrashServer.child.kill("SIGTERM");
+    await new Promise((resolveClose) => httpCrashServer.child.once("close", resolveClose));
+    const recoveryServer = await startStdio();
+    const recovered = await stdioCall(recoveryServer, 601, "obsidian_keeper_save", {
+      ...args,
+      request_id: "packaged-crash-retry",
+    });
+    assert.equal(recovered.result?.isError, false);
+    assert.equal(recovered.result?.structuredContent?.status, "committed");
+    assert.match(await readFile(join(vault, "Inbox", "INDEX.md"), "utf8"), /Packaged Crash Recovery/);
+    await close(recoveryServer.child, recoveryServer.output);
+    assertMcpOutput(recoveryServer.output);
   });
 });
 

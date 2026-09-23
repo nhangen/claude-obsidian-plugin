@@ -275,6 +275,42 @@ test("stdio server executes obsidian_keeper_save tool call", async (t) => {
   assert.equal(localWithoutKey.result.structuredContent.idempotency_key, "");
 });
 
+test("stdio keeper save does not require daily_path", async (t) => {
+  const { root, vaultPath, configPath } = await createFixtureVault();
+  const config = await readFile(configPath, "utf8");
+  await writeFile(configPath, config.replace(/^daily_path:.*\n/m, ""), "utf8");
+  const server = startStdioServer(configPath);
+
+  t.after(async () => {
+    if (!server.child.killed) server.child.stdin.end();
+    await once(server.child, "close").catch(() => {});
+    await rm(root, { recursive: true, force: true });
+  });
+
+  await server.request({
+    jsonrpc: "2.0", id: 1, method: "initialize",
+    params: { protocolVersion: "2025-11-25", capabilities: {}, clientInfo: { name: "test", version: "1.0" } },
+  }, 1);
+  server.notification({ jsonrpc: "2.0", method: "notifications/initialized" });
+  const response = await server.request({
+    jsonrpc: "2.0", id: 2, method: "tools/call",
+    params: {
+      name: "obsidian_keeper_save",
+      arguments: {
+        title: "No Daily Path",
+        body: "Independent keeper save",
+        folder_hint: "Inbox",
+        idempotency_key: "save-without-daily-path",
+      },
+    },
+  }, 2);
+
+  assert.equal(response.result.isError, false);
+  assert.equal(response.result.structuredContent.status, "committed");
+  assert.equal(response.result.structuredContent.path, "Inbox/No Daily Path.md");
+  assert.equal(await readFile(join(vaultPath, "Inbox", "No Daily Path.md"), "utf8"), "Independent keeper save");
+});
+
 test("stdio server executes obsidian_daily_append with skip_if_hash idempotency", async (t) => {
   const { root, vaultPath, configPath } = await createFixtureVault();
   const server = startStdioServer(configPath);
