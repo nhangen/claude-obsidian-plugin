@@ -121,10 +121,21 @@ The keeper writes only to the Obsidian vault (`vault_path` from `obsidian.local.
 Both hooks are gated — they inspect the Bash command first and exit silently for non-commit calls, so they don't interrupt normal tool flow.
 
 The optional `scripts/install-git-hook.sh` installer adds a non-blocking native
-`post-commit` hook for clients that do not expose the Claude hook pair. Local
-installation follows the repository's effective `core.hooksPath`, including
-worktrees; global installation uses the configured global hooks path or creates
-one under the user's config directory. Existing hooks are preserved and chained.
+`post-commit` hook for clients that do not expose the Claude hook pair. Its scope
+is the resolved hooks directory, so every repository or worktree using that same
+directory runs the installed hook:
+
+- A local install with no custom `core.hooksPath` writes to the repository's
+  common Git hooks directory and therefore affects the main worktree and every
+  linked worktree.
+- A repository-local custom `core.hooksPath` is shared by its linked worktrees.
+  A worktree-scoped override affects only worktrees resolving to that path.
+- A global install writes to the existing global `core.hooksPath`, or sets it to
+  `~/.config/git/hooks` when unset. It affects every repository and worktree
+  without a local or worktree override. A shared custom global directory may
+  therefore have a system-wide blast radius for that user.
+
+Existing hooks in the resolved directory are preserved and chained.
 The installer copies the metadata and keeper helpers to a stable user data
 directory, so the hook is not tied to a versioned plugin-cache checkout. Use
 `uninstall` to remove only the managed hook and restore installer-owned global
