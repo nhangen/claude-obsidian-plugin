@@ -285,6 +285,242 @@ test("packed package exposes a built stdio launcher that works outside the insta
   httpChild.kill("SIGTERM");
 });
 
+test("packed stdio and HTTP entrypoints serialize contended keeper writes", async (t) => {
+  const fixture = await mkdtemp(join(tmpdir(), "mcp-package-contention-"));
+  const installRoot = join(fixture, "install");
+  const externalCwd = join(fixture, "external");
+  const vault = join(fixture, "vault");
+  const config = join(fixture, "obsidian.local.md");
+  await mkdir(installRoot);
+  await mkdir(externalCwd);
+  await mkdir(join(vault, ".obsidian"), { recursive: true });
+  await mkdir(join(vault, "Journal", "Days"), { recursive: true });
+  await mkdir(join(vault, "Inbox"), { recursive: true });
+  await writeFile(config, `---\nvault_path: ${vault}\ndaily_path: Journal/Days/\n---\n`);
+
+  await run("npm", ["pack", "--silent", "--ignore-scripts", "--pack-destination", fixture], { cwd: packageRoot });
+  const tarball = join(fixture, (await readdir(fixture)).find((name) => name.endsWith(".tgz")));
+  await run("npm", ["install", "--ignore-scripts", "--no-audit", "--no-fund", "--prefix", installRoot, tarball], { cwd: externalCwd });
+
+  const installedPackage = join(installRoot, "node_modules", "@claude-obsidian", "mcp-server");
+  const launcher = join(installRoot, "node_modules", ".bin", "claude-obsidian-mcp");
+  const httpLauncher = join(installRoot, "node_modules", ".bin", "claude-obsidian-mcp-http");
+  assert.ok(((await stat(join(installedPackage, "dist", "helpers", "keeper"))).mode & 0o111) !== 0);
+
+  const children = new Set();
+  t.after(async () => {
+    for (const child of children) {
+      if (child.exitCode === null) child.kill("SIGTERM");
+    }
+    await Promise.all([...children].map((child) => new Promise((resolveClose) => {
+      if (child.exitCode !== null) resolveClose();
+      else child.once("close", resolveClose);
+    })));
+    await rm(fixture, { recursive: true, force: true });
+  });
+
+  const environment = { ...process.env, OBSIDIAN_LOCAL_MD: config };
+  delete environment.MCP_REPOSITORY_ROOTS;
+
+  async function startStdio() {
+    const child = spawn(launcher, [], {
+      cwd: externalCwd,
+      env: environment,
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+    children.add(child);
+    const output = collectOutput(child);
+    await initialize(child, output);
+    return { child, output };
+  }
+
+  async function stdioCalls(server, calls) {
+    for (const { id, name, args } of calls) {
+      server.child.stdin.write(`${JSON.stringify({
+        jsonrpc: "2.0",
+        id,
+        method: "tools/call",
+        params: { name, arguments: args },
+      })}\n`);
+    }
+    const responses = await Promise.all(calls.map(async () => JSON.parse(await server.output.nextLine())));
+    assert.deepEqual(
+      new Set(responses.map((response) => response.id)),
+      new Set(calls.map((call) => call.id)),
+    );
+    return responses;
+  }
+
+  async function stdioCall(server, id, name, args) {
+    return (await stdioCalls(server, [{ id, name, args }]))[0];
+  }
+
+  function writeOutcome(response) {
+    return response.result?.structuredContent
+      ?? JSON.parse(response.result.content[0].text);
+  }
+
+  await t.test("eight concurrent appends in one stdio daemon commit once", async () => {
+    const server = await startStdio();
+    const section = "## a1b2c3d4 — packaged single-daemon contention";
+    const args = {
+      content: "single daemon body",
+      section,
+      date: "2026-09-27",
+      skip_if_hash: "a1b2c3d4",
+      idempotency_key: "single-daemon-append",
+    };
+
+    const responses = await stdioCalls(server, Array.from({ length: 8 }, (_, index) => ({
+      id: 100 + index,
+      name: "obsidian_daily_append",
+      args: {
+        ...args,
+        request_id: `single-daemon-${index}`,
+      },
+    })));
+    const statuses = responses.map(writeOutcome).map((outcome) => outcome.status);
+    assert.equal(statuses.filter((status) => status === "committed").length, 1);
+    assert.equal(statuses.filter((status) => status === "skipped").length, 7);
+    assert.equal(statuses.length, 8);
+
+    const note = await readFile(join(vault, "Journal", "Days", "2026-09-27.md"), "utf8");
+    assert.equal(note.split(section).length - 1, 1);
+    await close(server.child, server.output);
+    assertMcpOutput(server.output);
+  });
+
+  await t.test("two stdio daemons commit one shared append", async () => {
+    const servers = await Promise.all([startStdio(), startStdio()]);
+    const section = "## b2c3d4e5 — packaged two-daemon contention";
+    const args = {
+      content: "two daemon body",
+      section,
+      date: "2026-09-28",
+      skip_if_hash: "b2c3d4e5",
+      idempotency_key: "two-daemon-append",
+    };
+
+    const responses = await Promise.all(servers.map((server, index) =>
+      stdioCall(server, 200 + index, "obsidian_daily_append", {
+        ...args,
+        request_id: `two-daemon-${index}`,
+      })));
+    const statuses = responses.map(writeOutcome).map((outcome) => outcome.status).sort();
+    assert.deepEqual(statuses, ["committed", "skipped"]);
+
+    const note = await readFile(join(vault, "Journal", "Days", "2026-09-28.md"), "utf8");
+    assert.equal(note.split(section).length - 1, 1);
+    for (const server of servers) {
+      await close(server.child, server.output);
+      assertMcpOutput(server.output);
+    }
+  });
+
+  await t.test("stdio and HTTP expose one insert commit and one conflict", async () => {
+    const stdio = await startStdio();
+    const httpChild = spawn(httpLauncher, [], {
+      cwd: externalCwd,
+      env: {
+        ...environment,
+        MCP_HTTP_BIND: "127.0.0.1",
+        MCP_HTTP_PORT: "0",
+        MCP_HTTP_JWT_SECRET: httpSecret,
+        MCP_HTTP_JWT_ISSUER: httpIssuer,
+        MCP_HTTP_JWT_AUDIENCE: httpAudience,
+        MCP_HTTP_ALLOWED_HOSTS: "127.0.0.1,localhost",
+        MCP_HTTP_ALLOWED_ORIGINS: "https://allowed.example",
+      },
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    children.add(httpChild);
+    let httpStderr = "";
+    let readyResolve;
+    let readyReject;
+    const ready = new Promise((resolveReady, rejectReady) => {
+      readyResolve = resolveReady;
+      readyReject = rejectReady;
+    });
+    httpChild.stderr.setEncoding("utf8");
+    httpChild.stderr.on("data", (chunk) => {
+      httpStderr += chunk;
+      const match = httpStderr.match(/mcp-http-listening (http:\/\/127\.0\.0\.1:\d+)/);
+      if (match) readyResolve(match[1]);
+    });
+    httpChild.once("error", readyReject);
+    httpChild.once("close", (code) => {
+      if (code !== 0) readyReject(new Error(`HTTP launcher exited with ${code}: ${httpStderr}`));
+    });
+    const httpUrl = await ready;
+    const headers = {
+      Accept: "application/json, text/event-stream",
+      Authorization: `Bearer ${httpToken()}`,
+      "Content-Type": "application/json",
+      Host: "127.0.0.1",
+      Origin: "https://allowed.example",
+    };
+    const initialized = await fetch(`${httpUrl}/mcp`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 300,
+        method: "initialize",
+        params: { protocolVersion: "2025-11-25", capabilities: {}, clientInfo: { name: "package-contention-test", version: "1" } },
+      }),
+    });
+    assert.equal(initialized.status, 200);
+    const sessionId = initialized.headers.get("mcp-session-id");
+    assert.ok(sessionId);
+    const sessionHeaders = { ...headers, "MCP-Protocol-Version": "2025-11-25", "Mcp-Session-Id": sessionId };
+
+    const shared = {
+      title: "Contended Note",
+      folder_hint: "Inbox",
+      idempotency_key: "stdio-http-insert",
+    };
+    const [stdioResponse, httpResponse] = await Promise.all([
+      stdioCall(stdio, 301, "obsidian_keeper_save", {
+        ...shared,
+        body: "body from stdio",
+        request_id: "stdio-insert",
+      }),
+      fetch(`${httpUrl}/mcp`, {
+        method: "POST",
+        headers: sessionHeaders,
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id: 302,
+          method: "tools/call",
+          params: {
+            name: "obsidian_keeper_save",
+            arguments: { ...shared, body: "body from HTTP", request_id: "http-insert" },
+          },
+        }),
+      }).then(async (response) => {
+        assert.equal(response.status, 200);
+        return response.json();
+      }),
+    ]);
+
+    const outcomes = [writeOutcome(stdioResponse), writeOutcome(httpResponse)];
+    assert.deepEqual(outcomes.map((outcome) => outcome.status).sort(), ["committed", "conflict"]);
+    const conflict = outcomes.find((outcome) => outcome.status === "conflict");
+    assert.equal(conflict.error_code, "IDEMPOTENCY_CONFLICT");
+    assert.equal(conflict.retryable, false);
+
+    const notes = (await readdir(join(vault, "Inbox"))).filter((name) => name.endsWith(".md") && name !== "INDEX.md");
+    assert.deepEqual(notes, ["Contended Note.md"]);
+    const index = await readFile(join(vault, "Inbox", "INDEX.md"), "utf8");
+    assert.equal([...index.matchAll(/\[\[(?:Inbox\/)?Contended Note(?:[|#][^\]]*)?\]\]/g)].length, 1);
+
+    await close(stdio.child, stdio.output);
+    assertMcpOutput(stdio.output);
+    httpChild.kill("SIGTERM");
+    await new Promise((resolveClose) => httpChild.once("close", resolveClose));
+  });
+});
+
 test("source entrypoint uses canonical helpers before a build exists", async (t) => {
   const fixture = await mkdtemp(join(tmpdir(), "mcp-source-entrypoint-"));
   const sourceRoot = join(fixture, "checkout");
