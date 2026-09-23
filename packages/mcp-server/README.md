@@ -92,9 +92,13 @@ error contract instead of leaking SDK validation text.
 The `ask_vault_librarian` prompt is a bounded read-only MCP workflow over the
 taxonomy, librarian, pending, and search-preview surfaces. It does not invoke
 the existing librarian agent, whose query path may refresh INDEX links. The
-`summarize_session` prompt is also exposed to clients with `vault:read`. The
-admin-only `reorganize_vault` workflow remains outside the MCP MVP until an
-explicit approval and write contract exists.
+`summarize_session` prompt accepts the transcript as an explicit argument and
+returns the provider instructions for the existing `SKIP`-or-Markdown summary
+contract, including configured routing, taxonomy, scoring thresholds, and
+keeper outcome boundaries. It does not run a provider or persist the result;
+persistence remains in the client-side shell workflow. Both prompts are exposed
+to clients with `vault:read`. The admin-only `reorganize_vault` workflow remains
+outside the MCP MVP until an explicit approval and write contract exists.
 
 The machine-readable contract is [`contract.json`](contract.json). Its fixture
 cases are in [`test/fixtures/contract-fixtures.json`](test/fixtures/contract-fixtures.json)

@@ -89,12 +89,18 @@ async function createFixtureVault() {
   const configContent = `---
 vault_path: ${vaultPath}
 daily_path: Daily/
+intent_high_score: 0.80
+intent_margin: 0.20
+capture_high_score: 0.75
 ---
 
 ## Project Taxonomy
 | Domain | Path | Keywords |
 |---|---|---|
 | Development | Projects/Development/ | dev, code |
+
+## Routing Rules
+Development work routes to Projects/Development/.
 `;
   await writeFile(configPath, configContent, "utf8");
   return { root, vaultPath, configPath };
@@ -162,6 +168,39 @@ test("stdio server returns prompt content via prompts/get for ask_vault_libraria
   const text = promptGet.result.messages[0].content.text;
   for (const expected of promptFixtures.askVaultLibrarian.requiredText) assert.match(text, new RegExp(expected.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i"));
   assert.doesNotMatch(text, /vault_index_apply|dedup_same_day|scripts\/keeper/);
+});
+
+test("stdio server preserves the session summary provider contract via prompts/get", async (t) => {
+  const { root, configPath } = await createFixtureVault();
+  const server = startStdioServer(configPath);
+
+  t.after(async () => {
+    if (!server.child.killed) server.child.stdin.end();
+    await once(server.child, "close").catch(() => {});
+    await rm(root, { recursive: true, force: true });
+  });
+
+  await server.request({
+    jsonrpc: "2.0",
+    id: 1,
+    method: "initialize",
+    params: { protocolVersion: "2025-11-25", capabilities: {}, clientInfo: { name: "test", version: "1.0" } },
+  }, 1);
+  server.notification({ jsonrpc: "2.0", method: "notifications/initialized" });
+
+  const promptGet = await server.request({
+    jsonrpc: "2.0",
+    id: 2,
+    method: "prompts/get",
+    params: { name: "summarize_session", arguments: promptFixtures.summarizeSession.arguments },
+  }, 2);
+
+  assert.equal(promptGet.jsonrpc, "2.0");
+  assert.equal(promptGet.id, 2);
+  assert.equal(promptGet.result.messages.length, 1);
+  const text = promptGet.result.messages[0].content.text;
+  for (const expected of promptFixtures.summarizeSession.requiredText) assert.match(text, new RegExp(expected.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i"));
+  assert.match(text, /<transcript>[\s\S]*<\/transcript>$/);
 });
 
 test("stdio server refuses the admin-only reorganize_vault prompt", async (t) => {

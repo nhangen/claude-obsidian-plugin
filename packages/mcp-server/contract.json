@@ -166,7 +166,7 @@
       "status": "mvp",
       "serverModel": false,
       "scope": "vault:read",
-      "semantics": "Return workflow prompt for session-end intent inference, decision extraction, and structured note filing."
+      "semantics": "Accept a transcript and return the client-side provider instructions for the existing SKIP-or-Markdown session summary contract; the MCP server performs no model call or vault write."
     },
     "reorganize_vault": {
       "status": "excluded-from-mcp-mvp",
