@@ -236,6 +236,21 @@ test("authenticated Streamable HTTP is read-only and enforces transport boundari
   const promptNames = (await prompts.json()).result.prompts.map((prompt) => prompt.name).sort();
   assert.deepEqual(promptNames, ["ask_vault_librarian", "summarize_session"]);
 
+  for (const [id, name, args] of [
+    [22, "ask_vault_librarian", { query: "remote compatibility" }],
+    [23, "summarize_session", { transcript: "{\"type\":\"user\",\"message\":{\"content\":\"Summarize this compatibility check.\"}}" }],
+  ]) {
+    const retrievedPrompt = await fetch(`${url}/mcp`, {
+      method: "POST",
+      headers: requestHeaders(url, validToken, { "MCP-Protocol-Version": "2025-11-25", "Mcp-Session-Id": sessionId }),
+      body: JSON.stringify({ jsonrpc: "2.0", id, method: "prompts/get", params: { name, arguments: args } }),
+    });
+    assert.equal(retrievedPrompt.status, 200);
+    const result = await retrievedPrompt.json();
+    assert.equal(result.id, id);
+    assert.equal(result.result.messages.length, 1);
+  }
+
   const search = await fetch(`${url}/mcp`, {
     method: "POST",
     headers: requestHeaders(url, validToken, { "MCP-Protocol-Version": "2025-11-25", "Mcp-Session-Id": sessionId }),

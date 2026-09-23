@@ -12,6 +12,12 @@ test("pins the MCP protocol and transport boundary", () => {
   assert.deepEqual(contract.protocol.transports.mvp, ["stdio", "streamable-http"]);
   assert.deepEqual(contract.protocol.transports.planned, []);
   assert.deepEqual(contract.protocol.transports.compatibilityOnly, ["http+sse"]);
+  assert.deepEqual(contract.protocol.clientMatrix, [
+    { protocolRevision: "2026-07-28", transport: "stdio", status: "supported" },
+    { protocolRevision: "2025-11-25", transport: "stdio", status: "compatibility" },
+    { protocolRevision: "2026-07-28", transport: "streamable-http", status: "planned" },
+    { protocolRevision: "2025-11-25", transport: "streamable-http", status: "compatibility" },
+  ]);
   assert.deepEqual(contract.scopes.streamableHttp, ["vault:read", "repo:read"]);
   assert.equal(contract.http.defaultBind, "127.0.0.1");
   assert.equal(contract.http.authentication, "HS256 bearer JWT on every request");

@@ -106,6 +106,61 @@ Development work routes to Projects/Development/.
   return { root, vaultPath, configPath };
 }
 
+async function initializeServer(server, protocolVersion) {
+  if (protocolVersion === "2026-07-28") {
+    const discovery = await server.request({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "server/discover",
+      params: { _meta: { "io.modelcontextprotocol/protocolVersion": protocolVersion, "io.modelcontextprotocol/clientCapabilities": {} } },
+    }, 1);
+    assert.ok(discovery.result.supportedVersions.includes(protocolVersion));
+    return;
+  }
+  const initialized = await server.request({
+    jsonrpc: "2.0",
+    id: 1,
+    method: "initialize",
+    params: { protocolVersion, capabilities: {}, clientInfo: { name: "test", version: "1.0" } },
+  }, 1);
+  assert.equal(initialized.result.protocolVersion, protocolVersion);
+  server.notification({ jsonrpc: "2.0", method: "notifications/initialized" });
+}
+
+for (const protocolVersion of promptFixtures.protocols.stdio) {
+  test(`stdio ${protocolVersion} retrieves both prompt contracts`, async (t) => {
+    const { root, configPath } = await createFixtureVault();
+    const server = startStdioServer(configPath);
+
+    t.after(async () => {
+      if (!server.child.killed) server.child.stdin.end();
+      await once(server.child, "close").catch(() => {});
+      await rm(root, { recursive: true, force: true });
+    });
+
+    await initializeServer(server, protocolVersion);
+    const prompts = [
+      ["ask_vault_librarian", promptFixtures.askVaultLibrarian.arguments],
+      ["summarize_session", promptFixtures.summarizeSession.arguments],
+    ];
+    for (const [name, args] of prompts) {
+      const id = name === "ask_vault_librarian" ? 2 : 3;
+      const meta = protocolVersion === "2026-07-28"
+        ? { _meta: { "io.modelcontextprotocol/protocolVersion": protocolVersion, "io.modelcontextprotocol/clientCapabilities": {} } }
+        : {};
+      const response = await server.request({
+        jsonrpc: "2.0",
+        id,
+        method: "prompts/get",
+        params: { ...meta, name, arguments: args },
+      }, id);
+      assert.equal(response.id, id);
+      assert.equal(response.result.messages.length, 1);
+      assert.equal(response.result.messages[0].content.type, "text");
+    }
+  });
+}
+
 test("stdio server lists prompts via prompts/list", async (t) => {
   const { root, configPath } = await createFixtureVault();
   const server = startStdioServer(configPath);

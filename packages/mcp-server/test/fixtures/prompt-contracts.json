@@ -1,4 +1,8 @@
 {
+  "protocols": {
+    "stdio": ["2026-07-28", "2025-11-25"],
+    "streamableHttp": ["2025-11-25"]
+  },
   "askVaultLibrarian": {
     "arguments": {
       "query": "What did we decide about MCP compatibility?"
