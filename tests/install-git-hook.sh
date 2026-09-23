@@ -53,6 +53,13 @@ INSTALL_OUT="$("${INSTALLER}" install "$FRESH_REPO")"
 STATUS_AFTER="$("${INSTALLER}" status "$FRESH_REPO")"
 [ "$STATUS_AFTER" = "installed" ] || { echo "FAIL: status after install expected installed, got $STATUS_AFTER" >&2; exit 1; }
 
+HOOK_CONTENT="$(cat "${FRESH_REPO}/.git/hooks/post-commit")"
+case "$HOOK_CONTENT" in
+  *"${REPO_ROOT}/scripts"*) echo "FAIL: hook remains pinned to the source checkout" >&2; exit 1 ;;
+  *"obsidian-commit-capture"*) ;;
+  *) echo "FAIL: hook does not reference the stable runtime bundle" >&2; exit 1 ;;
+esac
+
 # Perform a git commit in fresh repo
 (
   cd "$FRESH_REPO"
@@ -147,7 +154,33 @@ case "$WT_NOTE_CONTENT" in
   *) echo "FAIL: note content missing worktree commit message" >&2; exit 1 ;;
 esac
 
-# 6. Global Scope test
+# 6. Respect a repository/worktree-specific core.hooksPath.
+CUSTOM_REPO="${TEST_TMP}/custom-hooks-repo"
+CUSTOM_HOOKS="${TEST_TMP}/custom-hooks"
+GLOBAL_HOOKS_FOR_LOCAL="${TEST_TMP}/global-hooks-for-local"
+git init -b main "$CUSTOM_REPO" >/dev/null
+mkdir -p "$CUSTOM_HOOKS" "$GLOBAL_HOOKS_FOR_LOCAL"
+git config --global core.hooksPath "$GLOBAL_HOOKS_FOR_LOCAL"
+git -C "$CUSTOM_REPO" config core.hooksPath "$CUSTOM_HOOKS"
+"${INSTALLER}" install "$CUSTOM_REPO" >/dev/null
+[ -f "${CUSTOM_HOOKS}/post-commit" ] || { echo "FAIL: custom core.hooksPath was ignored" >&2; exit 1; }
+[ ! -e "${GLOBAL_HOOKS_FOR_LOCAL}/post-commit" ] || { echo "FAIL: local install used the inherited global hooksPath" >&2; exit 1; }
+[ "$("${INSTALLER}" status "$CUSTOM_REPO")" = "installed" ] || { echo "FAIL: custom hooks status did not report installed" >&2; exit 1; }
+"${INSTALLER}" uninstall "$CUSTOM_REPO" >/dev/null
+[ ! -e "${CUSTOM_HOOKS}/post-commit" ] || { echo "FAIL: custom hook was not removed" >&2; exit 1; }
+git config --global --unset core.hooksPath
+
+# 7. Global scope preserves a pre-existing hooksPath.
+PREEXISTING_GLOBAL_HOOKS="${TEST_TMP}/preexisting-global-hooks"
+mkdir -p "$PREEXISTING_GLOBAL_HOOKS"
+git config --global core.hooksPath "$PREEXISTING_GLOBAL_HOOKS"
+"${INSTALLER}" install --scope global >/dev/null
+[ "$(git config --global core.hooksPath)" = "$PREEXISTING_GLOBAL_HOOKS" ] || { echo "FAIL: pre-existing global hooksPath was changed" >&2; exit 1; }
+"${INSTALLER}" uninstall --scope global >/dev/null
+[ "$(git config --global core.hooksPath)" = "$PREEXISTING_GLOBAL_HOOKS" ] || { echo "FAIL: pre-existing global hooksPath was unset" >&2; exit 1; }
+git config --global --unset core.hooksPath
+
+# 8. Global scope test
 GLOBAL_STATUS_BEFORE="$("${INSTALLER}" status --scope global || true)"
 [ "$GLOBAL_STATUS_BEFORE" = "not-installed" ] || { echo "FAIL: global status before expected not-installed, got $GLOBAL_STATUS_BEFORE" >&2; exit 1; }
 
@@ -159,7 +192,7 @@ GLOBAL_STATUS_AFTER="$("${INSTALLER}" status --scope global)"
 GLOBAL_STATUS_UNINSTALLED="$("${INSTALLER}" status --scope global || true)"
 [ "$GLOBAL_STATUS_UNINSTALLED" = "not-installed" ] || { echo "FAIL: global status uninstalled expected not-installed, got $GLOBAL_STATUS_UNINSTALLED" >&2; exit 1; }
 
-# 7. Non-blocking error handling
+# 9. Non-blocking error handling and surfaced capture failures
 BROKEN_HOOK_DIR="${TEST_TMP}/broken-hook-dir"
 mkdir -p "$BROKEN_HOOK_DIR"
 "${INSTALLER}" render "/nonexistent/path/commit-meta.sh" "/nonexistent/path/keeper" > "${BROKEN_HOOK_DIR}/post-commit"
@@ -174,5 +207,9 @@ cp "${BROKEN_HOOK_DIR}/post-commit" "${BROKEN_REPO}/.git/hooks/post-commit"
   cd "$BROKEN_REPO"
   git commit --no-verify --allow-empty -m "commit with broken hook paths" >/dev/null 2>&1
 ) || { echo "FAIL: git commit failed on broken hook paths" >&2; exit 1; }
+
+BROKEN_ERR="${TEST_TMP}/broken-hook.err"
+(cd "$BROKEN_REPO" && ./.git/hooks/post-commit 2>"$BROKEN_ERR")
+grep -q "commit-meta executable not found" "$BROKEN_ERR" || { echo "FAIL: broken capture path was not surfaced" >&2; exit 1; }
 
 echo "ok   install-git-hook.sh"

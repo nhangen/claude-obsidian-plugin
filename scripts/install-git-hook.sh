@@ -11,10 +11,56 @@ set -euo pipefail
 
 MARKER="# obsidian-commit-capture-hook"
 LEGACY_NAME="post-commit.legacy"
+RUNTIME_NAME="obsidian-commit-capture"
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "$0")" && pwd -P)"
 DEFAULT_COMMIT_META="${SCRIPT_DIR}/commit-meta.sh"
 DEFAULT_KEEPER="${SCRIPT_DIR}/keeper"
+
+runtime_root() {
+  local data_home="${XDG_DATA_HOME:-${HOME:?install-git-hook: HOME is required}}"
+  printf '%s/%s\n' "${data_home}/obsidian-commit-capture" "$RUNTIME_NAME"
+}
+
+global_state_file() {
+  local state_home="${XDG_STATE_HOME:-${HOME:?install-git-hook: HOME is required}}"
+  printf '%s/obsidian-commit-capture/global-install.config\n' "$state_home"
+}
+
+install_runtime() {
+  local root parent stage release
+  root="$(runtime_root)"
+  parent="${root}/releases"
+  mkdir -p "$parent"
+  stage="$(mktemp -d "${parent}/.stage.XXXXXX")" || return 1
+  if ! mkdir -p "$stage/lib" \
+    || ! cp -p "$DEFAULT_COMMIT_META" "$stage/commit-meta.sh" \
+    || ! cp -p "$DEFAULT_KEEPER" "$stage/keeper" \
+    || ! cp -p "$SCRIPT_DIR"/lib/*.sh "$stage/lib/" \
+    || ! chmod +x "$stage/commit-meta.sh" "$stage/keeper"; then
+    rm -rf "$stage"
+    return 1
+  fi
+
+  release="${parent}/$(date '+%Y%m%d%H%M%S').$$"
+  if ! mv "$stage" "$release"; then
+    rm -rf "$stage"
+    return 1
+  fi
+  printf '%s\n' "$release"
+}
+
+write_global_state() {
+  local state="$1" hooks_dir="$2" previous="$3" changed="$4"
+  mkdir -p "$(dirname -- "$state")"
+  git config --file "$state" install.hooksPath "$hooks_dir"
+  git config --file "$state" install.changed "$changed"
+  if [ -n "$previous" ]; then
+    git config --file "$state" install.previousHooksPath "$previous"
+  else
+    git config --file "$state" install.previousUnset true
+  fi
+}
 
 usage() {
   echo "usage: install-git-hook.sh {render|install|status|uninstall} [target_path] [--scope local|global]" >&2
@@ -35,17 +81,34 @@ resolve_hooks_dir() {
     if [ -f "$repo_dir" ]; then
       repo_dir="$(dirname -- "$repo_dir")"
     fi
-    local common_dir
-    common_dir="$(git -C "$repo_dir" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" || {
-      common_dir="$(git -C "$repo_dir" rev-parse --git-common-dir 2>/dev/null)" || {
-        echo "install-git-hook: not a git repository: $repo_dir" >&2
-        return 1
-      }
-    }
-    if [ "${common_dir#/}" = "$common_dir" ]; then
-      common_dir="$(cd -- "$repo_dir" && pwd -P)/${common_dir}"
+    local hooks_dir configured git_dir common_dir
+    configured="$(git -C "$repo_dir" config --worktree --get core.hooksPath 2>/dev/null || true)"
+    if [ -z "$configured" ]; then
+      configured="$(git -C "$repo_dir" config --local --get core.hooksPath 2>/dev/null || true)"
     fi
-    printf '%s\n' "${common_dir}/hooks"
+    if [ -n "$configured" ]; then
+      hooks_dir="$configured"
+    else
+      git_dir="$(git -C "$repo_dir" rev-parse --path-format=absolute --git-dir 2>/dev/null)" || {
+        git_dir="$(git -C "$repo_dir" rev-parse --git-dir 2>/dev/null)" || {
+          echo "install-git-hook: not a git repository: $repo_dir" >&2
+          return 1
+        }
+      }
+      if [ "${git_dir#/}" = "$git_dir" ]; then
+        git_dir="$(cd -- "$repo_dir" && pwd -P)/${git_dir}"
+      fi
+      common_dir="$(git -C "$repo_dir" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)"
+      if [ -n "$common_dir" ]; then
+        hooks_dir="${common_dir}/hooks"
+      else
+        hooks_dir="${git_dir}/hooks"
+      fi
+    fi
+    if [ "${hooks_dir#/}" = "$hooks_dir" ]; then
+      hooks_dir="$(cd -- "$repo_dir" && pwd -P)/${hooks_dir}"
+    fi
+    printf '%s\n' "$hooks_dir"
   fi
 }
 
@@ -64,16 +127,22 @@ HOOK_DIR="\$(cd -- "\$(dirname -- "\$0")" && pwd -P)"
 META_BIN="\${OBSIDIAN_COMMIT_META_BIN:-${meta_bin}}"
 KEEPER_BIN="\${OBSIDIAN_KEEPER_BIN:-${keeper_bin}}"
 
-if [ ! -f "\$META_BIN" ] && command -v commit-meta.sh >/dev/null 2>&1; then
+if [ ! -x "\$META_BIN" ] && command -v commit-meta.sh >/dev/null 2>&1; then
   META_BIN="\$(command -v commit-meta.sh)"
 fi
-if [ ! -f "\$KEEPER_BIN" ] && command -v keeper >/dev/null 2>&1; then
+if [ ! -x "\$KEEPER_BIN" ] && command -v keeper >/dev/null 2>&1; then
   KEEPER_BIN="\$(command -v keeper)"
 fi
 
-if [ -f "\$META_BIN" ]; then
-  RECORD="\$( "\$META_BIN" HEAD 2>/dev/null || true )"
-  if [ -n "\$RECORD" ] && [ -f "\$KEEPER_BIN" ]; then
+if [ ! -x "\$META_BIN" ]; then
+  printf 'obsidian-commit-capture: not captured - commit-meta executable not found: %s\\n' "\$META_BIN" >&2
+elif ! RECORD="\$("\$META_BIN" HEAD)"; then
+  printf 'obsidian-commit-capture: not captured - commit-meta failed\\n' >&2
+elif [ -z "\$RECORD" ]; then
+  printf 'obsidian-commit-capture: not captured - commit-meta returned no record\\n' >&2
+elif [ ! -x "\$KEEPER_BIN" ]; then
+  printf 'obsidian-commit-capture: not captured - keeper executable not found: %s\\n' "\$KEEPER_BIN" >&2
+else
     get_field() {
       local rec="\$1" f="\$2="
       printf '%s\n' "\$rec" | awk -v prefix="\$f" '
@@ -129,18 +198,23 @@ source: git-hook
 # \${repo_name} - \${date}
 INIT_EOF
 
-        "\$KEEPER_BIN" append \\
+        if ! "\$KEEPER_BIN" append \\
           --vault "\$vault_path" \\
           --target "\$TARGET" \\
           --section "\$SECTION" \\
           --body-file "\$BODY_FILE" \\
           --init-file "\$INIT_FILE" \\
-          --skip-if-hash "\$hash" >/dev/null 2>&1 || true
+          --skip-if-hash "\$hash" >/dev/null; then
+          printf 'obsidian-commit-capture: not captured - keeper append failed\\n' >&2
+        fi
 
         rm -rf "\$TMP_DIR" >/dev/null 2>&1 || true
+      else
+        printf 'obsidian-commit-capture: not captured - temporary directory creation failed\\n' >&2
       fi
+    else
+      printf 'obsidian-commit-capture: not captured - commit metadata was incomplete\\n' >&2
     fi
-  fi
 fi
 
 LEGACY_HOOK="\${HOOK_DIR}/${LEGACY_NAME}"
@@ -194,25 +268,62 @@ cmd_install() {
   mkdir -p "$hooks_dir"
   local hook_file="${hooks_dir}/post-commit"
   local legacy_file="${hooks_dir}/${LEGACY_NAME}"
+  local runtime_dir temp_hook moved_legacy=0
 
   if [ -f "$hook_file" ] && ! grep -qF "$MARKER" "$hook_file" 2>/dev/null; then
     if [ -f "$legacy_file" ]; then
       echo "install-git-hook: error: collision detected — both post-commit and post-commit.legacy exist" >&2
       return 1
     fi
-    mv "$hook_file" "$legacy_file"
+  fi
+
+  runtime_dir="$(install_runtime)" || {
+    echo "install-git-hook: could not install the stable runtime bundle" >&2
+    return 1
+  }
+  temp_hook="$(mktemp "${hooks_dir}/.post-commit.XXXXXX")" || return 1
+  if ! render_hook "$runtime_dir/commit-meta.sh" "$runtime_dir/keeper" > "$temp_hook" \
+    || ! chmod +x "$temp_hook"; then
+    rm -f "$temp_hook"
+    return 1
+  fi
+
+  if [ -f "$hook_file" ] && ! grep -qF "$MARKER" "$hook_file" 2>/dev/null; then
+    if ! mv "$hook_file" "$legacy_file"; then
+      rm -f "$temp_hook"
+      return 1
+    fi
+    moved_legacy=1
     echo "install-git-hook: preserved existing post-commit hook to ${legacy_file}" >&2
   fi
 
-  render_hook "$DEFAULT_COMMIT_META" "$DEFAULT_KEEPER" > "$hook_file"
-  chmod +x "$hook_file"
+  if ! mv "$temp_hook" "$hook_file"; then
+    if [ "$moved_legacy" = 1 ]; then mv "$legacy_file" "$hook_file" || true; fi
+    rm -f "$temp_hook"
+    return 1
+  fi
 
   if [ "$scope" = "global" ]; then
-    local current_global
+    local current_global state_file changed=0
     current_global="$(git config --global core.hooksPath 2>/dev/null || true)"
-    if [ "$current_global" != "$hooks_dir" ]; then
-      git config --global core.hooksPath "$hooks_dir"
+    state_file="$(global_state_file)"
+    if [ -z "$current_global" ]; then
+      changed=1
+      if ! write_global_state "$state_file" "$hooks_dir" "" "$changed" \
+        || ! git config --global core.hooksPath "$hooks_dir"; then
+        git config --global --unset core.hooksPath 2>/dev/null || true
+        rm -f "$state_file"
+        rm -f "$hook_file"
+        if [ "$moved_legacy" = 1 ]; then mv "$legacy_file" "$hook_file" || true; fi
+        return 1
+      fi
       echo "install-git-hook: set git config --global core.hooksPath to ${hooks_dir}" >&2
+    elif [ ! -f "$state_file" ]; then
+      write_global_state "$state_file" "$hooks_dir" "$current_global" 0 || {
+        rm -f "$hook_file"
+        if [ "$moved_legacy" = 1 ]; then mv "$legacy_file" "$hook_file" || true; fi
+        return 1
+      }
     fi
   fi
 
@@ -221,8 +332,16 @@ cmd_install() {
 
 cmd_uninstall() {
   local target_path="$1" scope="$2"
-  local hooks_dir
-  hooks_dir="$(resolve_hooks_dir "$target_path" "$scope")" || return 1
+  local hooks_dir state_file="" recorded_hooks=""
+  if [ "$scope" = "global" ]; then
+    state_file="$(global_state_file)"
+    recorded_hooks="$(git config --file "$state_file" --get install.hooksPath 2>/dev/null || true)"
+  fi
+  if [ -n "$recorded_hooks" ]; then
+    hooks_dir="$recorded_hooks"
+  else
+    hooks_dir="$(resolve_hooks_dir "$target_path" "$scope")" || return 1
+  fi
 
   local hook_file="${hooks_dir}/post-commit"
   local legacy_file="${hooks_dir}/${LEGACY_NAME}"
@@ -251,12 +370,21 @@ cmd_uninstall() {
   fi
 
   if [ "$scope" = "global" ]; then
-    local current_global
+    local current_global state_file changed previous
     current_global="$(git config --global core.hooksPath 2>/dev/null || true)"
-    if [ "$current_global" = "$hooks_dir" ]; then
-      git config --global --unset core.hooksPath 2>/dev/null || true
-      echo "install-git-hook: unset git config --global core.hooksPath" >&2
+    state_file="$(global_state_file)"
+    changed="$(git config --file "$state_file" --get install.changed 2>/dev/null || true)"
+    if [ "$changed" = 1 ] && [ "$current_global" = "$hooks_dir" ]; then
+      previous="$(git config --file "$state_file" --get install.previousHooksPath 2>/dev/null || true)"
+      if [ -n "$previous" ]; then
+        git config --global core.hooksPath "$previous"
+        echo "install-git-hook: restored git config --global core.hooksPath" >&2
+      else
+        git config --global --unset core.hooksPath 2>/dev/null || true
+        echo "install-git-hook: unset git config --global core.hooksPath" >&2
+      fi
     fi
+    rm -f "$state_file"
   fi
 
   echo "uninstalled"
