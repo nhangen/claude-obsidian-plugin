@@ -605,7 +605,7 @@ test("packed stdio and HTTP entrypoints serialize contended keeper writes", asyn
     await new Promise((resolveClose) => httpChild.once("close", resolveClose));
   });
 
-  await t.test("stdio and packaged hook writes wait for the watcher lock and commit once", async () => {
+  await t.test("stdio and packaged keeper writes wait for the watcher lock and commit once", async () => {
     const server = await startStdio();
     const pause = join(fixture, "watcher-pause");
     const bodyFile = join(fixture, "hook-body.md");
