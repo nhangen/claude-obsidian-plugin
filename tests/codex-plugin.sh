@@ -10,6 +10,7 @@ fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
 
 python3 - "$ROOT_DIR" <<'PY' || fail "Codex package contract failed"
 import json
+import os
 import pathlib
 import sys
 
@@ -39,14 +40,14 @@ entry = marketplace["plugins"][0]
 assert entry["name"] == "obsidian"
 assert entry["source"] == {"source": "local", "path": "./packages/codex"}
 
-# Vendor parity. The copies under packages/codex are maintained by hand — this
-# branch alone carried seven fixes across that boundary — and the installed
-# keeper is otherwise exercised only through shapes that predate them, so a
-# copy drifting back would go unnoticed without this.
+# Vendor parity. The copies under packages/codex are maintained by hand, and the
+# installed keeper is otherwise exercised only through shapes that predate
+# them, so a copy drifting back would go unnoticed without this.
 #
 # It lives HERE, above the `command -v codex` gate below, on purpose: drift is
 # most likely on a machine that has no codex CLI, and a parity check placed
 # after that gate never runs in exactly the environment it is meant to protect.
+drift = os.environ.get("CODEX_PLUGIN_TEST_VENDOR_DRIFT")
 for relative in (
     "commit-meta.sh",
     "keeper",
@@ -57,8 +58,23 @@ for relative in (
 ):
     packaged = skill_root / "scripts" / relative
     canonical = root / "scripts" / relative
-    assert packaged.read_bytes() == canonical.read_bytes(), relative
+    packaged_bytes = packaged.read_bytes()
+    if relative == drift:
+        packaged_bytes += b"\n"
+    if packaged_bytes != canonical.read_bytes():
+        print(f"vendor parity mismatch: {relative}", file=sys.stderr)
+        sys.exit(1)
 PY
+
+if [ -z "${CODEX_PLUGIN_TEST_VENDOR_DRIFT:-}" ]; then
+  OPTIMIZED_DRIFT_ERR="$TMP/optimized-vendor-drift.err"
+  if CODEX_PLUGIN_TEST_VENDOR_DRIFT="lib/note-hash.sh" PYTHONOPTIMIZE=1 \
+    bash "$0" >"$TMP/optimized-vendor-drift.out" 2>"$OPTIMIZED_DRIFT_ERR"; then
+    fail "optimized Python accepted vendor drift"
+  fi
+  grep -q '^vendor parity mismatch: lib/note-hash.sh$' "$OPTIMIZED_DRIFT_ERR" \
+    || fail "optimized Python did not report vendor drift"
+fi
 
 command -v codex >/dev/null 2>&1 || fail "codex CLI is required for the installation smoke test"
 CODEX_HOME_DIR="$TMP/codex-home"
