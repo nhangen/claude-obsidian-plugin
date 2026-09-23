@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, rm, writeFile, mkdir } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { spawn } from "node:child_process";
@@ -9,6 +9,7 @@ import { test } from "node:test";
 const packageRoot = resolve(dirname(new URL(import.meta.url).pathname), "..");
 const entrypoint = join(packageRoot, "src", "stdio.mjs");
 const repositoryRoot = resolve(packageRoot, "../..");
+const promptFixtures = JSON.parse(await readFile(new URL("./fixtures/prompt-contracts.json", import.meta.url), "utf8"));
 
 function startStdioServer(configPath) {
   const child = spawn(process.execPath, [entrypoint], {
@@ -152,17 +153,15 @@ test("stdio server returns prompt content via prompts/get for ask_vault_libraria
     jsonrpc: "2.0",
     id: 2,
     method: "prompts/get",
-    params: { name: "ask_vault_librarian", arguments: { query: "recent decisions" } },
+    params: { name: "ask_vault_librarian", arguments: promptFixtures.askVaultLibrarian.arguments },
   }, 2);
 
   assert.equal(promptGet.jsonrpc, "2.0");
   assert.equal(promptGet.id, 2);
-  assert.ok(promptGet.result.messages.length > 0);
-  assert.ok(promptGet.result.messages[0].content.text.includes("vault librarian"));
-  assert.ok(promptGet.result.messages[0].content.text.includes("INDEX.md"));
-  assert.ok(promptGet.result.messages[0].content.text.includes("deduplication"));
-  assert.ok(promptGet.result.messages[0].content.text.includes("Pending.md"));
-  assert.ok(promptGet.result.messages[0].content.text.includes("recent decisions"));
+  assert.equal(promptGet.result.messages.length, 1);
+  const text = promptGet.result.messages[0].content.text;
+  for (const expected of promptFixtures.askVaultLibrarian.requiredText) assert.match(text, new RegExp(expected.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i"));
+  assert.doesNotMatch(text, /vault_index_apply|dedup_same_day|scripts\/keeper/);
 });
 
 test("stdio server refuses the admin-only reorganize_vault prompt", async (t) => {

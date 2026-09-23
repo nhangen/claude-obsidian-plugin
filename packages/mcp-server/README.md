@@ -89,9 +89,12 @@ The taxonomy resource returns only the project-taxonomy table. Tool arguments
 are validated inside the handlers so invalid input uses the stable structured
 error contract instead of leaking SDK validation text.
 
-The read-only `ask_vault_librarian` and `summarize_session` prompts are exposed
-to clients with `vault:read`. The admin-only `reorganize_vault` workflow remains
-outside the MCP MVP until an explicit approval and write contract exists.
+The `ask_vault_librarian` prompt is a bounded read-only MCP workflow over the
+taxonomy, librarian, pending, and search-preview surfaces. It does not invoke
+the existing librarian agent, whose query path may refresh INDEX links. The
+`summarize_session` prompt is also exposed to clients with `vault:read`. The
+admin-only `reorganize_vault` workflow remains outside the MCP MVP until an
+explicit approval and write contract exists.
 
 The machine-readable contract is [`contract.json`](contract.json). Its fixture
 cases are in [`test/fixtures/contract-fixtures.json`](test/fixtures/contract-fixtures.json)

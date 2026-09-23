@@ -160,7 +160,7 @@
       "status": "mvp",
       "serverModel": false,
       "scope": "vault:read",
-      "semantics": "Return bounded context and instructions for index-grounded vault querying with citations and confidence reporting."
+      "semantics": "Return client-side instructions limited to MCP read resources and bounded search previews; cite returned paths, report coverage gaps, and refuse every vault mutation request."
     },
     "summarize_session": {
       "status": "mvp",
