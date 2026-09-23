@@ -248,7 +248,7 @@
       "semantics": "Return bounded context for the client to apply its own prompt flow."
     },
     "reorganize_vault": {
-      "status": "excluded-from-mcp-mvp",
+      "status": "mvp",
       "serverModel": false,
       "scope": "vault:admin",
       "semantics": "Existing plugin workflow only until an explicit approval and write contract exist."

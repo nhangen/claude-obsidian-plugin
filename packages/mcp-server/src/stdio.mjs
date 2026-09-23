@@ -767,7 +767,68 @@ export function createServer({ supportedProtocolVersions = protocolVersions, sco
   const availableScopes = new Set(scopes);
   const server = new McpServer(
     { name: "claude-obsidian-mcp", version: "0.1.0" },
-    { capabilities: { tools: {}, resources: { listChanged: false } }, supportedProtocolVersions },
+    { capabilities: { tools: {}, resources: { listChanged: false }, prompts: { listChanged: false } }, supportedProtocolVersions },
+  );
+  server.registerPrompt(
+    "obsidian_ask",
+    {
+      title: "Ask Vault Librarian",
+      description: "System instructions and context for index-grounded vault querying with citations and confidence reporting.",
+      argsSchema: { query: z.string().optional() },
+    },
+    async ({ query } = {}) => ({
+      messages: [
+        {
+          role: "user",
+          content: {
+            type: "text",
+            text: `You are the vault librarian for the Obsidian vault.
+Your goal is to answer queries with index-grounded evidence from notes, cite using [[note]] wikilinks, state confidence (high/medium/low), and report any coverage gaps.
+
+Query: ${query || "What is stored in the vault?"}`,
+          },
+        },
+      ],
+    }),
+  );
+  server.registerPrompt(
+    "summarize_session",
+    {
+      title: "Summarize Session to Vault",
+      description: "Prompt template for session-end intent inference, decision extraction, and note filing.",
+      argsSchema: { topic_hint: z.string().optional() },
+    },
+    async ({ topic_hint } = {}) => ({
+      messages: [
+        {
+          role: "user",
+          content: {
+            type: "text",
+            text: `Evaluate the current session transcript. Infer the session intent (execution, research, planning, reflection), extract key decisions, goals, and open threads, and construct a structured note payload.
+${topic_hint ? `Topic Hint: ${topic_hint}` : ""}`,
+          },
+        },
+      ],
+    }),
+  );
+  server.registerPrompt(
+    "reorganize_vault",
+    {
+      title: "Reorganize Vault Structure",
+      description: "Prompt template for vault structure analysis, MOC promotion, and proposed reorg plans requiring user approval.",
+      argsSchema: { folder: z.string().optional() },
+    },
+    async ({ folder } = {}) => ({
+      messages: [
+        {
+          role: "user",
+          content: {
+            type: "text",
+            text: `Analyze the folder structure and note clusters ${folder ? `in ${folder}` : "across the vault"}. Identify notes eligible for Map of Content (MOC) promotion or reorganization, and output a proposed plan for user approval before moving any files.`,
+          },
+        },
+      ],
+    }),
   );
   if (availableScopes.has("vault:read")) server.registerTool(
     "obsidian_find_notes",

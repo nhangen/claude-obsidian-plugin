@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "obsidian": {
+      "command": "claude-obsidian-mcp",
+      "args": [],
+      "env": {
+        "OBSIDIAN_LOCAL_MD": "${userHome}/.config/obsidian-vaultkeeper/config.yaml",
+        "MCP_REPOSITORY_ROOTS": "${userHome}/code"
+      }
+    }
+  }
+}
