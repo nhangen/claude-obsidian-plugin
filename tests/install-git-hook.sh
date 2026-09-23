@@ -95,6 +95,7 @@ cat <<EOF > "${LEGACY_REPO}/.git/hooks/post-commit"
 echo "legacy post-commit executed" >> "${LEGACY_LOG}"
 EOF
 chmod +x "${LEGACY_REPO}/.git/hooks/post-commit"
+cp "${LEGACY_REPO}/.git/hooks/post-commit" "${TEST_TMP}/expected-legacy-hook"
 
 STATUS_LEGACY_BEFORE="$("${INSTALLER}" status "$LEGACY_REPO" || true)"
 [ "$STATUS_LEGACY_BEFORE" = "foreign-hook-detected" ] || { echo "FAIL: status before expected foreign-hook-detected, got $STATUS_LEGACY_BEFORE" >&2; exit 1; }
@@ -102,6 +103,10 @@ STATUS_LEGACY_BEFORE="$("${INSTALLER}" status "$LEGACY_REPO" || true)"
 "${INSTALLER}" install "$LEGACY_REPO" >/dev/null
 
 [ -f "${LEGACY_REPO}/.git/hooks/post-commit.legacy" ] || { echo "FAIL: post-commit.legacy not created" >&2; exit 1; }
+cmp -s "${TEST_TMP}/expected-legacy-hook" "${LEGACY_REPO}/.git/hooks/post-commit.legacy" || { echo "FAIL: preserved legacy hook changed during install" >&2; exit 1; }
+
+"${INSTALLER}" install "$LEGACY_REPO" >/dev/null
+cmp -s "${TEST_TMP}/expected-legacy-hook" "${LEGACY_REPO}/.git/hooks/post-commit.legacy" || { echo "FAIL: repeated install changed the preserved legacy hook" >&2; exit 1; }
 
 STATUS_LEGACY_AFTER="$("${INSTALLER}" status "$LEGACY_REPO")"
 [ "$STATUS_LEGACY_AFTER" = "installed (chained legacy hook active)" ] || { echo "FAIL: status with legacy expected installed (chained legacy hook active), got $STATUS_LEGACY_AFTER" >&2; exit 1; }
@@ -112,6 +117,10 @@ STATUS_LEGACY_AFTER="$("${INSTALLER}" status "$LEGACY_REPO")"
 )
 
 [ -f "$LEGACY_LOG" ] || { echo "FAIL: legacy hook did not execute" >&2; exit 1; }
+
+"${INSTALLER}" uninstall "$LEGACY_REPO" >/dev/null
+[ ! -e "${LEGACY_REPO}/.git/hooks/post-commit.legacy" ] || { echo "FAIL: uninstall left the legacy backup in place" >&2; exit 1; }
+cmp -s "${TEST_TMP}/expected-legacy-hook" "${LEGACY_REPO}/.git/hooks/post-commit" || { echo "FAIL: uninstall did not restore the original hook" >&2; exit 1; }
 
 # 4. Marker text alone does not establish installer ownership.
 MARKER_REPO="${TEST_TMP}/marker-repo"
@@ -144,7 +153,48 @@ if "${INSTALLER}" install "$COLLISION_REPO" >/dev/null 2>&1; then
   exit 1
 fi
 
-# 6. Git Worktree support
+# 6. Failed replacement restores the original hook.
+ROLLBACK_REPO="${TEST_TMP}/rollback-repo"
+git init -b main "$ROLLBACK_REPO" >/dev/null
+mkdir -p "${ROLLBACK_REPO}/.git/hooks"
+cat <<'EOF' > "${ROLLBACK_REPO}/.git/hooks/post-commit"
+#!/usr/bin/env bash
+echo "original rollback hook"
+EOF
+chmod +x "${ROLLBACK_REPO}/.git/hooks/post-commit"
+cp "${ROLLBACK_REPO}/.git/hooks/post-commit" "${TEST_TMP}/expected-rollback-hook"
+
+FAKE_BIN="${TEST_TMP}/fake-bin"
+FAIL_ONCE_FILE="${TEST_TMP}/mv-failed-once"
+mkdir -p "$FAKE_BIN"
+cat <<'EOF' > "${FAKE_BIN}/mv"
+#!/usr/bin/env bash
+source_path="${1:-}"
+target_path=""
+for arg in "$@"; do
+  target_path="$arg"
+done
+case "$(basename -- "$source_path"):$target_path" in
+  .post-commit.*:*/post-commit)
+    if [ ! -e "$FAIL_ONCE_FILE" ]; then
+      : > "$FAIL_ONCE_FILE"
+      exit 1
+    fi
+    ;;
+esac
+exec /bin/mv "$@"
+EOF
+chmod +x "${FAKE_BIN}/mv"
+
+if PATH="${FAKE_BIN}:$PATH" FAIL_ONCE_FILE="$FAIL_ONCE_FILE" "${INSTALLER}" install "$ROLLBACK_REPO" >/dev/null 2>&1; then
+  echo "FAIL: install should have failed while replacing the hook" >&2
+  exit 1
+fi
+cmp -s "${TEST_TMP}/expected-rollback-hook" "${ROLLBACK_REPO}/.git/hooks/post-commit" || { echo "FAIL: failed install did not restore the original hook" >&2; exit 1; }
+[ ! -e "${ROLLBACK_REPO}/.git/hooks/post-commit.legacy" ] || { echo "FAIL: failed install left a legacy backup behind" >&2; exit 1; }
+[ "$("${INSTALLER}" status "$ROLLBACK_REPO" || true)" = "foreign-hook-detected" ] || { echo "FAIL: failed install left a managed hook active" >&2; exit 1; }
+
+# 7. Git Worktree support
 WORKTREE_REPO="${TEST_TMP}/worktree-repo"
 git init -b main "$WORKTREE_REPO" >/dev/null
 (
@@ -173,7 +223,7 @@ case "$WT_NOTE_CONTENT" in
   *) echo "FAIL: note content missing worktree commit message" >&2; exit 1 ;;
 esac
 
-# 7. Respect a repository/worktree-specific core.hooksPath.
+# 8. Respect a repository/worktree-specific core.hooksPath.
 CUSTOM_REPO="${TEST_TMP}/custom-hooks-repo"
 CUSTOM_HOOKS="${TEST_TMP}/custom-hooks"
 GLOBAL_HOOKS_FOR_LOCAL="${TEST_TMP}/global-hooks-for-local"
@@ -189,7 +239,7 @@ git -C "$CUSTOM_REPO" config core.hooksPath "$CUSTOM_HOOKS"
 [ ! -e "${CUSTOM_HOOKS}/post-commit" ] || { echo "FAIL: custom hook was not removed" >&2; exit 1; }
 git config --global --unset core.hooksPath
 
-# 8. Global scope preserves a pre-existing hooksPath.
+# 9. Global scope preserves a pre-existing hooksPath.
 PREEXISTING_GLOBAL_HOOKS="${TEST_TMP}/preexisting-global-hooks"
 mkdir -p "$PREEXISTING_GLOBAL_HOOKS"
 git config --global core.hooksPath "$PREEXISTING_GLOBAL_HOOKS"
@@ -199,7 +249,7 @@ git config --global core.hooksPath "$PREEXISTING_GLOBAL_HOOKS"
 [ "$(git config --global core.hooksPath)" = "$PREEXISTING_GLOBAL_HOOKS" ] || { echo "FAIL: pre-existing global hooksPath was unset" >&2; exit 1; }
 git config --global --unset core.hooksPath
 
-# 9. Global scope test
+# 10. Global scope test
 GLOBAL_STATUS_BEFORE="$("${INSTALLER}" status --scope global || true)"
 [ "$GLOBAL_STATUS_BEFORE" = "not-installed" ] || { echo "FAIL: global status before expected not-installed, got $GLOBAL_STATUS_BEFORE" >&2; exit 1; }
 
@@ -211,7 +261,7 @@ GLOBAL_STATUS_AFTER="$("${INSTALLER}" status --scope global)"
 GLOBAL_STATUS_UNINSTALLED="$("${INSTALLER}" status --scope global || true)"
 [ "$GLOBAL_STATUS_UNINSTALLED" = "not-installed" ] || { echo "FAIL: global status uninstalled expected not-installed, got $GLOBAL_STATUS_UNINSTALLED" >&2; exit 1; }
 
-# 10. Non-blocking error handling and surfaced capture failures
+# 11. Non-blocking error handling and surfaced capture failures
 BROKEN_HOOK_DIR="${TEST_TMP}/broken-hook-dir"
 mkdir -p "$BROKEN_HOOK_DIR"
 "${INSTALLER}" render "/nonexistent/path/commit-meta.sh" "/nonexistent/path/keeper" > "${BROKEN_HOOK_DIR}/post-commit"
