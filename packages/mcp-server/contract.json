@@ -156,7 +156,7 @@
     }
   },
   "prompts": {
-    "obsidian_ask": {
+    "ask_vault_librarian": {
       "status": "mvp",
       "serverModel": false,
       "scope": "vault:read",
@@ -169,10 +169,10 @@
       "semantics": "Return workflow prompt for session-end intent inference, decision extraction, and structured note filing."
     },
     "reorganize_vault": {
-      "status": "mvp",
+      "status": "excluded-from-mcp-mvp",
       "serverModel": false,
       "scope": "vault:admin",
-      "semantics": "Return workflow prompt for vault structure analysis, MOC promotion, and proposed reorg plans requiring user approval."
+      "semantics": "Existing plugin workflow only until an explicit approval and write contract exist."
     }
   },
   "writes": {

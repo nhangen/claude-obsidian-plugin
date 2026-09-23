@@ -1,10 +1,11 @@
 {
   "mcpServers": {
     "obsidian": {
-      "command": "npx",
-      "args": ["-y", "@nhangen/obsidian-mcp"],
+      "command": "/absolute/path/to/node_modules/.bin/claude-obsidian-mcp",
+      "args": [],
       "env": {
-        "OBSIDIAN_LOCAL_MD": "${XDG_CONFIG_HOME:-$HOME/.config}/claude-obsidian/obsidian.local.md"
+        "OBSIDIAN_LOCAL_MD": "/absolute/path/to/obsidian.local.md",
+        "MCP_REPOSITORY_ROOTS": "/absolute/path/to/repository"
       }
     }
   }

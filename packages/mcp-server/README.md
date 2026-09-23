@@ -37,6 +37,10 @@ launcher and explicit configuration boundaries:
 }
 ```
 
+The manifest examples use `/absolute/path/to/` as an explicit placeholder. Replace
+that prefix with the absolute path to the installed package before importing the
+manifest; clients must not expand shell variables or rely on an inherited `PATH`.
+
 The client invokes the package command rather than a file inside the package;
 configuration and repository authorization remain explicit environment values.
 Installed packages authorize no repository roots when `MCP_REPOSITORY_ROOTS`
@@ -85,8 +89,12 @@ The taxonomy resource returns only the project-taxonomy table. Tool arguments
 are validated inside the handlers so invalid input uses the stable structured
 error contract instead of leaking SDK validation text.
 
+The read-only `ask_vault_librarian` and `summarize_session` prompts are exposed
+to clients with `vault:read`. The admin-only `reorganize_vault` workflow remains
+outside the MCP MVP until an explicit approval and write contract exists.
+
 The machine-readable contract is [`contract.json`](contract.json). Its fixture
 cases are in [`test/fixtures/contract-fixtures.json`](test/fixtures/contract-fixtures.json)
 and are checked by `test/contract.test.mjs`.
 
-Prompts, legacy HTTP+SSE, and writes remain explicitly gated in the contract.
+Admin prompts, legacy HTTP+SSE, and writes remain explicitly gated in the contract.

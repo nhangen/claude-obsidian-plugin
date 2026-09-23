@@ -187,6 +187,26 @@ test("authenticated Streamable HTTP is read-only and enforces transport boundari
   });
   assert.equal(queryCredential.status, 400);
 
+  const repositoryOnlyToken = token({ scope: "repo:read" });
+  const repositoryOnlyInitialized = await fetch(`${url}/mcp`, {
+    method: "POST",
+    headers: requestHeaders(url, repositoryOnlyToken),
+    body: JSON.stringify(initializeRequest(11)),
+  });
+  assert.equal(repositoryOnlyInitialized.status, 200);
+  const repositoryOnlySessionId = repositoryOnlyInitialized.headers.get("mcp-session-id");
+  assert.ok(repositoryOnlySessionId);
+
+  const deniedPrompts = await fetch(`${url}/mcp`, {
+    method: "POST",
+    headers: requestHeaders(url, repositoryOnlyToken, {
+      "MCP-Protocol-Version": "2025-11-25",
+      "Mcp-Session-Id": repositoryOnlySessionId,
+    }),
+    body: JSON.stringify({ jsonrpc: "2.0", id: 12, method: "prompts/list", params: {} }),
+  });
+  assert.equal(deniedPrompts.status, 403);
+
   const initialized = await fetch(`${url}/mcp`, {
     method: "POST",
     headers: requestHeaders(url, validToken),
@@ -206,6 +226,15 @@ test("authenticated Streamable HTTP is read-only and enforces transport boundari
   assert.equal(listed.status, 200);
   const toolNames = (await listed.json()).result.tools.map((tool) => tool.name).sort();
   assert.deepEqual(toolNames, ["obsidian_commit_meta", "obsidian_find_notes"]);
+
+  const prompts = await fetch(`${url}/mcp`, {
+    method: "POST",
+    headers: requestHeaders(url, validToken, { "MCP-Protocol-Version": "2025-11-25", "Mcp-Session-Id": sessionId }),
+    body: JSON.stringify({ jsonrpc: "2.0", id: 21, method: "prompts/list", params: {} }),
+  });
+  assert.equal(prompts.status, 200);
+  const promptNames = (await prompts.json()).result.prompts.map((prompt) => prompt.name).sort();
+  assert.deepEqual(promptNames, ["ask_vault_librarian", "summarize_session"]);
 
   const search = await fetch(`${url}/mcp`, {
     method: "POST",

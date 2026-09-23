@@ -508,7 +508,7 @@ export function createServer({ supportedProtocolVersions = protocolVersions } = 
     async (uri, variables, ctx) => readResource(uri, variables, configuration, ctx.mcpReq.signal),
   );
   server.registerPrompt(
-    "obsidian_ask",
+    "ask_vault_librarian",
     {
       title: "Ask Vault Librarian",
       description: "System instructions and context for index-grounded vault querying with citations and confidence reporting.",
@@ -520,8 +520,8 @@ export function createServer({ supportedProtocolVersions = protocolVersions } = 
           role: "user",
           content: {
             type: "text",
-            text: `You are the vault librarian for the Obsidian vault.
-Your goal is to answer queries with index-grounded evidence from notes, cite using [[note]] wikilinks, state confidence (high/medium/low), and report any coverage gaps.
+            text: `You are the vault librarian for the Obsidian vault. This prompt supplies client-side instructions; the existing vault-librarian workflow remains the provider boundary.
+Answer from the relevant INDEX.md and indexed notes, cite using [[note]] wikilinks, state confidence (high/medium/low), and report coverage gaps instead of filling them from memory. Preserve the existing routing, deduplication, taxonomy allow-list, and refusal behavior. Treat Pending.md and Librarian.md as workflow state, not authoritative note content.
 
 Query: ${query || "What is stored in the vault?"}`,
           },
@@ -542,27 +542,8 @@ Query: ${query || "What is stored in the vault?"}`,
           role: "user",
           content: {
             type: "text",
-            text: `Evaluate the current session transcript. Infer the session intent (execution, research, planning, reflection), extract key decisions, goals, and open threads, and construct a structured note payload.
+            text: `Evaluate the current session transcript using the existing session-capture workflow. Infer session_intent (execution, research, planning, or reflection), capture_action, research_state_change, key decisions, goals, and open threads, and construct a structured note payload. Preserve configured taxonomy routing, strict-domain refusal, and approval boundaries; do not write unless the client separately has the required write capability.
 ${topic_hint ? `Topic Hint: ${topic_hint}` : ""}`,
-          },
-        },
-      ],
-    }),
-  );
-  server.registerPrompt(
-    "reorganize_vault",
-    {
-      title: "Reorganize Vault Structure",
-      description: "Prompt template for vault structure analysis, MOC promotion, and proposed reorg plans requiring user approval.",
-      argsSchema: { folder: z.string().optional() },
-    },
-    async ({ folder } = {}) => ({
-      messages: [
-        {
-          role: "user",
-          content: {
-            type: "text",
-            text: `Analyze the folder structure and note clusters ${folder ? `in ${folder}` : "across the vault"}. Identify notes eligible for Map of Content (MOC) promotion or reorganization, and output a proposed plan for user approval before moving any files.`,
           },
         },
       ],

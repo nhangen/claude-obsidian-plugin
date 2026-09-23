@@ -35,14 +35,22 @@ test("pins the initial read-only tool surface", () => {
   assert.deepEqual(fixtures.toolCalls.map(({ name }) => name), Object.keys(contract.tools));
 });
 
-test("keeps future resources, prompts, and writes gated", () => {
+test("pins read prompts and keeps admin prompts and writes gated", () => {
+  assert.deepEqual(contract.protocol.transports.compatibilityOnly, ["http+sse"]);
+  assert.deepEqual(contract.protocol.transports.planned, []);
   assert.ok(Object.values(contract.resources).every((resource) => resource.status === "mvp"));
   assert.deepEqual(
     fixtures.resources.map(({ uri }) => uri),
     ["obsidian://taxonomy", "obsidian://daily/2026-09-20", "obsidian://librarian", "obsidian://pending"],
   );
-  assert.equal(contract.prompts.obsidian_ask.serverModel, false);
-  assert.equal(contract.prompts.reorganize_vault.status, "mvp");
+  assert.deepEqual(Object.keys(contract.prompts), ["ask_vault_librarian", "summarize_session", "reorganize_vault"]);
+  assert.equal(contract.prompts.ask_vault_librarian.status, "mvp");
+  assert.equal(contract.prompts.ask_vault_librarian.serverModel, false);
+  assert.equal(contract.prompts.ask_vault_librarian.scope, "vault:read");
+  assert.equal(contract.prompts.summarize_session.status, "mvp");
+  assert.equal(contract.prompts.summarize_session.scope, "vault:read");
+  assert.equal(contract.prompts.reorganize_vault.status, "excluded-from-mcp-mvp");
+  assert.equal(contract.prompts.reorganize_vault.scope, "vault:admin");
   assert.equal(contract.writes.mvp, false);
   assert.deepEqual(contract.writes.statuses, fixtures.writeStatuses);
   assert.ok(fixtures.errors.every(({ isError }) => isError === true));

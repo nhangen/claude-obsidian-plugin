@@ -127,10 +127,10 @@ test("stdio server lists prompts via prompts/list", async (t) => {
   assert.equal(promptList.jsonrpc, "2.0");
   assert.equal(promptList.id, 2);
   const promptNames = promptList.result.prompts.map((p) => p.name).sort();
-  assert.deepEqual(promptNames, ["obsidian_ask", "reorganize_vault", "summarize_session"]);
+  assert.deepEqual(promptNames, ["ask_vault_librarian", "summarize_session"]);
 });
 
-test("stdio server returns prompt content via prompts/get for obsidian_ask", async (t) => {
+test("stdio server returns prompt content via prompts/get for ask_vault_librarian", async (t) => {
   const { root, configPath } = await createFixtureVault();
   const server = startStdioServer(configPath);
 
@@ -152,12 +152,46 @@ test("stdio server returns prompt content via prompts/get for obsidian_ask", asy
     jsonrpc: "2.0",
     id: 2,
     method: "prompts/get",
-    params: { name: "obsidian_ask", arguments: { query: "recent decisions" } },
+    params: { name: "ask_vault_librarian", arguments: { query: "recent decisions" } },
   }, 2);
 
   assert.equal(promptGet.jsonrpc, "2.0");
   assert.equal(promptGet.id, 2);
   assert.ok(promptGet.result.messages.length > 0);
   assert.ok(promptGet.result.messages[0].content.text.includes("vault librarian"));
+  assert.ok(promptGet.result.messages[0].content.text.includes("INDEX.md"));
+  assert.ok(promptGet.result.messages[0].content.text.includes("deduplication"));
+  assert.ok(promptGet.result.messages[0].content.text.includes("Pending.md"));
   assert.ok(promptGet.result.messages[0].content.text.includes("recent decisions"));
+});
+
+test("stdio server refuses the admin-only reorganize_vault prompt", async (t) => {
+  const { root, configPath } = await createFixtureVault();
+  const server = startStdioServer(configPath);
+
+  t.after(async () => {
+    if (!server.child.killed) server.child.stdin.end();
+    await once(server.child, "close").catch(() => {});
+    await rm(root, { recursive: true, force: true });
+  });
+
+  await server.request({
+    jsonrpc: "2.0",
+    id: 1,
+    method: "initialize",
+    params: { protocolVersion: "2025-11-25", capabilities: {}, clientInfo: { name: "test", version: "1.0" } },
+  }, 1);
+  server.notification({ jsonrpc: "2.0", method: "notifications/initialized" });
+
+  const promptGet = await server.request({
+    jsonrpc: "2.0",
+    id: 2,
+    method: "prompts/get",
+    params: { name: "reorganize_vault", arguments: {} },
+  }, 2);
+
+  assert.equal(promptGet.jsonrpc, "2.0");
+  assert.equal(promptGet.id, 2);
+  assert.equal(promptGet.error?.code, -32602);
+  assert.match(promptGet.error?.message ?? "", /Prompt .* not found/);
 });
