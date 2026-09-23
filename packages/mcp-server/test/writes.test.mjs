@@ -476,8 +476,10 @@ test("stdio recovers an insert when the keeper dies after writing the note", asy
   t.after(async () => {
     for (const server of [crashServer, recoveryServer]) {
       if (!server) continue;
-      if (!server.child.killed) server.child.stdin.end();
-      await once(server.child, "close").catch(() => {});
+      if (server.child.exitCode === null) {
+        server.child.stdin.end();
+        await once(server.child, "close").catch(() => {});
+      }
     }
     await rm(root, { recursive: true, force: true });
   });
@@ -529,8 +531,10 @@ test("stdio recovers an append when the keeper dies after writing the section", 
   t.after(async () => {
     for (const server of [crashServer, recoveryServer]) {
       if (!server) continue;
-      if (!server.child.killed) server.child.stdin.end();
-      await once(server.child, "close").catch(() => {});
+      if (server.child.exitCode === null) {
+        server.child.stdin.end();
+        await once(server.child, "close").catch(() => {});
+      }
     }
     await rm(root, { recursive: true, force: true });
   });
@@ -573,6 +577,76 @@ test("stdio recovers an append when the keeper dies after writing the section", 
   assert.equal(recovered.result.structuredContent.status, "skipped");
   const note = await readFile(join(vaultPath, "Daily", "2026-09-23.md"), "utf8");
   assert.equal(note.match(/^## Crash Append$/gm)?.length, 1);
+});
+
+test("stdio does not skip a pending append that matches content from another key", async (t) => {
+  const { root, vaultPath, configPath } = await createFixtureVault();
+  const firstServer = startStdioServer(configPath);
+  let crashServer;
+  let recoveryServer;
+  t.after(async () => {
+    for (const server of [firstServer, crashServer, recoveryServer]) {
+      if (!server) continue;
+      if (server.child.exitCode === null) {
+        server.child.stdin.end();
+        await once(server.child, "close").catch(() => {});
+      }
+    }
+    await rm(root, { recursive: true, force: true });
+  });
+
+  await firstServer.request({
+    jsonrpc: "2.0", id: 1, method: "initialize",
+    params: { protocolVersion: "2025-11-25", capabilities: {}, clientInfo: { name: "test", version: "1.0" } },
+  }, 1);
+  firstServer.notification({ jsonrpc: "2.0", method: "notifications/initialized" });
+  const first = await firstServer.request({
+    jsonrpc: "2.0", id: 2, method: "tools/call",
+    params: {
+      name: "obsidian_daily_append",
+      arguments: { content: "Same content", section: "## Same Section", date: "2026-09-23", idempotency_key: "other-key", request_id: "other-request" },
+    },
+  }, 2);
+  assert.equal(first.result.isError, false);
+  assert.equal(first.result.structuredContent.status, "committed");
+  firstServer.child.stdin.end();
+  await once(firstServer.child, "close");
+
+  crashServer = startStdioServer(configPath, { KEEPER_FAULT_INJECT: "before_append", KEEPER_FAULT_MODE: "crash" });
+  await crashServer.request({
+    jsonrpc: "2.0", id: 3, method: "initialize",
+    params: { protocolVersion: "2025-11-25", capabilities: {}, clientInfo: { name: "test", version: "1.0" } },
+  }, 3);
+  crashServer.notification({ jsonrpc: "2.0", method: "notifications/initialized" });
+  const crashed = await crashServer.request({
+    jsonrpc: "2.0", id: 4, method: "tools/call",
+    params: {
+      name: "obsidian_daily_append",
+      arguments: { content: "Same content", section: "## Same Section", date: "2026-09-23", idempotency_key: "new-key", request_id: "new-request" },
+    },
+  }, 4);
+  assert.equal(crashed.result.isError, true);
+  assert.equal(JSON.parse(crashed.result.content[0].text).status, "partial");
+  crashServer.child.stdin.end();
+  await once(crashServer.child, "close");
+
+  recoveryServer = startStdioServer(configPath);
+  await recoveryServer.request({
+    jsonrpc: "2.0", id: 5, method: "initialize",
+    params: { protocolVersion: "2025-11-25", capabilities: {}, clientInfo: { name: "test", version: "1.0" } },
+  }, 5);
+  recoveryServer.notification({ jsonrpc: "2.0", method: "notifications/initialized" });
+  const recovered = await recoveryServer.request({
+    jsonrpc: "2.0", id: 6, method: "tools/call",
+    params: {
+      name: "obsidian_daily_append",
+      arguments: { content: "Same content", section: "## Same Section", date: "2026-09-23", idempotency_key: "new-key", request_id: "new-retry" },
+    },
+  }, 6);
+  assert.equal(recovered.result.isError, false);
+  assert.equal(recovered.result.structuredContent.status, "committed");
+  const note = await readFile(join(vaultPath, "Daily", "2026-09-23.md"), "utf8");
+  assert.equal(note.match(/^## Same Section$/gm)?.length, 2);
 });
 
 test("stdio timeout and cancellation never report false write success and keep same-key retry safe", async (t) => {
