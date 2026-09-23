@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "obsidian-vault": {
+      "command": "npx",
+      "args": ["-y", "@nhangen/obsidian-mcp"],
+      "env": {
+        "OBSIDIAN_LOCAL_MD": "${XDG_CONFIG_HOME:-$HOME/.config}/claude-obsidian/obsidian.local.md"
+      }
+    }
+  }
+}

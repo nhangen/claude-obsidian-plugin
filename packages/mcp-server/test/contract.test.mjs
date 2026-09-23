@@ -42,7 +42,7 @@ test("keeps future resources, prompts, and writes gated", () => {
     ["obsidian://taxonomy", "obsidian://daily/2026-09-20", "obsidian://librarian", "obsidian://pending"],
   );
   assert.equal(contract.prompts.obsidian_ask.serverModel, false);
-  assert.equal(contract.prompts.reorganize_vault.status, "excluded-from-mcp-mvp");
+  assert.equal(contract.prompts.reorganize_vault.status, "mvp");
   assert.equal(contract.writes.mvp, false);
   assert.deepEqual(contract.writes.statuses, fixtures.writeStatuses);
   assert.ok(fixtures.errors.every(({ isError }) => isError === true));

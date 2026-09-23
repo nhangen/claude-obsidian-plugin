@@ -157,16 +157,22 @@
   },
   "prompts": {
     "obsidian_ask": {
-      "status": "planned-client-side",
+      "status": "mvp",
       "serverModel": false,
       "scope": "vault:read",
-      "semantics": "Return bounded context for the client to apply its own prompt flow."
+      "semantics": "Return bounded context and instructions for index-grounded vault querying with citations and confidence reporting."
+    },
+    "summarize_session": {
+      "status": "mvp",
+      "serverModel": false,
+      "scope": "vault:read",
+      "semantics": "Return workflow prompt for session-end intent inference, decision extraction, and structured note filing."
     },
     "reorganize_vault": {
-      "status": "excluded-from-mcp-mvp",
+      "status": "mvp",
       "serverModel": false,
       "scope": "vault:admin",
-      "semantics": "Existing plugin workflow only until an explicit approval and write contract exist."
+      "semantics": "Return workflow prompt for vault structure analysis, MOC promotion, and proposed reorg plans requiring user approval."
     }
   },
   "writes": {
