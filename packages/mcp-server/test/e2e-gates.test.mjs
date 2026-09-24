@@ -283,6 +283,7 @@ fi
   assert.equal(firstOut.recovery.required, true);
   assert.equal(firstOut.recovery.action, "retry");
   assert.equal(firstOut.retryable, true);
+  assert.match(await readFile(join(vault, "Inbox", "FaultNote.md"), "utf8"), /Fault body/);
 
   child.stdin.write(`${JSON.stringify({
     jsonrpc: "2.0", id: 3, method: "tools/call",
