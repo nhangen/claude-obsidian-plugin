@@ -1,11 +1,11 @@
 import assert from "node:assert/strict";
-import { chmod, copyFile, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { access, cp, mkdir, mkdtemp, readFile, readdir, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
 import { test } from "node:test";
-import { createHmac } from "node:crypto";
+import { createHash, createHmac } from "node:crypto";
 
 const packageRoot = resolve(dirname(new URL(import.meta.url).pathname), "..");
 const stdioEntrypoint = join(packageRoot, "dist", "stdio.mjs");
@@ -55,8 +55,11 @@ function collect(child) {
 
 async function createFixtureVault() {
   const root = await mkdtemp(join(tmpdir(), "obsidian-mcp-e2e-gates-"));
+  const installPath = join(root, "install");
   const vaultPath = join(root, "vault");
   const cachePath = join(root, "cache");
+  await cp(join(packageRoot, "dist"), join(installPath, "dist"), { recursive: true });
+  await symlink(join(packageRoot, "node_modules"), join(installPath, "node_modules"), "dir");
   await mkdir(join(vaultPath, "Daily"), { recursive: true });
   await mkdir(join(vaultPath, "Inbox"), { recursive: true });
   await mkdir(cachePath, { recursive: true });
@@ -65,11 +68,19 @@ async function createFixtureVault() {
 
   const configPath = join(root, "config.yaml");
   await writeFile(configPath, `---\nvault_path: ${vaultPath}\ndaily_path: Daily/\nfrontmatter_required: tags type\nkeeper_host_priority: ml-1 mbp\n---\n`);
-  return { root, vaultPath, cachePath, configPath };
+  return {
+    root,
+    vaultPath,
+    cachePath,
+    configPath,
+    keeperPath: join(installPath, "dist", "helpers", "keeper"),
+    stdioPath: join(installPath, "dist", "stdio.mjs"),
+    httpPath: join(installPath, "dist", "http.mjs"),
+  };
 }
 
-function startStdioServer(configPath, cachePath, extraEnv = {}) {
-  const child = spawn(process.execPath, [stdioEntrypoint], {
+function startStdioServer(configPath, cachePath, extraEnv = {}, entrypoint = stdioEntrypoint) {
+  const child = spawn(process.execPath, [entrypoint], {
     cwd: tmpdir(),
     env: { ...process.env, OBSIDIAN_LOCAL_MD: configPath, XDG_CACHE_HOME: cachePath, MCP_REPOSITORY_ROOTS: repositoryRoot, ...extraEnv },
     stdio: ["pipe", "pipe", "pipe"],
@@ -88,8 +99,8 @@ function startStdioServer(configPath, cachePath, extraEnv = {}) {
   return { child, next, initPromise };
 }
 
-function startHttpServer(configPath, cachePath) {
-  const child = spawn(process.execPath, [httpEntrypoint], {
+function startHttpServer(configPath, cachePath, extraEnv = {}, entrypoint = httpEntrypoint) {
+  const child = spawn(process.execPath, [entrypoint], {
     cwd: tmpdir(),
     env: {
       ...process.env,
@@ -102,6 +113,7 @@ function startHttpServer(configPath, cachePath) {
       MCP_HTTP_JWT_AUDIENCE: audience,
       MCP_HTTP_ALLOWED_HOSTS: "127.0.0.1,localhost",
       MCP_HTTP_ALLOWED_ORIGINS: "https://allowed.example",
+      ...extraEnv,
     },
     stdio: ["ignore", "pipe", "pipe"],
   });
@@ -127,212 +139,384 @@ function startHttpServer(configPath, cachePath) {
   return { child, ready };
 }
 
-test("MCP write tools handle watcher and tick background contention cleanly with disk verification", async (t) => {
-  const { root, vaultPath, cachePath, configPath } = await createFixtureVault();
-  const server = startStdioServer(configPath, cachePath);
+function responseOutcome(response) {
+  return response.result.structuredContent ?? JSON.parse(response.result.content[0].text);
+}
 
-  t.after(async () => {
-    if (server.child.exitCode === null) server.child.stdin.end();
-    await once(server.child, "close").catch(() => {});
-    await rm(root, { recursive: true, force: true });
+function assertSuccessOutcome(outcome, expected) {
+  assert.deepEqual(outcome, {
+    status: expected.status,
+    request_id: expected.requestId,
+    idempotency_key: expected.idempotencyKey,
+    path: expected.path,
+    affected_paths: expected.affectedPaths,
+    warnings: [],
+    recovery: { required: false, action: "" },
+    error_code: null,
+    retryable: false,
   });
+}
 
-  await server.initPromise;
+function assertFailureOutcome(outcome, expected) {
+  assert.deepEqual(outcome, {
+    code: expected.errorCode,
+    detail: expected.detail,
+    status: expected.status,
+    request_id: expected.requestId,
+    idempotency_key: expected.idempotencyKey,
+    path: expected.path,
+    affected_paths: expected.affectedPaths,
+    warnings: expected.warnings ?? [],
+    recovery: {
+      required: expected.recoveryRequired,
+      action: expected.recoveryAction,
+    },
+    error_code: expected.errorCode,
+    retryable: expected.retryable,
+  });
+}
 
-  const tickScript = join(repositoryRoot, "scripts", "vaultkeeper-tick.sh");
-  const tickChild = spawn("bash", [tickScript], {
-    env: { ...process.env, OBSIDIAN_LOCAL_MD: configPath, XDG_CACHE_HOME: cachePath, VAULTKEEPER_HOST: "ml-1" },
+async function initializeHttp(server, id) {
+  const baseUrl = await server.ready;
+  const headers = {
+    "content-type": "application/json",
+    accept: "application/json, text/event-stream",
+    origin: "https://allowed.example",
+    authorization: `Bearer ${jwtToken()}`,
+  };
+  const response = await fetch(`${baseUrl}/mcp`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({
+      jsonrpc: "2.0",
+      id,
+      method: "initialize",
+      params: { protocolVersion: "2025-11-25", capabilities: {}, clientInfo: { name: "e2e-gate", version: "1" } },
+    }),
+  });
+  assert.equal(response.status, 200);
+  const sessionId = response.headers.get("mcp-session-id");
+  assert.ok(sessionId);
+  return { baseUrl, headers: { ...headers, "mcp-session-id": sessionId } };
+}
+
+async function httpToolCall(session, id, name, args) {
+  const response = await fetch(`${session.baseUrl}/mcp`, {
+    method: "POST",
+    headers: session.headers,
+    body: JSON.stringify({ jsonrpc: "2.0", id, method: "tools/call", params: { name, arguments: args } }),
+  });
+  assert.equal(response.status, 200);
+  return response.json();
+}
+
+async function waitForPath(path) {
+  const deadline = Date.now() + 3000;
+  while (Date.now() < deadline) {
+    try {
+      await access(path);
+      return;
+    } catch {}
+    await new Promise((resolveWait) => setTimeout(resolveWait, 20));
+  }
+  throw new Error(`timed out waiting for ${path}`);
+}
+
+async function stopChild(child, signal = "SIGTERM") {
+  if (child.exitCode !== null || child.signalCode !== null) return;
+  const closed = once(child, "close");
+  child.kill(signal);
+  await closed;
+}
+
+test("MCP write, packaged keeper producer, and tick serialize on the canonical vault lock", async (t) => {
+  const { root, vaultPath, cachePath, configPath, keeperPath, stdioPath } = await createFixtureVault();
+  const server = startStdioServer(configPath, cachePath, {}, stdioPath);
+  const pauseDir = join(root, "tick-pause");
+  await mkdir(pauseDir);
+  const section = "## a1b2c3d4 — contended hook capture";
+  const target = "Daily/2026-09-26.md";
+  const sharedArgs = {
+    content: "Contended hook body",
+    section,
+    date: "2026-09-26",
+    skip_if_hash: "a1b2c3d4",
+    idempotency_key: "key-contended-hook",
+  };
+  const tickChild = spawn("bash", [join(repositoryRoot, "scripts", "vaultkeeper-tick.sh")], {
+    env: {
+      ...process.env,
+      OBSIDIAN_LOCAL_MD: configPath,
+      XDG_CACHE_HOME: cachePath,
+      VAULTKEEPER_HOST: "ml-1",
+      KEEPER_TEST_PAUSE_POINT: "after_lock_owner",
+      KEEPER_TEST_PAUSE_DIR: pauseDir,
+    },
     stdio: "ignore",
   });
+  const tickClosed = once(tickChild, "close");
+  let producerStdout = "";
+  let producerStderr = "";
+  let producer;
 
-  const id1 = 2;
-  server.child.stdin.write(`${JSON.stringify({
-    jsonrpc: "2.0", id: id1, method: "tools/call",
-    params: {
-      name: "obsidian_keeper_save",
-      arguments: { title: "ContendedNote", body: "Body text for contended note", idempotency_key: "key-contended-1", request_id: "req-contended-1" },
-    },
-  })}\n`);
-
-  const id2 = 3;
-  server.child.stdin.write(`${JSON.stringify({
-    jsonrpc: "2.0", id: id2, method: "tools/call",
-    params: {
-      name: "obsidian_daily_append",
-      arguments: { content: "- [ ] Contended task", section: "## Tasks", idempotency_key: "key-contended-2", request_id: "req-contended-2" },
-    },
-  })}\n`);
-
-  const [res1, res2] = await Promise.all([server.next(id1), server.next(id2)]);
-  await once(tickChild, "close").catch(() => {});
-
-  assert.equal(res1.result.isError, false);
-  assert.equal(res2.result.isError, false);
-
-  const saveOut = JSON.parse(res1.result.content[0].text);
-  assert.equal(saveOut.status, "committed");
-  assert.equal(saveOut.request_id, "req-contended-1");
-  assert.equal(saveOut.idempotency_key, "key-contended-1");
-  assert.equal(saveOut.path, "Inbox/ContendedNote.md");
-
-  const appendOut = JSON.parse(res2.result.content[0].text);
-  assert.ok(["committed", "skipped"].includes(appendOut.status));
-  assert.equal(appendOut.request_id, "req-contended-2");
-  assert.equal(appendOut.idempotency_key, "key-contended-2");
-
-  const noteOnDisk = await readFile(join(vaultPath, "Inbox", "ContendedNote.md"), "utf8");
-  assert.ok(noteOnDisk.includes("Body text for contended note"));
-});
-
-test("stdio and HTTP servers enforce path containment and reject symlink traversal write attempts", async (t) => {
-  const { root, vaultPath, cachePath, configPath } = await createFixtureVault();
-  const outsideFile = join(root, "outside-secret.txt");
-  await writeFile(outsideFile, "SECRET_DATA");
-
-  const symlinkInside = join(vaultPath, "escaped.md");
-  await symlink(outsideFile, symlinkInside);
-
-  const server = startStdioServer(configPath, cachePath);
   t.after(async () => {
+    if (producer?.exitCode === null) await stopChild(producer, "SIGKILL");
+    if (tickChild.exitCode === null) await stopChild(tickChild, "SIGKILL");
     if (server.child.exitCode === null) server.child.stdin.end();
-    await once(server.child, "close").catch(() => {});
+    if (server.child.exitCode === null) await once(server.child, "close").catch(() => {});
     await rm(root, { recursive: true, force: true });
   });
 
   await server.initPromise;
+  await waitForPath(join(pauseDir, "ready"));
+  const lockHash = createHash("sha256").update(await realpath(vaultPath)).digest("hex");
+  const lockPath = join("/tmp", `claude-obsidian-keeper-${process.getuid()}`, `${lockHash}.lock`);
+  assert.equal((await readFile(lockPath, "utf8")).split("\n", 1)[0], String(tickChild.pid));
+  assert.equal(tickChild.exitCode, null);
 
-  const idEscapeTitle = 2;
+  producer = spawn("bash", [
+    keeperPath,
+    "append",
+    "--vault", vaultPath,
+    "--target", target,
+    "--section", section,
+    "--skip-if-hash", "a1b2c3d4",
+    "--request-id", "req-contended-hook",
+    "--idempotency-key", sharedArgs.idempotency_key,
+    "--format", "json",
+  ], {
+    env: process.env,
+    stdio: ["pipe", "pipe", "pipe"],
+  });
+  producer.stdout.setEncoding("utf8");
+  producer.stderr.setEncoding("utf8");
+  producer.stdout.on("data", (chunk) => { producerStdout += chunk; });
+  producer.stderr.on("data", (chunk) => { producerStderr += chunk; });
+  const producerClosed = once(producer, "close");
+  producer.stdin.end(sharedArgs.content);
+
+  const id = 2;
   server.child.stdin.write(`${JSON.stringify({
-    jsonrpc: "2.0", id: idEscapeTitle, method: "tools/call",
+    jsonrpc: "2.0", id, method: "tools/call",
     params: {
-      name: "obsidian_keeper_save",
-      arguments: { title: "../outside-secret", body: "overwrite attempt", idempotency_key: "key-escape-1", request_id: "req-escape-1" },
+      name: "obsidian_daily_append",
+      arguments: { ...sharedArgs, request_id: "req-contended-mcp" },
     },
   })}\n`);
-  const resEscapeTitle = await server.next(idEscapeTitle);
-  assert.equal(resEscapeTitle.result.isError, true);
-  const outEscapeTitle = JSON.parse(resEscapeTitle.result.content[0].text);
-  assert.equal(outEscapeTitle.code, "PATH_INVALID");
+  const mcpResponse = server.next(id);
 
-  const secretContent = await readFile(outsideFile, "utf8");
-  assert.equal(secretContent, "SECRET_DATA");
+  await writeFile(join(pauseDir, "continue"), "continue\n");
+  const [mcpResult, producerClose, tickClose] = await Promise.all([
+    mcpResponse,
+    producerClosed,
+    tickClosed,
+  ]);
+
+  assert.deepEqual(producerClose, [0, null], producerStderr);
+  const producerOutcome = JSON.parse(producerStdout);
+  const mcpOutcome = responseOutcome(mcpResult);
+  assert.deepEqual([producerOutcome.status, mcpOutcome.status].sort(), ["committed", "skipped"]);
+  assertSuccessOutcome(producerOutcome, {
+    status: producerOutcome.status,
+    requestId: "req-contended-hook",
+    idempotencyKey: sharedArgs.idempotency_key,
+    path: target,
+    affectedPaths: [target],
+  });
+  assert.equal(mcpResult.result.isError, false);
+  assertSuccessOutcome(mcpOutcome, {
+    status: mcpOutcome.status,
+    requestId: "req-contended-mcp",
+    idempotencyKey: sharedArgs.idempotency_key,
+    path: target,
+    affectedPaths: [target],
+  });
+  assert.deepEqual(tickClose, [0, null]);
+
+  const noteOnDisk = await readFile(join(vaultPath, target), "utf8");
+  assert.equal(noteOnDisk.match(/^## a1b2c3d4 — contended hook capture$/gm)?.length, 1);
+  assert.equal(noteOnDisk.match(/^Contended hook body$/gm)?.length, 1);
+});
+
+test("HTTP packaged entrypoint rejects a target swapped to a symlink after validation", async (t) => {
+  const { root, vaultPath, cachePath, configPath, httpPath } = await createFixtureVault();
+  const pauseDir = join(root, "target-prepare-pause");
+  const outsideFile = join(root, "outside-secret.txt");
+  const targetPath = join(vaultPath, "Daily", "2026-09-30.md");
+  await mkdir(pauseDir);
+  await writeFile(outsideFile, "SECRET_DATA");
+  const httpServer = startHttpServer(configPath, cachePath, {
+    KEEPER_TEST_PAUSE_POINT: "after_target_prepare",
+    KEEPER_TEST_PAUSE_DIR: pauseDir,
+  }, httpPath);
+  t.after(async () => {
+    await stopChild(httpServer.child);
+    await rm(root, { recursive: true, force: true });
+  });
+
+  const http = await initializeHttp(httpServer, 10);
+  const call = httpToolCall(http, 11, "obsidian_daily_append", {
+    content: "must remain inside the vault",
+    section: "## Symlink race",
+    date: "2026-09-30",
+    idempotency_key: "key-symlink-race",
+    request_id: "req-symlink-race",
+  });
+  await waitForPath(join(pauseDir, "ready"));
+  await symlink(outsideFile, targetPath);
+  await writeFile(join(pauseDir, "continue"), "continue\n");
+  const httpResponse = await call;
+  assert.equal(httpResponse.result.isError, true);
+  assertFailureOutcome(JSON.parse(httpResponse.result.content[0].text), {
+    status: "failed",
+    requestId: "req-symlink-race",
+    idempotencyKey: "key-symlink-race",
+    path: "Daily/2026-09-30.md",
+    affectedPaths: ["Daily/2026-09-30.md"],
+    errorCode: "WRITE_FAILED",
+    detail: "write failed",
+    recoveryRequired: true,
+    recoveryAction: "retry with the same idempotency_key",
+    retryable: true,
+  });
+
+  assert.equal(await readFile(outsideFile, "utf8"), "SECRET_DATA");
 });
 
 test("stdio server handles simulated partial write fault injection and idempotently recovers", async (t) => {
-  const fixture = await mkdtemp(join(tmpdir(), "mcp-fault-injection-"));
-  const install = join(fixture, "install");
-  const helperRoot = join(install, "dist", "helpers");
-  const vault = join(fixture, "vault");
-  const cache = join(fixture, "cache");
-  const config = join(fixture, "obsidian.local.md");
-  await mkdir(join(helperRoot, "lib"), { recursive: true });
-  await mkdir(join(vault, "Inbox"), { recursive: true });
-  await mkdir(cache, { recursive: true });
-  await copyFile(join(packageRoot, "dist", "stdio.mjs"), join(install, "dist", "stdio.mjs"));
-  await copyFile(join(packageRoot, "dist", "helpers", "lib", "resolve-config.sh"), join(helperRoot, "lib", "resolve-config.sh"));
-  await symlink(join(packageRoot, "node_modules"), join(install, "node_modules"), "dir");
-  await writeFile(config, `---\nvault_path: ${vault}\ndaily_path: Daily/\n---\n`);
-
-  const faultScript = join(helperRoot, "keeper");
-  await writeFile(faultScript, `#!/usr/bin/env bash
-if [ -f "${fixture}/simulated-fault-triggered" ]; then
-  printf '{"status":"committed","request_id":"request-fault-1","idempotency_key":"fault-key-1","path":"Inbox/FaultNote.md","affected_paths":["Inbox/FaultNote.md","Inbox/INDEX.md"],"warnings":[],"recovery":{"required":false,"action":""},"error_code":null,"retryable":false}\\n'
-  exit 0
-else
-  touch "${fixture}/simulated-fault-triggered"
-  printf '{"status":"partial","request_id":"request-fault-1","idempotency_key":"fault-key-1","path":"Inbox/FaultNote.md","affected_paths":["Inbox/FaultNote.md"],"warnings":["INDEX update pending"],"recovery":{"required":true,"action":"retry"},"error_code":"PARTIAL","retryable":true}\\n'
-  exit 2
-fi
-`);
-  await chmod(faultScript, 0o755);
-
-  const child = spawn(process.execPath, [join(install, "dist", "stdio.mjs")], {
-    cwd: fixture,
-    env: { ...process.env, OBSIDIAN_LOCAL_MD: config, XDG_CACHE_HOME: cache },
-    stdio: ["pipe", "pipe", "pipe"],
-  });
-  const next = collect(child);
+  const { root, vaultPath, cachePath, configPath, stdioPath } = await createFixtureVault();
+  const server = startStdioServer(configPath, cachePath, {
+    KEEPER_FAULT_INJECT: "after_note",
+    KEEPER_FAULT_MODE: "crash",
+  }, stdioPath);
 
   t.after(async () => {
-    if (child.exitCode === null) child.stdin.end();
-    await once(child, "close").catch(() => {});
-    await rm(fixture, { recursive: true, force: true });
+    if (server.child.exitCode === null) server.child.stdin.end();
+    await once(server.child, "close").catch(() => {});
+    await rm(root, { recursive: true, force: true });
   });
 
-  child.stdin.write(`${JSON.stringify({
-    jsonrpc: "2.0", id: 1, method: "initialize",
-    params: { protocolVersion: "2025-11-25", capabilities: {}, clientInfo: { name: "test", version: "1" } },
-  })}\n`);
-  await next(1);
-  child.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" })}\n`);
+  await server.initPromise;
 
-  child.stdin.write(`${JSON.stringify({
+  server.child.stdin.write(`${JSON.stringify({
     jsonrpc: "2.0", id: 2, method: "tools/call",
     params: {
       name: "obsidian_keeper_save",
       arguments: { title: "FaultNote", body: "Fault body", idempotency_key: "fault-key-1", request_id: "request-fault-1" },
     },
   })}\n`);
-  const firstRes = await next(2);
+  const firstRes = await server.next(2);
   assert.equal(firstRes.result.isError, true);
   const firstOut = JSON.parse(firstRes.result.content[0].text);
-  assert.equal(firstOut.status, "partial");
-  assert.equal(firstOut.request_id, "request-fault-1");
-  assert.equal(firstOut.idempotency_key, "fault-key-1");
-  assert.equal(firstOut.error_code, "PARTIAL");
-  assert.equal(firstOut.recovery.required, true);
-  assert.equal(firstOut.recovery.action, "retry");
-  assert.equal(firstOut.retryable, true);
-  assert.match(await readFile(join(vault, "Inbox", "FaultNote.md"), "utf8"), /Fault body/);
+  assertFailureOutcome(firstOut, {
+    status: "partial",
+    requestId: "request-fault-1",
+    idempotencyKey: "fault-key-1",
+    path: "Inbox/FaultNote.md",
+    affectedPaths: ["Inbox/FaultNote.md", "Inbox/INDEX.md"],
+    warnings: ["keeper result was missing or invalid"],
+    errorCode: "KEEPER_PROTOCOL_ERROR",
+    detail: "keeper result contract failed",
+    recoveryRequired: true,
+    recoveryAction: "verify affected_paths, then retry with the same idempotency_key",
+    retryable: true,
+  });
+  assert.equal(await readFile(join(vaultPath, "Inbox", "FaultNote.md"), "utf8"), "Fault body");
+  await assert.rejects(access(join(vaultPath, "Inbox", "INDEX.md")));
 
-  child.stdin.write(`${JSON.stringify({
+  server.child.stdin.write(`${JSON.stringify({
     jsonrpc: "2.0", id: 3, method: "tools/call",
     params: {
       name: "obsidian_keeper_save",
-      arguments: { title: "FaultNote", body: "Fault body", idempotency_key: "fault-key-1", request_id: "request-fault-1" },
+      arguments: { title: "FaultNote", body: "Fault body", idempotency_key: "fault-key-1", request_id: "request-fault-1-retry" },
     },
   })}\n`);
-  const retryRes = await next(3);
+  const retryRes = await server.next(3);
   assert.equal(retryRes.result.isError, false);
-  const retryOut = JSON.parse(retryRes.result.content[0].text);
-  assert.equal(retryOut.status, "committed");
-  assert.equal(retryOut.request_id, "request-fault-1");
-  assert.equal(retryOut.idempotency_key, "fault-key-1");
-  assert.equal(retryOut.recovery.required, false);
-  assert.equal(retryOut.retryable, false);
+  assertSuccessOutcome(responseOutcome(retryRes), {
+    status: "committed",
+    requestId: "request-fault-1-retry",
+    idempotencyKey: "fault-key-1",
+    path: "Inbox/FaultNote.md",
+    affectedPaths: ["Inbox/FaultNote.md", "Inbox/INDEX.md"],
+  });
+  assert.equal(await readFile(join(vaultPath, "Inbox", "FaultNote.md"), "utf8"), "Fault body");
+  const index = await readFile(join(vaultPath, "Inbox", "INDEX.md"), "utf8");
+  assert.equal(index, "# Inbox Index\n- [[Inbox/FaultNote]]\n");
+});
+
+test("HTTP packaged entrypoint reports and recovers an after-index partial with a fresh request ID", async (t) => {
+  const { root, vaultPath, cachePath, configPath, httpPath } = await createFixtureVault();
+  const servers = [];
+  t.after(async () => {
+    await Promise.all(servers.map((server) => stopChild(server.child)));
+    await rm(root, { recursive: true, force: true });
+  });
+
+  const faultServer = startHttpServer(configPath, cachePath, { KEEPER_FAULT_INJECT: "after_index" }, httpPath);
+  servers.push(faultServer);
+  const faultHttp = await initializeHttp(faultServer, 20);
+  const firstResponse = await httpToolCall(faultHttp, 21, "obsidian_keeper_save", {
+    title: "AfterIndexFault",
+    body: "Complete note body",
+    idempotency_key: "fault-after-index-key",
+    request_id: "fault-after-index-first",
+  });
+  assert.equal(firstResponse.result.isError, true);
+  assertFailureOutcome(JSON.parse(firstResponse.result.content[0].text), {
+    status: "partial",
+    requestId: "fault-after-index-first",
+    idempotencyKey: "fault-after-index-key",
+    path: "Inbox/AfterIndexFault.md",
+    affectedPaths: ["Inbox/AfterIndexFault.md", "Inbox/INDEX.md"],
+    errorCode: "PARTIAL",
+    detail: "partial write occurred",
+    recoveryRequired: true,
+    recoveryAction: "retry with the same idempotency_key",
+    retryable: true,
+  });
+  assert.equal(await readFile(join(vaultPath, "Inbox", "AfterIndexFault.md"), "utf8"), "Complete note body");
+  assert.equal(await readFile(join(vaultPath, "Inbox", "INDEX.md"), "utf8"), "# Inbox Index\n- [[Inbox/AfterIndexFault]]\n");
+
+  await stopChild(faultServer.child);
+  const recoveryServer = startHttpServer(configPath, cachePath, {}, httpPath);
+  servers.push(recoveryServer);
+  const recoveryHttp = await initializeHttp(recoveryServer, 22);
+  const retryResponse = await httpToolCall(recoveryHttp, 23, "obsidian_keeper_save", {
+    title: "AfterIndexFault",
+    body: "Complete note body",
+    idempotency_key: "fault-after-index-key",
+    request_id: "fault-after-index-retry",
+  });
+  assert.equal(retryResponse.result.isError, false);
+  assertSuccessOutcome(responseOutcome(retryResponse), {
+    status: "committed",
+    requestId: "fault-after-index-retry",
+    idempotencyKey: "fault-after-index-key",
+    path: "Inbox/AfterIndexFault.md",
+    affectedPaths: ["Inbox/AfterIndexFault.md", "Inbox/INDEX.md"],
+  });
+  assert.equal(await readFile(join(vaultPath, "Inbox", "AfterIndexFault.md"), "utf8"), "Complete note body");
+  assert.equal(await readFile(join(vaultPath, "Inbox", "INDEX.md"), "utf8"), "# Inbox Index\n- [[Inbox/AfterIndexFault]]\n");
+  assert.deepEqual((await readdir(join(vaultPath, "Inbox"))).sort(), [".INDEX.state", "AfterIndexFault.md", "INDEX.md"]);
 });
 
 test("concurrent insert tool calls resolve to one commit and one explicit conflict with Streamable HTTP transport coverage", async (t) => {
-  const { root, cachePath, configPath } = await createFixtureVault();
-  const server = startStdioServer(configPath, cachePath);
-  const httpServer = startHttpServer(configPath, cachePath);
+  const { root, vaultPath, cachePath, configPath, stdioPath, httpPath } = await createFixtureVault();
+  const server = startStdioServer(configPath, cachePath, {}, stdioPath);
+  const httpServer = startHttpServer(configPath, cachePath, {}, httpPath);
 
   t.after(async () => {
     if (server.child.exitCode === null) server.child.stdin.end();
-    if (httpServer.child.exitCode === null) httpServer.child.kill();
-    await once(server.child, "close").catch(() => {});
+    await Promise.all([
+      server.child.exitCode === null ? once(server.child, "close").catch(() => {}) : Promise.resolve(),
+      stopChild(httpServer.child),
+    ]);
     await rm(root, { recursive: true, force: true });
   });
 
   await server.initPromise;
-  const baseUrl = await httpServer.ready;
-
-  const token = jwtToken({ scope: "vault:read repo:read vault:write" });
-  const httpInitRes = await fetch(`${baseUrl}/mcp`, {
-    method: "POST",
-    headers: {
-      "content-type": "application/json",
-      accept: "application/json, text/event-stream",
-      origin: "https://allowed.example",
-      authorization: `Bearer ${token}`,
-    },
-    body: JSON.stringify({
-      jsonrpc: "2.0", id: 10, method: "initialize",
-      params: { protocolVersion: "2025-11-25", capabilities: {}, clientInfo: { name: "http-test", version: "1" } },
-    }),
-  });
-  const sessionId = httpInitRes.headers.get("mcp-session-id");
-  assert.ok(sessionId, `HTTP init failed with status ${httpInitRes.status}`);
+  const http = await initializeHttp(httpServer, 10);
 
   const id1 = 2;
   const id2 = 3;
@@ -345,26 +529,14 @@ test("concurrent insert tool calls resolve to one commit and one explicit confli
     },
   })}\n`);
 
-  const httpCallPromise = fetch(`${baseUrl}/mcp`, {
-    method: "POST",
-    headers: {
-      "content-type": "application/json",
-      accept: "application/json, text/event-stream",
-      origin: "https://allowed.example",
-      authorization: `Bearer ${token}`,
-      "mcp-session-id": sessionId,
-    },
-    body: JSON.stringify({
-      jsonrpc: "2.0", id: id2, method: "tools/call",
-      params: {
-        name: "obsidian_keeper_save",
-        arguments: { title: "SharedTarget", body: "Body 2", idempotency_key: "key-insert-race-b", request_id: "req-race-b" },
-      },
-    }),
+  const httpCallPromise = httpToolCall(http, id2, "obsidian_keeper_save", {
+    title: "SharedTarget",
+    body: "Body 2",
+    idempotency_key: "key-insert-race-b",
+    request_id: "req-race-b",
   });
 
-  const [res1, httpRes] = await Promise.all([server.next(id1), httpCallPromise]);
-  const httpJson = await httpRes.json();
+  const [res1, httpJson] = await Promise.all([server.next(id1), httpCallPromise]);
 
   const outcome1 = { isError: res1.result.isError, data: JSON.parse(res1.result.content[0].text) };
   const outcome2 = { isError: httpJson.result.isError, data: JSON.parse(httpJson.result.content[0].text) };
@@ -375,7 +547,37 @@ test("concurrent insert tool calls resolve to one commit and one explicit confli
 
   assert.equal(committed.length, 1);
   assert.equal(conflict.length, 1);
+  assert.equal(committed[0].isError, false);
   assert.equal(conflict[0].isError, true);
-  assert.equal(conflict[0].data.retryable, false);
-  assert.equal(conflict[0].data.recovery.required, false);
+  const expectedByRequest = {
+    "req-race-a": { idempotencyKey: "key-insert-race-a", body: "Body 1" },
+    "req-race-b": { idempotencyKey: "key-insert-race-b", body: "Body 2" },
+  };
+  const committedExpected = expectedByRequest[committed[0].data.request_id];
+  const conflictExpected = expectedByRequest[conflict[0].data.request_id];
+  assert.ok(committedExpected);
+  assert.ok(conflictExpected);
+  assertSuccessOutcome(committed[0].data, {
+    status: "committed",
+    requestId: committed[0].data.request_id,
+    idempotencyKey: committedExpected.idempotencyKey,
+    path: "Inbox/SharedTarget.md",
+    affectedPaths: ["Inbox/SharedTarget.md", "Inbox/INDEX.md"],
+  });
+  assertFailureOutcome(conflict[0].data, {
+    status: "conflict",
+    requestId: conflict[0].data.request_id,
+    idempotencyKey: conflictExpected.idempotencyKey,
+    path: "Inbox/SharedTarget.md",
+    affectedPaths: ["Inbox/SharedTarget.md", "Inbox/INDEX.md"],
+    errorCode: "CONFLICT",
+    detail: "write conflict",
+    recoveryRequired: false,
+    recoveryAction: "",
+    retryable: false,
+  });
+
+  assert.equal(await readFile(join(vaultPath, "Inbox", "SharedTarget.md"), "utf8"), committedExpected.body);
+  const index = await readFile(join(vaultPath, "Inbox", "INDEX.md"), "utf8");
+  assert.equal(index, "# Inbox Index\n- [[Inbox/SharedTarget]]\n");
 });

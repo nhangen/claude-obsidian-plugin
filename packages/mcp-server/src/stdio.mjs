@@ -64,7 +64,7 @@ function codedError(code, detail, outcome) {
 function childEnvironment() {
   const allowed = [
     "PATH", "HOME", "XDG_CONFIG_HOME", "OBSIDIAN_LOCAL_MD", "CLAUDE_PLUGIN_ROOT", "LANG", "LC_ALL", "MCP_GIT_MARKER",
-    "KEEPER_FAULT_INJECT", "KEEPER_FAULT_MODE",
+    "KEEPER_FAULT_INJECT", "KEEPER_FAULT_MODE", "KEEPER_TEST_PAUSE_POINT", "KEEPER_TEST_PAUSE_DIR",
   ];
   return Object.fromEntries(allowed.filter((key) => process.env[key] !== undefined).map((key) => [key, process.env[key]]));
 }
