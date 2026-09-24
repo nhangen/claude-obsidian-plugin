@@ -16,7 +16,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CONFIG="$(resolve_obsidian_config "${CLAUDE_PLUGIN_ROOT:-${ROOT%/scripts}}")" || {
   echo "vaultkeeper: no config; run /obsidian:setup" >&2; exit 0; }
 
-cfg_val() { grep "^$1:" "$CONFIG" | head -1 | sed "s/^$1: *//"; }
+cfg_val() { grep "^$1:" "$CONFIG" 2>/dev/null | head -1 | sed "s/^$1: *//" || true; }
 VAULT="$(cfg_val vault_path)"
 [ -n "$VAULT" ] && [ -d "$VAULT" ] || { echo "vaultkeeper: vault not found: $VAULT" >&2; exit 0; }
 

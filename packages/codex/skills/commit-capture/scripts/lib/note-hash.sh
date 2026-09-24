@@ -71,6 +71,13 @@ keeper_test_pause() {
   while [ ! -e "$dir/continue" ]; do sleep 0.01; done
 }
 
+keeper_test_signal_waiter() {
+  local dir="${KEEPER_TEST_WAIT_DIR:-}"
+  [ -n "$dir" ] || return 0
+  mkdir -p "$dir" || return 1
+  : > "$dir/$$"
+}
+
 keeper_lock_acquire() {
   local key="$1" root lock candidate start now owner owner_token age stale reap token published reaped_owner reaped_token lock_kind
   local timeout="${KEEPER_LOCK_TIMEOUT_SECONDS:-30}"
@@ -120,6 +127,10 @@ keeper_lock_acquire() {
       sleep 0.05
       continue
     fi
+    keeper_test_signal_waiter || {
+      rm -f "$candidate" 2>/dev/null || true
+      return 1
+    }
     now="$(now_epoch)"
     age=0
     if [ "$lock_kind" = dir ] || [ "$lock_kind" = file ]; then
