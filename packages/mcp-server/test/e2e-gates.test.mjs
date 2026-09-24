@@ -222,18 +222,41 @@ async function waitForPath(path) {
   throw new Error(`timed out waiting for ${path}`);
 }
 
-async function stopChild(child, signal = "SIGTERM") {
+async function waitForWaiters(path, count) {
+  const deadline = Date.now() + 3000;
+  while (Date.now() < deadline) {
+    const waiters = await readdir(path);
+    if (waiters.length >= count) return waiters;
+    await new Promise((resolveWait) => setTimeout(resolveWait, 20));
+  }
+  throw new Error(`timed out waiting for ${count} waiters in ${path}`);
+}
+
+async function stopChild(child, signal = "SIGTERM", timeoutMs = 500) {
   if (child.exitCode !== null || child.signalCode !== null) return;
   const closed = once(child, "close");
   child.kill(signal);
-  await closed;
+  let forceKill;
+  if (signal !== "SIGKILL") {
+    forceKill = setTimeout(() => {
+      if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
+    }, timeoutMs);
+    forceKill.unref();
+  }
+  try {
+    await closed;
+  } finally {
+    if (forceKill) clearTimeout(forceKill);
+  }
 }
 
 test("MCP write, packaged keeper producer, and tick serialize on the canonical vault lock", async (t) => {
   const { root, vaultPath, cachePath, configPath, keeperPath, stdioPath } = await createFixtureVault();
-  const server = startStdioServer(configPath, cachePath, {}, stdioPath);
+  const waitDir = join(root, "lock-waiters");
+  const server = startStdioServer(configPath, cachePath, { KEEPER_TEST_WAIT_DIR: waitDir }, stdioPath);
   const pauseDir = join(root, "tick-pause");
   await mkdir(pauseDir);
+  await mkdir(waitDir);
   const section = "## a1b2c3d4 — contended hook capture";
   const target = "Daily/2026-09-26.md";
   const sharedArgs = {
@@ -262,8 +285,7 @@ test("MCP write, packaged keeper producer, and tick serialize on the canonical v
   t.after(async () => {
     if (producer?.exitCode === null) await stopChild(producer, "SIGKILL");
     if (tickChild.exitCode === null) await stopChild(tickChild, "SIGKILL");
-    if (server.child.exitCode === null) server.child.stdin.end();
-    if (server.child.exitCode === null) await once(server.child, "close").catch(() => {});
+    await stopChild(server.child);
     await rm(root, { recursive: true, force: true });
   });
 
@@ -285,7 +307,7 @@ test("MCP write, packaged keeper producer, and tick serialize on the canonical v
     "--idempotency-key", sharedArgs.idempotency_key,
     "--format", "json",
   ], {
-    env: process.env,
+    env: { ...process.env, KEEPER_TEST_WAIT_DIR: waitDir },
     stdio: ["pipe", "pipe", "pipe"],
   });
   producer.stdout.setEncoding("utf8");
@@ -305,6 +327,15 @@ test("MCP write, packaged keeper producer, and tick serialize on the canonical v
   })}\n`);
   const mcpResponse = server.next(id);
 
+  const producerWaiter = join(waitDir, String(producer.pid));
+  await waitForPath(producerWaiter);
+  const waiters = await waitForWaiters(waitDir, 2);
+  assert.equal(waiters.length, 2);
+  assert.ok(waiters.includes(String(producer.pid)));
+  const mcpWaiter = waiters.find((waiter) => waiter !== String(producer.pid));
+  assert.ok(mcpWaiter);
+  await access(producerWaiter);
+  await access(join(waitDir, mcpWaiter));
   await writeFile(join(pauseDir, "continue"), "continue\n");
   const [mcpResult, producerClose, tickClose] = await Promise.all([
     mcpResponse,
@@ -391,8 +422,7 @@ test("stdio server handles simulated partial write fault injection and idempoten
   }, stdioPath);
 
   t.after(async () => {
-    if (server.child.exitCode === null) server.child.stdin.end();
-    await once(server.child, "close").catch(() => {});
+    await stopChild(server.child);
     await rm(root, { recursive: true, force: true });
   });
 
@@ -507,9 +537,8 @@ test("concurrent insert tool calls resolve to one commit and one explicit confli
   const httpServer = startHttpServer(configPath, cachePath, {}, httpPath);
 
   t.after(async () => {
-    if (server.child.exitCode === null) server.child.stdin.end();
     await Promise.all([
-      server.child.exitCode === null ? once(server.child, "close").catch(() => {}) : Promise.resolve(),
+      stopChild(server.child),
       stopChild(httpServer.child),
     ]);
     await rm(root, { recursive: true, force: true });
