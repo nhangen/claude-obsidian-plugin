@@ -466,15 +466,15 @@ grep -q '"error_code":"IDEMPOTENCY_CONFLICT"' "$TMP/idempotent-conflict.json" \
   || fail "idempotency conflict omitted stable error code"
 
 cat > "$V/Daily/idempotent-existing.md" <<'EOF'
-## abc123 — existing
+## abc1234 — existing
 
 already captured
 EOF
 printf 'same skipped body\n' > "$TMP/idempotent-skip-body.md"
 for request_id in skip-request-1 skip-request-2; do
   bash "$KEEPER" append --vault "$V" --target "Daily/idempotent-existing.md" \
-    --section '## abc123 — existing' --body-file "$TMP/idempotent-skip-body.md" \
-    --skip-if-hash abc123 --request-id "$request_id" --idempotency-key keeper-skip-key \
+    --section '## abc1234 — existing' --body-file "$TMP/idempotent-skip-body.md" \
+    --skip-if-hash abc1234 --request-id "$request_id" --idempotency-key keeper-skip-key \
     --format json > "$TMP/$request_id.json" \
     || fail "same-key existing-section replay returned partial"
   grep -q '"status":"skipped"' "$TMP/$request_id.json" \

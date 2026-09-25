@@ -354,23 +354,28 @@ function emptyWriteOutcome(requestId, idempotencyKey, path, affectedPaths) {
   };
 }
 
-function failedWriteOutcome(fallback, errorCode, detail, parsed, recoverable = false) {
+function failedWriteOutcome(fallback, errorCode, detail, parsed, recoverable = false, ambiguous = false) {
   if (parsed && ["partial", "conflict", "failed"].includes(parsed.status)) {
     return { ...parsed, warnings: [...parsed.warnings, detail] };
   }
-  const recoveryRequired = recoverable || errorCode === "SUBPROCESS_TIMEOUT" || errorCode === "CANCELLED";
+  const outcomeIsAmbiguous = ambiguous
+    || ["SUBPROCESS_TIMEOUT", "SUBPROCESS_OUTPUT_LIMIT", "CANCELLED"].includes(errorCode);
+  const warnings = [...fallback.warnings, detail];
+  if (outcomeIsAmbiguous && !recoverable) {
+    warnings.push("write may have committed; verify affected_paths before any manual retry");
+  }
   return {
     ...fallback,
     status: recoverable ? "partial" : "failed",
-    warnings: [...fallback.warnings, detail],
+    warnings,
     recovery: {
-      required: recoveryRequired,
-      action: recoveryRequired
+      required: recoverable,
+      action: recoverable
         ? "verify affected_paths, then retry with the same idempotency_key"
         : "",
     },
     error_code: errorCode,
-    retryable: recoveryRequired,
+    retryable: recoverable,
   };
 }
 
@@ -496,7 +501,7 @@ async function executeKeeperWrite(args, bodyContent, signal, fallback) {
           const recoverable = Boolean(fallback.idempotency_key);
           const errorCode = recoverable ? "KEEPER_PROTOCOL_ERROR" : "WRITE_FAILED";
           const detail = recoverable ? "keeper result was missing or invalid" : "keeper process failed";
-          const outcome = failedWriteOutcome(fallback, errorCode, detail, undefined, recoverable);
+          const outcome = failedWriteOutcome(fallback, errorCode, detail, undefined, recoverable, true);
           finish(reject, codedError(errorCode, recoverable ? detail : error.message, outcome));
         }
       });
@@ -507,26 +512,31 @@ async function executeKeeperWrite(args, bodyContent, signal, fallback) {
         } catch {}
         if (stopping) {
           const errorCode = stopError?.code || "WRITE_FAILED";
-          const detail = errorCode === "CANCELLED" ? "request cancelled" : "keeper write timed out";
-          const outcome = failedWriteOutcome(fallback, errorCode, detail, parsed);
+          const detail = errorCode === "CANCELLED"
+            ? "request cancelled"
+            : errorCode === "SUBPROCESS_OUTPUT_LIMIT"
+              ? "keeper exceeded output limit"
+              : "keeper write timed out";
+          const recoverable = Boolean(fallback.idempotency_key);
+          const outcome = failedWriteOutcome(fallback, errorCode, detail, parsed, recoverable, true);
           finish(reject, codedError(errorCode, detail, outcome));
           return;
         }
         if (!parsed) {
           const recoverable = Boolean(fallback.idempotency_key);
-          const outcome = failedWriteOutcome(fallback, "KEEPER_PROTOCOL_ERROR", "keeper result was missing or invalid", undefined, recoverable);
+          const outcome = failedWriteOutcome(fallback, "KEEPER_PROTOCOL_ERROR", "keeper result was missing or invalid", undefined, recoverable, true);
           finish(reject, codedError("KEEPER_PROTOCOL_ERROR", "keeper result was missing or invalid", outcome));
           return;
         }
         if (parsed.request_id !== fallback.request_id || parsed.idempotency_key !== fallback.idempotency_key) {
           const recoverable = Boolean(fallback.idempotency_key);
-          const outcome = failedWriteOutcome(fallback, "KEEPER_PROTOCOL_ERROR", "keeper result did not match the request identity", undefined, recoverable);
+          const outcome = failedWriteOutcome(fallback, "KEEPER_PROTOCOL_ERROR", "keeper result did not match the request identity", undefined, recoverable, true);
           finish(reject, codedError("KEEPER_PROTOCOL_ERROR", "keeper result did not match the request identity", outcome));
           return;
         }
         if (!compatibleKeeperExit(code, parsed)) {
           const recoverable = Boolean(fallback.idempotency_key);
-          const outcome = failedWriteOutcome(fallback, "KEEPER_PROTOCOL_ERROR", "keeper result contradicted its exit status", undefined, recoverable);
+          const outcome = failedWriteOutcome(fallback, "KEEPER_PROTOCOL_ERROR", "keeper result contradicted its exit status", undefined, recoverable, true);
           finish(reject, codedError("KEEPER_PROTOCOL_ERROR", "keeper result contradicted its exit status", outcome));
           return;
         }
@@ -549,8 +559,8 @@ async function keeperSave({ title, body, folder_hint, type, links, idempotency_k
 
   let formattedBody = body;
   const headerLines = [];
-  if (type) headerLines.push(`type: ${type}`);
-  if (links && links.length > 0) headerLines.push(`links: ${links.join(", ")}`);
+  if (type) headerLines.push(`type: ${JSON.stringify(type)}`);
+  if (links && links.length > 0) headerLines.push(`links: ${JSON.stringify(links.join(", "))}`);
   if (headerLines.length > 0) {
     formattedBody = `---\n${headerLines.join("\n")}\n---\n\n${body}`;
   }
@@ -753,21 +763,22 @@ const writeOutput = z.strictObject({
 
 const searchInput = z.strictObject({ query: z.string().trim().min(1).max(240) });
 const metadataInput = z.strictObject({ repository: z.string().trim().min(1).max(maxRepositoryPathCharacters) });
+const safeText = (max) => z.string().max(max).refine((value) => !/[\u0000-\u001F\u007F]/.test(value), "control characters are not allowed");
 const keeperSaveInput = z.strictObject({
-  title: z.string().trim().min(1).max(240),
+  title: safeText(240).trim().min(1),
   body: z.string().min(1).max(65536),
-  folder_hint: z.string().max(1024).optional(),
-  type: z.string().max(100).optional(),
-  links: z.array(z.string()).max(20).optional(),
+  folder_hint: safeText(1024).optional(),
+  type: safeText(100).optional(),
+  links: z.array(safeText(2048)).max(20).optional(),
   idempotency_key: z.string().min(1).max(240).regex(/^[A-Za-z0-9._:-]+$/).optional(),
   request_id: z.string().min(1).max(240).regex(/^[A-Za-z0-9._:-]+$/).optional(),
 });
 
 const dailyAppendInput = z.strictObject({
   content: z.string().min(1).max(65536),
-  section: z.string().max(240).optional(),
+  section: safeText(240).optional(),
   date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
-  skip_if_hash: z.string().regex(/^[0-9a-fA-F]+$/).optional(),
+  skip_if_hash: z.string().min(7).max(64).regex(/^[0-9a-fA-F]+$/).optional(),
   idempotency_key: z.string().min(1).max(240).regex(/^[A-Za-z0-9._:-]+$/).optional(),
   request_id: z.string().min(1).max(240).regex(/^[A-Za-z0-9._:-]+$/).optional(),
 });

@@ -33,6 +33,10 @@ KEEPER_RETRYABLE=false
 KEEPER_PENDING_KIND=""
 KEEPER_PENDING_PREIMAGE=""
 KEEPER_PENDING_POSTIMAGE=""
+KEEPER_PENDING_OUTCOME=""
+KEEPER_PENDING_VALUE=""
+KEEPER_DEFER_OUTPUT=0
+KEEPER_PREPARED_TARGET=""
 
 keeper_json_escape() {
   printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g; s//\\r/g; s/	/\\t/g'
@@ -52,10 +56,8 @@ EOF
   printf ']'
 }
 
-keeper_emit_outcome() {
+keeper_print_outcome() {
   local outcome="$1" value="${2:-}" recovery_action
-  [ "${KEEPER_CRASH_AFTER_LOCK:-0}" != 1 ] || return 0
-  KEEPER_OUTCOME_EMITTED=1
   if [ "$KEEPER_FORMAT" = json ]; then
     recovery_action="$KEEPER_RECOVERY_ACTION"
     [ "$outcome" != partial ] || {
@@ -77,6 +79,18 @@ keeper_emit_outcome() {
   fi
 }
 
+keeper_emit_outcome() {
+  local outcome="$1" value="${2:-}"
+  [ "${KEEPER_CRASH_AFTER_LOCK:-0}" != 1 ] || return 0
+  KEEPER_OUTCOME_EMITTED=1
+  if [ "$KEEPER_DEFER_OUTPUT" = 1 ]; then
+    KEEPER_PENDING_OUTCOME="$outcome"
+    KEEPER_PENDING_VALUE="$value"
+    return 0
+  fi
+  keeper_print_outcome "$outcome" "$value"
+}
+
 keeper_die() {
   printf 'keeper: %s\n' "$*" >&2
   [ -n "$KEEPER_ERROR_CODE" ] || KEEPER_ERROR_CODE=WRITE_FAILED
@@ -85,6 +99,14 @@ keeper_die() {
 }
 
 keeper_require_retry() {
+  case "$KEEPER_ERROR_CODE" in
+    PATH_INVALID|INVALID_INPUT|CONFIG_INVALID)
+      KEEPER_RETRYABLE=false
+      KEEPER_RECOVERY_REQUIRED=false
+      KEEPER_RECOVERY_ACTION=""
+      return 0
+      ;;
+  esac
   KEEPER_RETRYABLE=true
   KEEPER_RECOVERY_REQUIRED=true
   if [ -n "$KEEPER_IDEMPOTENCY_KEY" ]; then
@@ -278,6 +300,7 @@ keeper_prepare_target() {
     [ -n "$component" ] && [ "$component" != "." ] || continue
     next="$current/$component"
     if [ -L "$next" ]; then
+      KEEPER_ERROR_CODE=PATH_INVALID
       printf 'keeper: refusing symlink target component: %s\n' "$target" >&2
       return 1
     fi
@@ -295,6 +318,7 @@ keeper_prepare_target() {
   done
   full="$current/$(basename "$target")"
   if [ -L "$full" ]; then
+    KEEPER_ERROR_CODE=PATH_INVALID
     printf 'keeper: refusing symlink target: %s\n' "$target" >&2
     return 1
   fi
@@ -302,12 +326,14 @@ keeper_prepare_target() {
     printf 'keeper: target is not a regular file: %s\n' "$target" >&2
     return 1
   fi
+  KEEPER_PREPARED_TARGET="$full"
   printf '%s\n' "$full"
 }
 
 keeper_commit_staged() {
   local vault="$1" target="$2" expected="$3" tmp="$4" fresh staged_parent
-  fresh="$(keeper_prepare_target "$vault" "$target")" || return 1
+  keeper_prepare_target "$vault" "$target" >/dev/null || return 1
+  fresh="$KEEPER_PREPARED_TARGET"
   [ "$fresh" = "$expected" ] || return 1
   staged_parent="$(cd "$(dirname "$tmp")" 2>/dev/null && pwd -P)" || return 1
   [ "$staged_parent" = "$(dirname "$fresh")" ] || return 1
@@ -350,8 +376,9 @@ _cmd_append_locked() {
   keeper_idempotency_begin "$vault_abs" "$payload_hash" || idem_rc=$?
   [ "$idem_rc" -ne 10 ] || return 0
   [ "$idem_rc" -eq 0 ] || return "$idem_rc"
-  full="$(keeper_prepare_target "$vault_abs" "$target")" \
+  keeper_prepare_target "$vault_abs" "$target" >/dev/null \
     || { keeper_fail_locked "append target is not writable inside the vault"; return 1; }
+  full="$KEEPER_PREPARED_TARGET"
   keeper_test_pause after_target_prepare \
     || { keeper_fail_locked "append target validation pause failed"; return 1; }
 
@@ -483,7 +510,8 @@ cmd_append() {
     case "$skip_hash" in
       '') keeper_die "append: --skip-if-hash requires a value" ;;
       *[!0-9a-fA-F]*) keeper_die "append: --skip-if-hash must be a hex sha: $skip_hash" ;;
-      *) : ;;
+      ???????*) : ;;
+      *) keeper_die "append: --skip-if-hash must be at least 7 hexadecimal characters: $skip_hash" ;;
     esac
   fi
 
@@ -533,7 +561,8 @@ cmd_append() {
 keeper_daily_link_locked() {
   local vault_abs="$1" target="$2" title="$3" sldate="$4" daily_path="$5"
   local daily_rel="$daily_path/$sldate.md" daily ltarget link tmp
-  daily="$(keeper_prepare_target "$vault_abs" "$daily_rel")" || return 1
+  keeper_prepare_target "$vault_abs" "$daily_rel" >/dev/null || return 1
+  daily="$KEEPER_PREPARED_TARGET"
   if [ ! -f "$daily" ]; then
     tmp="$(mktemp "$(dirname "$daily")/.keeper-daily-XXXXXX")" || return 1
     printf -- '---\ndate: %s\ntags: [daily]\n---\n\n# %s\n' "$sldate" "$sldate" > "$tmp" \
@@ -564,8 +593,9 @@ _cmd_insert_locked() {
   [ "$idem_rc" -ne 10 ] || return 0
   [ "$idem_rc" -eq 0 ] || return "$idem_rc"
   [ "$KEEPER_RECOVERY_REQUIRED" != true ] || recover=1
-  full="$(keeper_prepare_target "$vault_abs" "$target")" \
+  keeper_prepare_target "$vault_abs" "$target" >/dev/null \
     || { keeper_fail_locked "insert target is not writable inside the vault"; return 1; }
+  full="$KEEPER_PREPARED_TARGET"
   folder="$(dirname "$full")"
 
   if [ -e "$full" ]; then

@@ -49,6 +49,8 @@ test("built stdio fails closed on invalid or contradictory keeper results", asyn
   await writeFile(join(helperRoot, "keeper"), `#!/usr/bin/env bash
 case "$*" in
   *empty-key*) exit 0 ;;
+  *missing-output*) exit 0 ;;
+  *overflow-key*) head -c 65537 /dev/zero | tr '\\0' x >&2; exit 1 ;;
   *malformed-key*) printf 'not-json\\n'; exit 0 ;;
   *multiple-key*) printf '%s\\n%s\\n' '{"status":"failed"}' '{"status":"failed"}'; exit 1 ;;
   *unknown-key*) printf '{"status":"mystery"}\\n'; exit 0 ;;
@@ -116,4 +118,35 @@ exit 9
     assert.equal(result.recovery.required, true, idempotencyKey);
     assert.equal(result.retryable, true, idempotencyKey);
   }
+
+  child.stdin.write(`${JSON.stringify({
+    jsonrpc: "2.0", id: 20, method: "tools/call",
+    params: {
+      name: "obsidian_keeper_save",
+      arguments: { title: "Missing Output", body: "Body", request_id: "request-missing-output" },
+    },
+  })}\n`);
+  const missingOutput = await next(20);
+  const missingOutputResult = JSON.parse(missingOutput.result.content[0].text);
+  assert.equal(missingOutput.result.isError, true);
+  assert.equal(missingOutputResult.code, "KEEPER_PROTOCOL_ERROR");
+  assert.equal(missingOutputResult.status, "failed");
+  assert.equal(missingOutputResult.recovery.required, false);
+  assert.equal(missingOutputResult.retryable, false);
+  assert.match(missingOutputResult.warnings.join(" "), /may have committed/);
+
+  child.stdin.write(`${JSON.stringify({
+    jsonrpc: "2.0", id: 21, method: "tools/call",
+    params: {
+      name: "obsidian_keeper_save",
+      arguments: { title: "Output Limit", body: "Body", idempotency_key: "overflow-key", request_id: "request-overflow" },
+    },
+  })}\n`);
+  const overflow = await next(21);
+  const overflowResult = JSON.parse(overflow.result.content[0].text);
+  assert.equal(overflow.result.isError, true);
+  assert.equal(overflowResult.code, "SUBPROCESS_OUTPUT_LIMIT");
+  assert.equal(overflowResult.status, "partial");
+  assert.equal(overflowResult.recovery.required, true);
+  assert.equal(overflowResult.retryable, true);
 });

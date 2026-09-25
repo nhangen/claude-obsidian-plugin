@@ -53,7 +53,9 @@ test("pins tool surface including write tools", () => {
   ]);
   assert.deepEqual(contract.tools.obsidian_daily_append.resultSchema.required, contract.tools.obsidian_keeper_save.resultSchema.required);
   assert.ok(contract.tools.obsidian_keeper_save.errors.includes("KEEPER_PROTOCOL_ERROR"));
+  assert.ok(contract.tools.obsidian_keeper_save.errors.includes("SUBPROCESS_OUTPUT_LIMIT"));
   assert.ok(contract.tools.obsidian_daily_append.errors.includes("CONFIG_INVALID"));
+  assert.equal(contract.tools.obsidian_daily_append.inputSchema.properties.skip_if_hash.minLength, 7);
   assert.deepEqual(fixtures.toolCalls.map(({ name }) => name), Object.keys(contract.tools));
 });
 

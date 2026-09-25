@@ -194,11 +194,18 @@ keeper_with_lock() {
   local key="$1" lock rc
   shift
   lock="$(keeper_lock_acquire "$key")" || return 1
+  KEEPER_DEFER_OUTPUT=1
   if "$@"; then rc=0; else rc=$?; fi
-  keeper_lock_release "$lock" \
-    || printf 'keeper: warning — local write lock release failed; manual cleanup may be required\n' >&2
+  if ! keeper_lock_release "$lock"; then
+    printf 'keeper: warning — local write lock release failed; manual cleanup may be required\n' >&2
+    KEEPER_WARNINGS="${KEEPER_WARNINGS:-}${KEEPER_WARNINGS:+$'\n'}local write lock release failed; manual cleanup may be required"
+  fi
   if [ "${KEEPER_CRASH_AFTER_LOCK:-0}" = 1 ]; then
     kill -KILL "$$"
+  fi
+  KEEPER_DEFER_OUTPUT=0
+  if [ "${KEEPER_OUTCOME_EMITTED:-0}" = 1 ] && type keeper_print_outcome >/dev/null 2>&1; then
+    keeper_print_outcome "$KEEPER_PENDING_OUTCOME" "$KEEPER_PENDING_VALUE"
   fi
   return "$rc"
 }

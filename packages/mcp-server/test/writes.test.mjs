@@ -300,6 +300,8 @@ test("stdio keeper save does not require daily_path", async (t) => {
         title: "No Daily Path",
         body: "Independent keeper save",
         folder_hint: "Inbox",
+        type: 'note: "quoted"',
+        links: ["[[Daily: 2026-09-22]]", "tag: value"],
         idempotency_key: "save-without-daily-path",
       },
     },
@@ -308,7 +310,10 @@ test("stdio keeper save does not require daily_path", async (t) => {
   assert.equal(response.result.isError, false);
   assert.equal(response.result.structuredContent.status, "committed");
   assert.equal(response.result.structuredContent.path, "Inbox/No Daily Path.md");
-  assert.equal(await readFile(join(vaultPath, "Inbox", "No Daily Path.md"), "utf8"), "Independent keeper save");
+  const savedNote = await readFile(join(vaultPath, "Inbox", "No Daily Path.md"), "utf8");
+  assert.ok(savedNote.includes('type: "note: \\"quoted\\""'));
+  assert.ok(savedNote.includes('links: "[[Daily: 2026-09-22]], tag: value"'));
+  assert.match(savedNote, /Independent keeper save/);
 });
 
 test("stdio server executes obsidian_daily_append with skip_if_hash idempotency", async (t) => {
@@ -713,10 +718,37 @@ test("stdio timeout and cancellation never report false write success and keep s
   assert.equal(timedOut.result.isError, true);
   const timeoutOutcome = JSON.parse(timedOut.result.content[0].text);
   assert.equal(timeoutOutcome.code, "SUBPROCESS_TIMEOUT");
-  assert.equal(timeoutOutcome.status, "failed");
+  assert.equal(timeoutOutcome.status, "partial");
   assert.equal(timeoutOutcome.recovery.required, true);
   assert.equal(timeoutOutcome.retryable, true);
   assert.deepEqual(timeoutOutcome.affected_paths, ["Inbox/Timed Out.md", "Inbox/INDEX.md"]);
+  await holder.release();
+
+  const timeoutRetry = await server.request({
+    jsonrpc: "2.0", id: 5, method: "tools/call",
+    params: {
+      name: "obsidian_keeper_save",
+      arguments: { title: "Timed Out", body: "Timeout body", idempotency_key: "timeout-1", request_id: "timeout-retry" },
+    },
+  }, 5);
+  assert.equal(timeoutRetry.result.isError, false);
+  assert.equal(timeoutRetry.result.structuredContent.status, "committed");
+
+  holder = await holdKeeperLock(vaultPath, root, "timeout-keyless");
+  const keylessTimedOut = await server.request({
+    jsonrpc: "2.0", id: 6, method: "tools/call",
+    params: {
+      name: "obsidian_keeper_save",
+      arguments: { title: "Keyless Timeout", body: "Keyless timeout body", request_id: "keyless-timeout" },
+    },
+  }, 6);
+  assert.equal(keylessTimedOut.result.isError, true);
+  const keylessTimeoutOutcome = JSON.parse(keylessTimedOut.result.content[0].text);
+  assert.equal(keylessTimeoutOutcome.code, "SUBPROCESS_TIMEOUT");
+  assert.equal(keylessTimeoutOutcome.retryable, false);
+  assert.equal(keylessTimeoutOutcome.recovery.required, false);
+  assert.equal(keylessTimeoutOutcome.recovery.action, "");
+  assert.match(keylessTimeoutOutcome.warnings.join(" "), /may have committed/);
   await holder.release();
 
   holder = await holdKeeperLock(vaultPath, root, "cancel");
@@ -732,6 +764,7 @@ test("stdio timeout and cancellation never report false write success and keep s
   server.notification({ jsonrpc: "2.0", method: "notifications/cancelled", params: { requestId: 3, reason: "test" } });
   await new Promise((resolveWait) => setTimeout(resolveWait, 150));
   await holder.release();
+  await assert.rejects(access(join(vaultPath, "Inbox", "Cancelled.md")));
 
   const retried = await server.request({
     jsonrpc: "2.0", id: 4, method: "tools/call",
@@ -744,6 +777,27 @@ test("stdio timeout and cancellation never report false write success and keep s
   assert.equal(retried.result.structuredContent.status, "committed");
   assert.match(await readFile(join(vaultPath, "Inbox", "Cancelled.md"), "utf8"), /Cancellation body/);
   await cancelledHandled;
+
+  holder = await holdKeeperLock(vaultPath, root, "cancel-timeout");
+  const timedOutAgain = await server.request({
+    jsonrpc: "2.0", id: 7, method: "tools/call",
+    params: {
+      name: "obsidian_keeper_save",
+      arguments: { title: "Timed Out Again", body: "Timeout body", idempotency_key: "timeout-2", request_id: "timeout-request-2" },
+    },
+  }, 7);
+  assert.equal(timedOutAgain.result.isError, true);
+  assert.equal(JSON.parse(timedOutAgain.result.content[0].text).code, "SUBPROCESS_TIMEOUT");
+  await holder.release();
+  const timeoutRetryAgain = await server.request({
+    jsonrpc: "2.0", id: 8, method: "tools/call",
+    params: {
+      name: "obsidian_keeper_save",
+      arguments: { title: "Timed Out Again", body: "Timeout body", idempotency_key: "timeout-2", request_id: "timeout-retry-2" },
+    },
+  }, 8);
+  assert.equal(timeoutRetryAgain.result.isError, false);
+  assert.equal(timeoutRetryAgain.result.structuredContent.status, "committed");
 });
 
 test("Streamable HTTP transport enforces scope gating on write tools", async (t) => {

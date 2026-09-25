@@ -60,10 +60,11 @@ The HTTP server binds `127.0.0.1:3000` by default. Set `MCP_HTTP_BIND` and
 `MCP_HTTP_PORT` explicitly when needed. Remote deployments must terminate TLS
 in a trusted reverse proxy and restrict network access to the configured bind
 address. Every request requires an HS256 bearer JWT with the exact configured
-issuer and audience, a future `exp`, and either `vault:read` or `repo:read`.
-Vault tools and resources require `vault:read`; repository metadata requires
-`repo:read`. Query strings are rejected, so credentials cannot be supplied in
-URLs.
+issuer and audience, a future `exp`, and a scope accepted by the requested
+surface. Vault tools and resources require `vault:read`; repository metadata
+requires `repo:read`; write tools require `vault:write`. `vault:admin` is
+accepted for authentication but does not expose an additional MCP operation.
+Query strings are rejected, so credentials cannot be supplied in URLs.
 
 `MCP_HTTP_MAX_BODY_BYTES` and `MCP_HTTP_MAX_RESPONSE_BYTES` default to 1 MiB.
 `MCP_HTTP_CONCURRENCY_LIMIT` defaults to 16, and
@@ -93,7 +94,7 @@ error contract instead of leaking SDK validation text.
 and `links`, plus optional `idempotency_key` and `request_id`. Streamable HTTP
 writes require `idempotency_key`; local stdio calls retain keyless compatibility.
 `obsidian_daily_append` accepts `content`, optional `section`, `date`, and
-`skip_if_hash`, plus the same request fields. Daily writes use the configured
+`skip_if_hash` (a 7-64 character hexadecimal commit hash), plus the same request fields. Daily writes use the configured
 `daily_path`, and results report the vault-relative path actually written. MCP
 writes fail with `CONFIG_INVALID` when `daily_path` is absent or invalid; the
 adapter never silently substitutes `Daily/`.
@@ -107,6 +108,8 @@ Reuse an idempotency key only for the same payload. A repeated key and payload
 returns `skipped`; a repeated key with different content returns
 `IDEMPOTENCY_CONFLICT`. After a retryable timeout, cancellation, or partial
 result, inspect `affected_paths` and `recovery`, then retry with the same key.
+Keyless ambiguous failures are not automatically retryable; verify
+`affected_paths` before any manual retry.
 If `recovery.required` remains true, follow its action before changing the key
 or editing affected files manually.
 

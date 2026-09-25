@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { access, copyFile, mkdir, mkdtemp, readFile, readdir, rm, stat, symlink, writeFile } from "node:fs/promises";
+import { access, chmod, copyFile, mkdir, mkdtemp, readFile, readdir, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { spawn } from "node:child_process";
@@ -689,8 +689,8 @@ test("packed stdio and HTTP entrypoints serialize contended keeper writes", asyn
       assert.equal(response.result?.isError, true);
       const outcome = writeOutcome(response);
       assert.equal(outcome.status, "failed");
-      assert.equal(outcome.error_code, "WRITE_FAILED");
-      assert.equal(outcome.retryable, true);
+      assert.equal(outcome.error_code, "PATH_INVALID");
+      assert.equal(outcome.retryable, false);
     }
     assert.deepEqual(await readdir(outside), []);
     server.child.kill("SIGTERM");
@@ -737,6 +737,7 @@ test("source entrypoint uses canonical helpers before a build exists", async (t)
   const sourceDirectory = join(sourcePackage, "src");
   const packagedScriptLibrary = join(sourcePackage, "dist", "helpers", "lib");
   const scriptLibrary = join(sourceRoot, "scripts", "lib");
+  const sourceKeeper = join(sourceRoot, "scripts", "keeper");
   const pluginDirectory = join(sourceRoot, ".claude-plugin");
   const vault = join(fixture, "vault");
   const config = join(fixture, "obsidian.local.md");
@@ -748,6 +749,10 @@ test("source entrypoint uses canonical helpers before a build exists", async (t)
   await copyFile(join(packageRoot, "src", "stdio.mjs"), join(sourceDirectory, "stdio.mjs"));
   await copyFile(join(repositoryRoot, "scripts", "lib", "resolve-config.sh"), join(scriptLibrary, "resolve-config.sh"));
   await copyFile(join(repositoryRoot, "scripts", "lib", "commit-capture-parse.sh"), join(scriptLibrary, "commit-capture-parse.sh"));
+  await copyFile(join(repositoryRoot, "scripts", "lib", "note-hash.sh"), join(scriptLibrary, "note-hash.sh"));
+  await copyFile(join(repositoryRoot, "scripts", "lib", "vault-index.sh"), join(scriptLibrary, "vault-index.sh"));
+  await copyFile(join(repositoryRoot, "scripts", "keeper"), sourceKeeper);
+  await chmod(sourceKeeper, 0o755);
   await copyFile(join(repositoryRoot, "scripts", "commit-meta.sh"), join(sourceRoot, "scripts", "commit-meta.sh"));
   await copyFile(join(repositoryRoot, ".claude-plugin", "plugin.json"), join(pluginDirectory, "plugin.json"));
   await writeFile(join(packagedScriptLibrary, "resolve-config.sh"), "#!/usr/bin/env bash\nexit 91\n");
@@ -793,6 +798,19 @@ test("source entrypoint uses canonical helpers before a build exists", async (t)
   assert.equal(metadata.result?.isError, false);
   assert.equal(metadata.result?.structuredContent?.repository, "local/checkout");
   assert.equal(metadata.result?.structuredContent?.subject, "source fixture");
+  child.stdin.write(`${JSON.stringify({
+    jsonrpc: "2.0",
+    id: 3,
+    method: "tools/call",
+    params: {
+      name: "obsidian_keeper_save",
+      arguments: { title: "Source Keeper", body: "source keeper write", idempotency_key: "source-keeper-1" },
+    },
+  })}\n`);
+  const write = JSON.parse(await output.nextLine());
+  assert.equal(write.id, 3);
+  assert.equal(write.result?.isError, false);
+  assert.match(await readFile(join(vault, "Inbox", "Source Keeper.md"), "utf8"), /source keeper write/);
   await close(child, output);
   assertMcpOutput(output);
 });
