@@ -18,7 +18,7 @@ INPUT=$(cat)
 # --- Quick exit for non-commit commands ---
 
 case "$INPUT" in
-  *'"command"'*commit*) ;;
+  *'"command"'*commit*|*'"command"'*merge*|*'"command"'*rebase*|*'"command"'*cherry-pick*|*'"command"'*revert*) ;;
   *) exit 0 ;;
 esac
 
@@ -186,11 +186,15 @@ if [ "$SNAP_STATE" = "trusted" ] && [ "$HEAD_BEFORE" != "none" ]; then
   # so its parent is what has to be reachable.
   if GIT merge-base --is-ancestor "$HEAD_BEFORE" "$FULL_SHA" >/dev/null 2>&1; then
     RANGE_BASE="$HEAD_BEFORE"
-  elif GIT merge-base --is-ancestor "${HEAD_BEFORE}^" "$FULL_SHA" >/dev/null 2>&1; then
+  elif GIT rev-parse --verify "${HEAD_BEFORE}^" >/dev/null 2>&1 && GIT merge-base --is-ancestor "${HEAD_BEFORE}^" "$FULL_SHA" >/dev/null 2>&1; then
     # …but landing exactly ON that parent is an undo, not a commit.
     BEFORE_PARENT=$(GIT rev-parse "${HEAD_BEFORE}^" 2>/dev/null) || BEFORE_PARENT=""
     [ "$BEFORE_PARENT" != "$FULL_SHA" ] || exit 0
     RANGE_BASE="${HEAD_BEFORE}^"
+  elif [ "$HEAD_BEFORE" != "$FULL_SHA" ]; then
+    # Root commit amend, rebase, or non-ancestor commit: HEAD moved. Leave RANGE_BASE
+    # empty so SHAS="$FULL_SHA" and cc_is_ours below verifies reflog provenance.
+    :
   else
     exit 0
   fi
@@ -257,8 +261,8 @@ cc_is_ours() {
     [ -n "$entry" ] || continue
     case "${entry#* }" in
       commit*) return 0 ;;
-      merge*Fast-forward|pull*Fast-forward) ;;
-      merge*) return 0 ;;
+      merge*Fast-forward|pull*Fast-forward|rebase*Fast-forward|rebase*fast-forward) ;;
+      merge*|rebase*|cherry-pick*|revert*) return 0 ;;
       *) ;;
     esac
   done <<EOF

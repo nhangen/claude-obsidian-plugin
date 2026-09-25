@@ -21,7 +21,7 @@ set -uo pipefail
 INPUT=$(cat)
 
 case "$INPUT" in
-  *'"command"'*commit*) ;;
+  *'"command"'*commit*|*'"command"'*merge*|*'"command"'*rebase*|*'"command"'*cherry-pick*|*'"command"'*revert*) ;;
   *) exit 0 ;;
 esac
 

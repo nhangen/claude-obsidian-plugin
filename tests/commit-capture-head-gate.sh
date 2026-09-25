@@ -916,9 +916,46 @@ case "$POST_OUT" in
   *'repo_name=no-remote '*) : ;;
   *) fail "a remoteless worktree commit did not fall back to the main worktree's name"$'\n'"got: ${POST_OUT:-<empty>}"$'\n'"stderr: $POST_ERR" ;;
 esac
+# --- 25c. an amend of a root commit (repo with 1 commit) is captured ----------
+reset_state
+ROOT_AMEND="$WORK/root-amend-repo"
+mkrepo "$ROOT_AMEND" "git@github.com:nhangen/root-amend-repo.git"
+: > "$ROOT_AMEND/init.txt"
+git -C "$ROOT_AMEND" add init.txt
+git -C "$ROOT_AMEND" commit -q -m "initial root commit"
+P="$(payload 'git commit -q --amend -m "amended root subject"' "$ROOT_AMEND" call-25c)"
+run_pre "$P"
+: > "$ROOT_AMEND/init-amended.txt"
+git -C "$ROOT_AMEND" add init-amended.txt
+git -C "$ROOT_AMEND" commit -q --amend -m "amended root subject"
+run_post_verbose "$P"
 case "$POST_OUT" in
-  *'org_repo=local/no-remote '*) : ;;
-  *) fail "a remoteless worktree commit was filed under the worktree directory"$'\n'"got: $POST_OUT" ;;
+  *hash=*) : ;;
+  *) fail "an amend of a root commit was not captured"$'\n'"got: ${POST_OUT:-<empty>}"$'\n'"stderr: $POST_ERR" ;;
+esac
+case "$POST_OUT" in
+  *'msg=amended root subject'*) : ;;
+  *) fail "the amended root commit record carries the old subject"$'\n'"got: $POST_OUT" ;;
+esac
+
+# --- 27. rebase, cherry-pick, and revert operations are captured -------------
+reset_state
+REBASE_REPO="$WORK/rebase-repo"
+mkrepo "$REBASE_REPO" "git@github.com:nhangen/rebase-repo.git"
+commit_in "$REBASE_REPO" "base commit"
+git -C "$REBASE_REPO" checkout -q -b feat-rebase
+: > "$REBASE_REPO/feat.txt"; git -C "$REBASE_REPO" add feat.txt; git -C "$REBASE_REPO" commit -q -m "feature commit"
+git -C "$REBASE_REPO" checkout -q master
+: > "$REBASE_REPO/master.txt"; git -C "$REBASE_REPO" add master.txt; git -C "$REBASE_REPO" commit -q -m "master commit"
+git -C "$REBASE_REPO" checkout -q feat-rebase
+
+P="$(payload 'git rebase master' "$REBASE_REPO" call-27a)"
+run_pre "$P"
+git -C "$REBASE_REPO" rebase -q master
+run_post_verbose "$P"
+case "$POST_OUT" in
+  *hash=*) : ;;
+  *) fail "a rebase operation was not captured"$'\n'"got: ${POST_OUT:-<empty>}"$'\n'"stderr: $POST_ERR" ;;
 esac
 
 # --- wiring: both halves are registered on Bash ------------------------------
