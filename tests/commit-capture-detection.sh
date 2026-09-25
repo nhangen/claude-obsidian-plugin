@@ -303,4 +303,14 @@ BARE="$(cut -f1 "$TRACE_FILE" | grep -c '^-$' || true)"
 DIRS="$(cut -f1 "$TRACE_FILE" | sort -u | wc -l | tr -d ' ')"
 [ "$DIRS" -eq 1 ] || fail "git was addressed to ${DIRS} different directories in one capture; the repo was resolved more than once and they disagreed"$'\n'"$(cut -f1 "$TRACE_FILE" | sort -u)"
 
+# --- 10. git merge, rebase, cherry-pick, and revert are detected ---------------
+make_git_stub 0 "git@github.com:nhangen/test.git"
+for subcmd in "git merge feature" "git rebase main" "git cherry-pick abc1234" "git revert def5678" ; do
+  OUT="$(run_hook "{\"tool_input\":{\"command\":\"${subcmd}\"},\"tool_response\":{\"stdout\":\"\"}}")"
+  case "$OUT" in
+    *hash=abc1234*) : ;;
+    *) fail "${subcmd} was not detected as a commit-creating command"$'\n'"got: ${OUT:-<empty>}" ;;
+  esac
+done
+
 printf 'ok   commit-capture-detection.sh (quiet commits + host-agnostic org/repo)\n'

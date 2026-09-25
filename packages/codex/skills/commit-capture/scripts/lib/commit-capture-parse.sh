@@ -192,7 +192,7 @@ cc_invokes_commit() {
       [ -n "$args" ] || break
     done
     case "$args" in
-      commit|commit' '*|commit$'\t'*) found=1; break ;;
+      commit|commit' '*|commit$'\t'*|merge|merge' '*|merge$'\t'*|rebase|rebase' '*|rebase$'\t'*|cherry-pick|cherry-pick' '*|cherry-pick$'\t'*|revert|revert' '*|revert$'\t'*) found=1; break ;;
     esac
   done <<EOF
 $segments

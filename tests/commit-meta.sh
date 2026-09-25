@@ -154,4 +154,17 @@ if bash "$CMD" -C "$TMP/plain" >/dev/null 2>"$TMP/err3"; then
 fi
 grep -q 'not a git work tree' "$TMP/err3" || fail "non-repo refusal did not name the cause: $(cat "$TMP/err3")"
 
+# --- 8. root commit returns files without erroring -----------------------------
+ROOT_REPO="$TMP/root-repo"; mkdir -p "$ROOT_REPO"
+git -C "$ROOT_REPO" init -q
+git -C "$ROOT_REPO" config core.hooksPath /dev/null
+git -C "$ROOT_REPO" config user.email t@example.com
+git -C "$ROOT_REPO" config user.name Tester
+git -C "$ROOT_REPO" remote add origin "git@github.com:nhangen/root-repo.git"
+printf 'first file\n' > "$ROOT_REPO/first.txt"; git -C "$ROOT_REPO" add first.txt
+git -C "$ROOT_REPO" commit -q -m 'first commit'
+ROOT_OUT="$(bash "$CMD" -C "$ROOT_REPO" HEAD)"
+[ "$(field "$ROOT_OUT" files)" = "first.txt" ] \
+  || fail "expected files=first.txt for root commit, got: $(field "$ROOT_OUT" files)"
+
 printf 'ok   commit-meta.sh (record for an existing commit; userinfo strip at the second entry point)\n'

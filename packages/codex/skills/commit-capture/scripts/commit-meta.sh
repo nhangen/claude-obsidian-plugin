@@ -59,7 +59,7 @@ GIT rev-parse --is-inside-work-tree >/dev/null 2>&1 \
 HASH="$(GIT rev-parse --short "$REV" 2>/dev/null)" || die "no such commit: $REV"
 MSG="$(GIT log -1 --pretty=format:'%s' "$REV" 2>/dev/null)" || MSG=""
 BRANCH="$(GIT rev-parse --abbrev-ref HEAD 2>/dev/null)" || BRANCH=""
-FILES="$(GIT diff --name-only "${REV}^!" 2>/dev/null | tr '\n' ',' | sed 's/,$//')" || FILES=""
+FILES="$(GIT diff-tree --no-commit-id --name-only -r --root -m --first-parent "$REV" 2>/dev/null | tr '\n' ',' | sed 's/,$//')" || FILES=""
 REMOTE="$(GIT remote get-url origin 2>/dev/null)" || REMOTE=""
 
 # The remote is read here and handed straight to cc_org_repo, which strips
