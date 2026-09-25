@@ -37,11 +37,16 @@ keeper_has_snapshot()  { [ -f "$(keeper_snapshot_file "$1")" ]; }
 keeper_read_snapshot() { local f; f="$(keeper_snapshot_file "$1")"; [ -f "$f" ] && cat "$f" || true; }
 
 keeper_write_snapshot() {
-  local f tmp; f="$(keeper_snapshot_file "$1")"
-  mkdir -p "$(dirname "$f")"
-  tmp="$(mktemp "${TMPDIR:-/tmp}/snap-XXXXXX")" || return 1
-  sort -u > "$tmp"
-  keeper_swap_or_clean "$tmp" "$f"
+  local f dir tmp; f="$(keeper_snapshot_file "$1")"
+  dir="$(dirname "$f")"
+  mkdir -p "$dir"
+  tmp="$(mktemp "$dir/.snap-XXXXXX")" || return 1
+  if sort -u > "$tmp"; then
+    keeper_swap_or_clean "$tmp" "$f"
+  else
+    rm -f "$tmp" 2>/dev/null || true
+    return 1
+  fi
 }
 
 # Read an epoch state file. Three outcomes, because the banner has to tell them

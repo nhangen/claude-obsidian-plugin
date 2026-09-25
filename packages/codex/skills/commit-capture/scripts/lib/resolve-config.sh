@@ -64,9 +64,10 @@ obsidian_config_value() {
   # `#` — a bare one is part of the value, so a vault at /notes/#inbox keeps
   # its name — and is skipped inside a quoted scalar, where `#` is literal.
   v="$(awk -v k="$key" '
-    NR == 1 { if ($0 ~ /^---[[:space:]]*$/) { fm = 1; next } else { exit } }
-    fm && $0 ~ /^---[[:space:]]*$/ { exit }
+    NR == 1 { if ($0 ~ /^---[[:space:]]*$/) { fm = 1; next } else { exit 1 } }
+    fm && $0 ~ /^---[[:space:]]*$/ { exit 1 }
     index($0, k ":") == 1 {
+      found = 1
       sub(/^[^:]*:[[:space:]]*/, "")
       if ($0 ~ /^"[^"]*"/ || $0 ~ /^'"'"'[^'"'"']*'"'"'/) {
         q = substr($0, 1, 1)
@@ -77,9 +78,10 @@ obsidian_config_value() {
         sub(/[[:space:]]+#.*$/, "")
         sub(/[[:space:]]+$/, "")
       }
-      print; exit
-    }' "$cfg")"
-  [ -n "$v" ] || return 1
+      print; exit 0
+    }
+    END { if (!found) exit 1 }
+  ' "$cfg")" || return 1
   printf '%s\n' "$v"
 }
 
