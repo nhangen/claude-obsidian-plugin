@@ -65,7 +65,7 @@ function codedError(code, detail, outcome) {
 function childEnvironment() {
   const allowed = [
     "PATH", "HOME", "XDG_CONFIG_HOME", "OBSIDIAN_LOCAL_MD", "CLAUDE_PLUGIN_ROOT", "LANG", "LC_ALL", "MCP_GIT_MARKER",
-    "KEEPER_FAULT_INJECT", "KEEPER_FAULT_MODE",
+    "KEEPER_FAULT_INJECT", "KEEPER_FAULT_MODE", "KEEPER_TEST_LOCK_RELEASE_FAIL", "MCP_TEST_KEEPER_STDIN_ERROR",
   ];
   return Object.fromEntries(allowed.filter((key) => process.env[key] !== undefined).map((key) => [key, process.env[key]]));
 }
@@ -354,9 +354,31 @@ function emptyWriteOutcome(requestId, idempotencyKey, path, affectedPaths) {
   };
 }
 
+function normalizedKeeperSaveTarget(title, folderHint) {
+  const cleanTitle = typeof title === "string" ? title.trim().replace(/\.md$/i, "") : "";
+  const targetFolder = typeof folderHint === "string" ? folderHint.trim() : "";
+  const folderSegments = targetFolder.split("/");
+  if (!cleanTitle || /[\\/]/.test(cleanTitle) || !targetFolder || targetFolder.includes("\\")
+    || targetFolder.startsWith("/") || targetFolder.endsWith("/")
+    || folderSegments.some((segment) => !segment || segment === "." || segment === "..")) return null;
+  const targetPath = `${targetFolder}/${cleanTitle}.md`;
+  return { cleanTitle, targetFolder, targetPath, affectedPaths: [targetPath, `${targetFolder}/INDEX.md`] };
+}
+
 function failedWriteOutcome(fallback, errorCode, detail, parsed, recoverable = false, ambiguous = false) {
   if (parsed && ["partial", "conflict", "failed"].includes(parsed.status)) {
-    return { ...parsed, warnings: [...parsed.warnings, detail] };
+    const warnings = [...parsed.warnings, detail];
+    if (parsed.status === "partial" && !parsed.idempotency_key) {
+      return {
+        ...parsed,
+        status: "failed",
+        warnings: [...warnings, "partial write has no idempotency key; verify affected_paths before manual recovery"],
+        recovery: { required: true, action: "verify affected_paths manually before any retry" },
+        error_code: parsed.error_code || errorCode,
+        retryable: false,
+      };
+    }
+    return { ...parsed, warnings };
   }
   const outcomeIsAmbiguous = ambiguous
     || ["SUBPROCESS_TIMEOUT", "SUBPROCESS_OUTPUT_LIMIT", "CANCELLED"].includes(errorCode);
@@ -379,6 +401,18 @@ function failedWriteOutcome(fallback, errorCode, detail, parsed, recoverable = f
   };
 }
 
+function normalizeKeeperOutcome(outcome) {
+  if (outcome.status !== "partial" || outcome.idempotency_key) return outcome;
+  return {
+    ...outcome,
+    status: "failed",
+    warnings: [...outcome.warnings, "partial write has no idempotency key; verify affected_paths before manual recovery"],
+    recovery: { required: true, action: "verify affected_paths manually before any retry" },
+    error_code: outcome.error_code || "PARTIAL",
+    retryable: false,
+  };
+}
+
 function writeRequestFallback(toolName, args, configuration) {
   const values = args && typeof args === "object" && !Array.isArray(args) ? args : {};
   const requestId = typeof values.request_id === "string" && /^[A-Za-z0-9._:-]{1,240}$/.test(values.request_id)
@@ -388,12 +422,8 @@ function writeRequestFallback(toolName, args, configuration) {
     ? values.idempotency_key
     : "";
   if (toolName === "obsidian_keeper_save") {
-    const title = typeof values.title === "string" ? values.title.trim().replace(/\.md$/i, "") : "";
-    const folder = typeof values.folder_hint === "string" && values.folder_hint.trim()
-      ? values.folder_hint.trim().replace(/^\/+|\/+$/g, "")
-      : "Inbox";
-    const path = title ? `${folder}/${title}.md` : "";
-    return emptyWriteOutcome(requestId, idempotencyKey, path, path ? [path, `${folder}/INDEX.md`] : []);
+    const target = normalizedKeeperSaveTarget(values.title, values.folder_hint);
+    return emptyWriteOutcome(requestId, idempotencyKey, target?.targetPath || "", target?.affectedPaths || []);
   }
   const date = typeof values.date === "string" && /^\d{4}-\d{2}-\d{2}$/.test(values.date)
     ? values.date
@@ -461,6 +491,7 @@ async function executeKeeperWrite(args, bodyContent, signal, fallback) {
       let settled = false;
       let stopping = false;
       let stopError;
+      let stdinError;
       let timer;
       const finish = (callback, value) => {
         if (settled) return;
@@ -486,7 +517,12 @@ async function executeKeeperWrite(args, bodyContent, signal, fallback) {
         if (signal.aborted) onAbort();
       }
       timer = setTimeout(() => stop(codedError("SUBPROCESS_TIMEOUT", "keeper write timed out")), subprocessTimeoutMs);
-      child.stdin.on("error", () => {});
+      child.stdin.on("error", (error) => {
+        stdinError = error;
+      });
+      if (process.env.MCP_TEST_KEEPER_STDIN_ERROR === "1" && args.includes("pipe-error-key")) {
+        stdinError = new Error("injected request body pipe failure");
+      }
       child.stdin.end(bodyContent);
       child.stdout.on("data", (chunk) => {
         stdout += chunk.toString();
@@ -540,6 +576,14 @@ async function executeKeeperWrite(args, bodyContent, signal, fallback) {
           finish(reject, codedError("KEEPER_PROTOCOL_ERROR", "keeper result contradicted its exit status", outcome));
           return;
         }
+        if (stdinError) {
+          const detail = "keeper request body pipe failed";
+          const recoverable = Boolean(fallback.idempotency_key);
+          const outcome = failedWriteOutcome(fallback, "KEEPER_PROTOCOL_ERROR", detail, parsed, recoverable, true);
+          finish(reject, codedError("KEEPER_PROTOCOL_ERROR", detail, outcome));
+          return;
+        }
+        parsed = normalizeKeeperOutcome(parsed);
         if (parsed.status === "committed" || parsed.status === "skipped") {
           finish(resolveResult, parsed);
           return;
@@ -550,12 +594,9 @@ async function executeKeeperWrite(args, bodyContent, signal, fallback) {
 }
 
 async function keeperSave({ title, body, folder_hint, type, links, idempotency_key, request_id }, vaultPath, signal) {
-  let targetFolder = "Inbox";
-  if (folder_hint && folder_hint.trim()) {
-    targetFolder = folder_hint.trim().replace(/^\/+|\/+$/g, "");
-  }
-  const cleanTitle = title.trim().replace(/\.md$/i, "");
-  const targetPath = `${targetFolder}/${cleanTitle}.md`;
+  const target = normalizedKeeperSaveTarget(title, folder_hint);
+  if (!target) throw codedError("PATH_INVALID", "keeper save target is invalid");
+  const { cleanTitle, targetFolder, targetPath, affectedPaths } = target;
 
   let formattedBody = body;
   const headerLines = [];
@@ -567,7 +608,7 @@ async function keeperSave({ title, body, folder_hint, type, links, idempotency_k
 
   const requestId = request_id || randomUUID();
   const idempotencyKey = idempotency_key || "";
-  const fallback = emptyWriteOutcome(requestId, idempotencyKey, targetPath, [targetPath, `${targetFolder}/INDEX.md`]);
+  const fallback = emptyWriteOutcome(requestId, idempotencyKey, targetPath, affectedPaths);
   return executeKeeperWrite(
     ["insert", "--vault", vaultPath, "--target", targetPath, "--title", cleanTitle, "--request-id", requestId, "--idempotency-key", idempotencyKey],
     formattedBody,
@@ -756,7 +797,7 @@ const writeOutput = z.strictObject({
   if (value.status === "conflict" && (value.recovery.required || value.retryable || value.recovery.action !== "")) {
     context.addIssue({ code: "custom", message: "conflict keeper outcomes cannot request recovery" });
   }
-  if (value.status === "failed" && (value.recovery.required !== value.retryable || value.recovery.required !== (value.recovery.action.length > 0))) {
+  if (value.status === "failed" && value.recovery.required !== (value.recovery.action.length > 0)) {
     context.addIssue({ code: "custom", message: "failed keeper outcome recovery fields disagree" });
   }
 });
@@ -765,9 +806,10 @@ const searchInput = z.strictObject({ query: z.string().trim().min(1).max(240) })
 const metadataInput = z.strictObject({ repository: z.string().trim().min(1).max(maxRepositoryPathCharacters) });
 const safeText = (max) => z.string().max(max).refine((value) => !/[\u0000-\u001F\u007F]/.test(value), "control characters are not allowed");
 const keeperSaveInput = z.strictObject({
-  title: safeText(240).trim().min(1),
+  title: safeText(240).trim().min(1).refine((value) => Boolean(normalizedKeeperSaveTarget(value, "Inbox")), "title must be a note name without path separators"),
   body: z.string().min(1).max(65536),
-  folder_hint: safeText(1024).optional(),
+  folder_hint: safeText(1024).trim().min(1),
+  resolved: z.literal(true),
   type: safeText(100).optional(),
   links: z.array(safeText(2048)).max(20).optional(),
   idempotency_key: z.string().min(1).max(240).regex(/^[A-Za-z0-9._:-]+$/).optional(),

@@ -223,7 +223,7 @@ test("stdio server executes obsidian_keeper_save tool call", async (t) => {
     method: "tools/call",
     params: {
       name: "obsidian_keeper_save",
-      arguments: { title: "Test Note", body: "Sample body content", folder_hint: "Inbox", idempotency_key: "save-1", request_id: "request-save-1" },
+      arguments: { title: "Test Note", body: "Sample body content", resolved: true, folder_hint: "Inbox", idempotency_key: "save-1", request_id: "request-save-1" },
     },
   }, 2);
 
@@ -243,7 +243,7 @@ test("stdio server executes obsidian_keeper_save tool call", async (t) => {
     method: "tools/call",
     params: {
       name: "obsidian_keeper_save",
-      arguments: { title: "Test Note", body: "Sample body content", folder_hint: "Inbox", idempotency_key: "save-1", request_id: "request-save-2" },
+      arguments: { title: "Test Note", body: "Sample body content", resolved: true, folder_hint: "Inbox", idempotency_key: "save-1", request_id: "request-save-2" },
     },
   }, 3);
   assert.equal(replay.result.isError, false);
@@ -256,7 +256,7 @@ test("stdio server executes obsidian_keeper_save tool call", async (t) => {
     method: "tools/call",
     params: {
       name: "obsidian_keeper_save",
-      arguments: { title: "Test Note", body: "Different content", folder_hint: "Inbox", idempotency_key: "save-1" },
+      arguments: { title: "Test Note", body: "Different content", resolved: true, folder_hint: "Inbox", idempotency_key: "save-1" },
     },
   }, 4);
   assert.equal(conflict.result.isError, true);
@@ -268,11 +268,101 @@ test("stdio server executes obsidian_keeper_save tool call", async (t) => {
     jsonrpc: "2.0",
     id: 5,
     method: "tools/call",
-    params: { name: "obsidian_keeper_save", arguments: { title: "No Key", body: "Rejected" } },
+    params: { name: "obsidian_keeper_save", arguments: { title: "No Key", body: "Rejected", resolved: true, folder_hint: "Inbox" } },
   }, 5);
   assert.equal(localWithoutKey.result.isError, false);
   assert.equal(localWithoutKey.result.structuredContent.status, "committed");
   assert.equal(localWithoutKey.result.structuredContent.idempotency_key, "");
+});
+
+test("stdio keeper save enforces resolved target semantics and input limits", async (t) => {
+  const { root, vaultPath, configPath } = await createFixtureVault();
+  const server = startStdioServer(configPath);
+
+  t.after(async () => {
+    if (!server.child.killed) server.child.stdin.end();
+    await once(server.child, "close").catch(() => {});
+    await rm(root, { recursive: true, force: true });
+  });
+
+  await server.request({
+    jsonrpc: "2.0", id: 1, method: "initialize",
+    params: { protocolVersion: "2025-11-25", capabilities: {}, clientInfo: { name: "test", version: "1.0" } },
+  }, 1);
+  server.notification({ jsonrpc: "2.0", method: "notifications/initialized" });
+
+  const missingResolved = await server.request({
+    jsonrpc: "2.0", id: 2, method: "tools/call",
+    params: { name: "obsidian_keeper_save", arguments: { title: "Missing Resolved", body: "must be rejected", resolved: false, folder_hint: "Inbox" } },
+  }, 2);
+  const missingResolvedOutcome = JSON.parse(missingResolved.result.content[0].text);
+  assert.equal(missingResolved.result.isError, true);
+  assert.equal(missingResolvedOutcome.code, "INVALID_INPUT");
+  await assert.rejects(access(join(vaultPath, "Inbox", "Missing Resolved.md")));
+
+  const omittedResolved = await server.request({
+    jsonrpc: "2.0", id: 7, method: "tools/call",
+    params: { name: "obsidian_keeper_save", arguments: { title: "Omitted Resolved", body: "must be rejected", folder_hint: "Inbox" } },
+  }, 7);
+  const omittedResolvedOutcome = JSON.parse(omittedResolved.result.content[0].text);
+  assert.equal(omittedResolved.result.isError, true);
+  assert.equal(omittedResolvedOutcome.code, "INVALID_INPUT");
+  await assert.rejects(access(join(vaultPath, "Inbox", "Omitted Resolved.md")));
+
+  const exactBody = await server.request({
+    jsonrpc: "2.0", id: 3, method: "tools/call",
+    params: { name: "obsidian_keeper_save", arguments: { title: "Exact Body", body: "x".repeat(65536), resolved: true, folder_hint: "Inbox", idempotency_key: "exact-body" } },
+  }, 3);
+  assert.equal(exactBody.result.isError, false);
+
+  const excessiveBody = await server.request({
+    jsonrpc: "2.0", id: 4, method: "tools/call",
+    params: { name: "obsidian_keeper_save", arguments: { title: "Excessive Body", body: "x".repeat(65537), resolved: true, folder_hint: "Inbox", idempotency_key: "excessive-body" } },
+  }, 4);
+  const excessiveBodyOutcome = JSON.parse(excessiveBody.result.content[0].text);
+  assert.equal(excessiveBody.result.isError, true);
+  assert.equal(excessiveBodyOutcome.code, "INVALID_INPUT");
+  await assert.rejects(access(join(vaultPath, "Inbox", "Excessive Body.md")));
+
+  const exactLinks = await server.request({
+    jsonrpc: "2.0", id: 5, method: "tools/call",
+    params: { name: "obsidian_keeper_save", arguments: { title: "Exact Links", body: "links", resolved: true, folder_hint: "Inbox", links: Array.from({ length: 20 }, (_, index) => `[[Link ${index}]]`), idempotency_key: "exact-links" } },
+  }, 5);
+  assert.equal(exactLinks.result.isError, false);
+
+  const excessiveLinks = await server.request({
+    jsonrpc: "2.0", id: 6, method: "tools/call",
+    params: { name: "obsidian_keeper_save", arguments: { title: "Excessive Links", body: "links", resolved: true, folder_hint: "Inbox", links: Array.from({ length: 21 }, (_, index) => `[[Link ${index}]]`), idempotency_key: "excessive-links" } },
+  }, 6);
+  const excessiveLinksOutcome = JSON.parse(excessiveLinks.result.content[0].text);
+  assert.equal(excessiveLinks.result.isError, true);
+  assert.equal(excessiveLinksOutcome.code, "INVALID_INPUT");
+  await assert.rejects(access(join(vaultPath, "Inbox", "Excessive Links.md")));
+});
+
+test("stdio keeper save preserves committed status while surfacing lock release warnings", async (t) => {
+  const { root, vaultPath, configPath } = await createFixtureVault();
+  const server = startStdioServer(configPath, { KEEPER_TEST_LOCK_RELEASE_FAIL: "1" });
+
+  t.after(async () => {
+    if (!server.child.killed) server.child.stdin.end();
+    await once(server.child, "close").catch(() => {});
+    await rm(root, { recursive: true, force: true });
+  });
+
+  await server.request({
+    jsonrpc: "2.0", id: 1, method: "initialize",
+    params: { protocolVersion: "2025-11-25", capabilities: {}, clientInfo: { name: "test", version: "1.0" } },
+  }, 1);
+  server.notification({ jsonrpc: "2.0", method: "notifications/initialized" });
+  const response = await server.request({
+    jsonrpc: "2.0", id: 2, method: "tools/call",
+    params: { name: "obsidian_keeper_save", arguments: { title: "Release Warning", body: "saved", resolved: true, folder_hint: "Inbox", idempotency_key: "release-warning" } },
+  }, 2);
+  assert.equal(response.result.isError, false);
+  assert.equal(response.result.structuredContent.status, "committed");
+  assert.match(response.result.structuredContent.warnings.join(" "), /lock release failed/);
+  assert.match(await readFile(join(vaultPath, "Inbox", "Release Warning.md"), "utf8"), /saved/);
 });
 
 test("stdio keeper save does not require daily_path", async (t) => {
@@ -299,6 +389,7 @@ test("stdio keeper save does not require daily_path", async (t) => {
       arguments: {
         title: "No Daily Path",
         body: "Independent keeper save",
+        resolved: true,
         folder_hint: "Inbox",
         type: 'note: "quoted"',
         links: ["[[Daily: 2026-09-22]]", "tag: value"],
@@ -461,15 +552,35 @@ test("stdio server rejects path traversal escape attempts", async (t) => {
   }, 1);
   server.notification({ jsonrpc: "2.0", method: "notifications/initialized" });
 
+  const missingFolderResponse = await server.request({
+    jsonrpc: "2.0", id: 2, method: "tools/call",
+    params: {
+      name: "obsidian_keeper_save",
+      arguments: { title: "Missing Folder", body: "must be rejected", resolved: true, idempotency_key: "missing-folder" },
+    },
+  }, 2);
+  const missingFolderError = JSON.parse(missingFolderResponse.result.content[0].text);
+  assert.equal(missingFolderError.code, "INVALID_INPUT");
+
+  const absoluteFolderResponse = await server.request({
+    jsonrpc: "2.0", id: 3, method: "tools/call",
+    params: {
+      name: "obsidian_keeper_save",
+      arguments: { title: "Absolute Folder", body: "must be rejected", resolved: true, folder_hint: "/Inbox", idempotency_key: "absolute-folder" },
+    },
+  }, 3);
+  const absoluteFolderError = JSON.parse(absoluteFolderResponse.result.content[0].text);
+  assert.equal(absoluteFolderError.code, "PATH_INVALID");
+
   const traversalResponse = await server.request({
     jsonrpc: "2.0",
-    id: 2,
+    id: 4,
     method: "tools/call",
     params: {
       name: "obsidian_keeper_save",
-      arguments: { title: "Bad Note", body: "Escaping", folder_hint: "../../outside", idempotency_key: "traversal-1" },
+      arguments: { title: "Bad Note", body: "Escaping", resolved: true, folder_hint: "../../outside", idempotency_key: "traversal-1" },
     },
-  }, 2);
+  }, 4);
 
   assert.equal(traversalResponse.result.isError, true);
   const error = JSON.parse(traversalResponse.result.content[0].text);
@@ -497,7 +608,7 @@ test("stdio preserves recoverable partial keeper outcomes", async (t) => {
     jsonrpc: "2.0", id: 2, method: "tools/call",
     params: {
       name: "obsidian_keeper_save",
-      arguments: { title: "Needs Recovery", body: "Written before INDEX failure", folder_hint: "Blocked", idempotency_key: "partial-1" },
+      arguments: { title: "Needs Recovery", body: "Written before INDEX failure", resolved: true, folder_hint: "Blocked", idempotency_key: "partial-1" },
     },
   }, 2);
   assert.equal(response.result.isError, true);
@@ -534,7 +645,7 @@ test("stdio recovers an insert when the keeper dies after writing the note", asy
     jsonrpc: "2.0", id: 2, method: "tools/call",
     params: {
       name: "obsidian_keeper_save",
-      arguments: { title: "Crash Recovery", body: "Written before keeper death", idempotency_key: "crash-insert-1", request_id: "crash-insert-request" },
+      arguments: { title: "Crash Recovery", body: "Written before keeper death", resolved: true, folder_hint: "Inbox", idempotency_key: "crash-insert-1", request_id: "crash-insert-request" },
     },
   }, 2);
   const crashedOutcome = JSON.parse(crashed.result.content[0].text);
@@ -557,7 +668,7 @@ test("stdio recovers an insert when the keeper dies after writing the note", asy
     jsonrpc: "2.0", id: 4, method: "tools/call",
     params: {
       name: "obsidian_keeper_save",
-      arguments: { title: "Crash Recovery", body: "Written before keeper death", idempotency_key: "crash-insert-1", request_id: "crash-insert-retry" },
+      arguments: { title: "Crash Recovery", body: "Written before keeper death", resolved: true, folder_hint: "Inbox", idempotency_key: "crash-insert-1", request_id: "crash-insert-retry" },
     },
   }, 4);
   assert.equal(recovered.result.isError, false);
@@ -712,7 +823,7 @@ test("stdio timeout and cancellation never report false write success and keep s
     jsonrpc: "2.0", id: 2, method: "tools/call",
     params: {
       name: "obsidian_keeper_save",
-      arguments: { title: "Timed Out", body: "Timeout body", idempotency_key: "timeout-1", request_id: "timeout-request" },
+      arguments: { title: "Timed Out", body: "Timeout body", resolved: true, folder_hint: "Inbox", idempotency_key: "timeout-1", request_id: "timeout-request" },
     },
   }, 2);
   assert.equal(timedOut.result.isError, true);
@@ -728,7 +839,7 @@ test("stdio timeout and cancellation never report false write success and keep s
     jsonrpc: "2.0", id: 5, method: "tools/call",
     params: {
       name: "obsidian_keeper_save",
-      arguments: { title: "Timed Out", body: "Timeout body", idempotency_key: "timeout-1", request_id: "timeout-retry" },
+      arguments: { title: "Timed Out", body: "Timeout body", resolved: true, folder_hint: "Inbox", idempotency_key: "timeout-1", request_id: "timeout-retry" },
     },
   }, 5);
   assert.equal(timeoutRetry.result.isError, false);
@@ -739,7 +850,7 @@ test("stdio timeout and cancellation never report false write success and keep s
     jsonrpc: "2.0", id: 6, method: "tools/call",
     params: {
       name: "obsidian_keeper_save",
-      arguments: { title: "Keyless Timeout", body: "Keyless timeout body", request_id: "keyless-timeout" },
+      arguments: { title: "Keyless Timeout", body: "Keyless timeout body", resolved: true, folder_hint: "Inbox", request_id: "keyless-timeout" },
     },
   }, 6);
   assert.equal(keylessTimedOut.result.isError, true);
@@ -756,7 +867,7 @@ test("stdio timeout and cancellation never report false write success and keep s
     jsonrpc: "2.0", id: 3, method: "tools/call",
     params: {
       name: "obsidian_keeper_save",
-      arguments: { title: "Cancelled", body: "Cancellation body", idempotency_key: "cancel-1", request_id: "cancel-request" },
+      arguments: { title: "Cancelled", body: "Cancellation body", resolved: true, folder_hint: "Inbox", idempotency_key: "cancel-1", request_id: "cancel-request" },
     },
   }, 3);
   const cancelledHandled = cancelled.catch(() => {});
@@ -770,7 +881,7 @@ test("stdio timeout and cancellation never report false write success and keep s
     jsonrpc: "2.0", id: 4, method: "tools/call",
     params: {
       name: "obsidian_keeper_save",
-      arguments: { title: "Cancelled", body: "Cancellation body", idempotency_key: "cancel-1", request_id: "cancel-retry" },
+      arguments: { title: "Cancelled", body: "Cancellation body", resolved: true, folder_hint: "Inbox", idempotency_key: "cancel-1", request_id: "cancel-retry" },
     },
   }, 4);
   assert.equal(retried.result.isError, false);
@@ -783,7 +894,7 @@ test("stdio timeout and cancellation never report false write success and keep s
     jsonrpc: "2.0", id: 7, method: "tools/call",
     params: {
       name: "obsidian_keeper_save",
-      arguments: { title: "Timed Out Again", body: "Timeout body", idempotency_key: "timeout-2", request_id: "timeout-request-2" },
+      arguments: { title: "Timed Out Again", body: "Timeout body", resolved: true, folder_hint: "Inbox", idempotency_key: "timeout-2", request_id: "timeout-request-2" },
     },
   }, 7);
   assert.equal(timedOutAgain.result.isError, true);
@@ -793,7 +904,7 @@ test("stdio timeout and cancellation never report false write success and keep s
     jsonrpc: "2.0", id: 8, method: "tools/call",
     params: {
       name: "obsidian_keeper_save",
-      arguments: { title: "Timed Out Again", body: "Timeout body", idempotency_key: "timeout-2", request_id: "timeout-retry-2" },
+      arguments: { title: "Timed Out Again", body: "Timeout body", resolved: true, folder_hint: "Inbox", idempotency_key: "timeout-2", request_id: "timeout-retry-2" },
     },
   }, 8);
   assert.equal(timeoutRetryAgain.result.isError, false);
@@ -825,7 +936,6 @@ test("Streamable HTTP transport enforces scope gating on write tools", async (t)
     };
   }
 
-  // 1. Session with read-only token
   const initRead = await fetch(`${url}/mcp`, {
     method: "POST",
     headers: headers(readOnlyToken),
@@ -847,7 +957,6 @@ test("Streamable HTTP transport enforces scope gating on write tools", async (t)
   const readToolNames = (await listedReadTools.json()).result.tools.map((tool) => tool.name).sort();
   assert.deepEqual(readToolNames, ["obsidian_commit_meta", "obsidian_find_notes"]);
 
-  // Read-only token write attempt -> 403 Forbidden
   const writeAttemptForbidden = await fetch(`${url}/mcp`, {
     method: "POST",
     headers: headers(readOnlyToken, { "MCP-Protocol-Version": "2025-11-25", "Mcp-Session-Id": readSessionId }),
@@ -860,7 +969,6 @@ test("Streamable HTTP transport enforces scope gating on write tools", async (t)
   });
   assert.equal(writeAttemptForbidden.status, 403);
 
-  // 2. Session with write token
   const initWrite = await fetch(`${url}/mcp`, {
     method: "POST",
     headers: headers(writeToken),
@@ -898,7 +1006,6 @@ test("Streamable HTTP transport enforces scope gating on write tools", async (t)
   assert.equal(missingRemoteOutcome.idempotency_key, "");
   assert.match(missingRemoteOutcome.path, /^Daily\/\d{4}-\d{2}-\d{2}\.md$/);
 
-  // Write token write call -> 200 Success
   const writeAllowed = await fetch(`${url}/mcp`, {
     method: "POST",
     headers: headers(writeToken, { "MCP-Protocol-Version": "2025-11-25", "Mcp-Session-Id": writeSessionId }),

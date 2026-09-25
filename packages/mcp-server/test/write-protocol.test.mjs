@@ -50,6 +50,7 @@ test("built stdio fails closed on invalid or contradictory keeper results", asyn
 case "$*" in
   *empty-key*) exit 0 ;;
   *missing-output*) exit 0 ;;
+  *Pipe\\ Error*) printf '{"status":"committed","request_id":"request-pipe-error","idempotency_key":"pipe-error-key","path":"Inbox/Pipe Error.md","affected_paths":["Inbox/Pipe Error.md","Inbox/INDEX.md"],"warnings":[],"recovery":{"required":false,"action":""},"error_code":null,"retryable":false}\\n'; exit 0 ;;
   *overflow-key*) head -c 65537 /dev/zero | tr '\\0' x >&2; exit 1 ;;
   *malformed-key*) printf 'not-json\\n'; exit 0 ;;
   *multiple-key*) printf '%s\\n%s\\n' '{"status":"failed"}' '{"status":"failed"}'; exit 1 ;;
@@ -60,6 +61,7 @@ case "$*" in
   *success-empty-path-key*) printf '{"status":"committed","request_id":"request-success-empty-path","idempotency_key":"success-empty-path-key","path":"","affected_paths":[],"warnings":[],"recovery":{"required":false,"action":""},"error_code":null,"retryable":false}\\n'; exit 0 ;;
   *success-error-key*) printf '{"status":"committed","request_id":"request-success-error","idempotency_key":"success-error-key","path":"Inbox/Test.md","affected_paths":["Inbox/Test.md"],"warnings":[],"recovery":{"required":false,"action":""},"error_code":"WRITE_FAILED","retryable":false}\\n'; exit 0 ;;
   *partial-no-recovery-key*) printf '{"status":"partial","request_id":"request-partial-no-recovery","idempotency_key":"partial-no-recovery-key","path":"Inbox/Test.md","affected_paths":["Inbox/Test.md"],"warnings":[],"recovery":{"required":false,"action":""},"error_code":"PARTIAL","retryable":true}\\n'; exit 2 ;;
+  *Partial\\ Keyless*) printf '{"status":"partial","request_id":"request-partial-keyless","idempotency_key":"","path":"Inbox/Test.md","affected_paths":["Inbox/Test.md"],"warnings":[],"recovery":{"required":true,"action":"retry"},"error_code":"PARTIAL","retryable":true}\\n'; exit 2 ;;
   *conflict-retryable-key*) printf '{"status":"conflict","request_id":"request-conflict-retryable","idempotency_key":"conflict-retryable-key","path":"Inbox/Test.md","affected_paths":["Inbox/Test.md"],"warnings":[],"recovery":{"required":true,"action":"retry"},"error_code":"CONFLICT","retryable":true}\\n'; exit 3 ;;
   *failed-recovery-mismatch-key*) printf '{"status":"failed","request_id":"request-failed-recovery-mismatch","idempotency_key":"failed-recovery-mismatch-key","path":"Inbox/Test.md","affected_paths":["Inbox/Test.md"],"warnings":[],"recovery":{"required":true,"action":""},"error_code":"WRITE_FAILED","retryable":false}\\n'; exit 1 ;;
 esac
@@ -69,7 +71,7 @@ exit 9
 
   const child = spawn(process.execPath, [join(install, "dist", "stdio.mjs")], {
     cwd: fixture,
-    env: { ...process.env, OBSIDIAN_LOCAL_MD: config },
+    env: { ...process.env, OBSIDIAN_LOCAL_MD: config, MCP_TEST_KEEPER_STDIN_ERROR: "1" },
     stdio: ["pipe", "pipe", "pipe"],
   });
   const next = collect(child);
@@ -106,7 +108,7 @@ exit 9
       jsonrpc: "2.0", id, method: "tools/call",
       params: {
         name: "obsidian_keeper_save",
-        arguments: { title: "Test", body: "Body", idempotency_key: idempotencyKey, request_id: `request-${idempotencyKey.replace("-key", "")}` },
+        arguments: { title: "Test", body: "Body", resolved: true, folder_hint: "Inbox", idempotency_key: idempotencyKey, request_id: `request-${idempotencyKey.replace("-key", "")}` },
       },
     })}\n`);
     const response = await next(id);
@@ -120,10 +122,42 @@ exit 9
   }
 
   child.stdin.write(`${JSON.stringify({
+    jsonrpc: "2.0", id: 14, method: "tools/call",
+    params: {
+      name: "obsidian_keeper_save",
+      arguments: { title: "Partial Keyless", body: "Body", resolved: true, folder_hint: "Inbox", request_id: "request-partial-keyless" },
+    },
+  })}\n`);
+  const keylessPartial = await next(14);
+  const keylessPartialResult = JSON.parse(keylessPartial.result.content[0].text);
+  assert.equal(keylessPartial.result.isError, true);
+  assert.equal(keylessPartialResult.code, "PARTIAL");
+  assert.equal(keylessPartialResult.status, "failed");
+  assert.equal(keylessPartialResult.recovery.required, true);
+  assert.equal(keylessPartialResult.retryable, false);
+  assert.match(keylessPartialResult.recovery.action, /verify affected_paths manually/);
+  assert.match(keylessPartialResult.warnings.join(" "), /no idempotency key/);
+
+  child.stdin.write(`${JSON.stringify({
+    jsonrpc: "2.0", id: 15, method: "tools/call",
+    params: {
+      name: "obsidian_keeper_save",
+      arguments: { title: "Pipe Error", body: "x".repeat(65536), resolved: true, folder_hint: "Inbox", idempotency_key: "pipe-error-key", request_id: "request-pipe-error" },
+    },
+  })}\n`);
+  const pipeError = await next(15);
+  const pipeErrorResult = JSON.parse(pipeError.result.content[0].text);
+  assert.equal(pipeError.result.isError, true);
+  assert.equal(pipeErrorResult.code, "KEEPER_PROTOCOL_ERROR");
+  assert.equal(pipeErrorResult.status, "partial");
+  assert.equal(pipeErrorResult.recovery.required, true);
+  assert.match(pipeErrorResult.warnings.join(" "), /request body pipe failed/);
+
+  child.stdin.write(`${JSON.stringify({
     jsonrpc: "2.0", id: 20, method: "tools/call",
     params: {
       name: "obsidian_keeper_save",
-      arguments: { title: "Missing Output", body: "Body", request_id: "request-missing-output" },
+      arguments: { title: "Missing Output", body: "Body", resolved: true, folder_hint: "Inbox", request_id: "request-missing-output" },
     },
   })}\n`);
   const missingOutput = await next(20);
@@ -139,7 +173,7 @@ exit 9
     jsonrpc: "2.0", id: 21, method: "tools/call",
     params: {
       name: "obsidian_keeper_save",
-      arguments: { title: "Output Limit", body: "Body", idempotency_key: "overflow-key", request_id: "request-overflow" },
+      arguments: { title: "Output Limit", body: "Body", resolved: true, folder_hint: "Inbox", idempotency_key: "overflow-key", request_id: "request-overflow" },
     },
   })}\n`);
   const overflow = await next(21);

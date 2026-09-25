@@ -562,6 +562,7 @@ test("packed stdio and HTTP entrypoints serialize contended keeper writes", asyn
     const shared = {
       title: "Contended Note",
       folder_hint: "Inbox",
+      resolved: true,
       idempotency_key: "stdio-http-insert",
     };
     const [stdioResponse, httpResponse] = await Promise.all([
@@ -579,7 +580,7 @@ test("packed stdio and HTTP entrypoints serialize contended keeper writes", asyn
           method: "tools/call",
           params: {
             name: "obsidian_keeper_save",
-            arguments: { ...shared, body: "body from HTTP", request_id: "http-insert" },
+            arguments: { ...shared, body: "body from HTTP", resolved: true, folder_hint: "Inbox", request_id: "http-insert" },
           },
         }),
       }).then(async (response) => {
@@ -673,6 +674,7 @@ test("packed stdio and HTTP entrypoints serialize contended keeper writes", asyn
     const parentResponse = await httpCall(server, 501, "obsidian_keeper_save", {
       title: "parent",
       body: "must remain contained",
+      resolved: true,
       folder_hint: "Escape",
       idempotency_key: "symlink-parent",
       request_id: "symlink-parent-request",
@@ -680,6 +682,7 @@ test("packed stdio and HTTP entrypoints serialize contended keeper writes", asyn
     const targetResponse = await httpCall(server, 502, "obsidian_keeper_save", {
       title: "final",
       body: "must remain contained",
+      resolved: true,
       folder_hint: "Safe",
       idempotency_key: "symlink-target",
       request_id: "symlink-target-request",
@@ -697,12 +700,13 @@ test("packed stdio and HTTP entrypoints serialize contended keeper writes", asyn
     await new Promise((resolveClose) => server.child.once("close", resolveClose));
   });
 
-  await t.test("packaged stdio preserves crash recovery and keyed retry semantics", async () => {
+  await t.test("cross-transport packaged recovery preserves keyed retry semantics", async () => {
     const title = "Packaged Crash Recovery";
     const args = {
       title,
       body: "written before packaged keeper death",
       folder_hint: "Inbox",
+      resolved: true,
       idempotency_key: "packaged-crash-recovery",
       request_id: "packaged-crash-request",
     };
@@ -804,7 +808,7 @@ test("source entrypoint uses canonical helpers before a build exists", async (t)
     method: "tools/call",
     params: {
       name: "obsidian_keeper_save",
-      arguments: { title: "Source Keeper", body: "source keeper write", idempotency_key: "source-keeper-1" },
+      arguments: { title: "Source Keeper", body: "source keeper write", resolved: true, folder_hint: "Inbox", idempotency_key: "source-keeper-1" },
     },
   })}\n`);
   const write = JSON.parse(await output.nextLine());

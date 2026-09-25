@@ -172,6 +172,7 @@ keeper_lock_acquire() {
 
 keeper_lock_release() {
   local record="$1" lock token owner published
+  local force_failure="${KEEPER_TEST_LOCK_RELEASE_FAIL:-0}"
   lock="${record%%|*}"
   token="${record#*|}"
   if [ -d "$lock" ]; then
@@ -184,10 +185,11 @@ keeper_lock_release() {
   [ "$owner" = "$$" ] && [ "$published" = "$token" ] || return 1
   if [ -d "$lock" ]; then
     rm -f "$lock/owner" 2>/dev/null || return 1
-    rmdir "$lock" 2>/dev/null
+    rmdir "$lock" 2>/dev/null || return 1
   else
-    rm -f "$lock" 2>/dev/null
+    rm -f "$lock" 2>/dev/null || return 1
   fi
+  [ "$force_failure" != 1 ]
 }
 
 keeper_with_lock() {
