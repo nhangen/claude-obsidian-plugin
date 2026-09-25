@@ -173,6 +173,31 @@ bash "$KEEPER" append --vault "$V" --target "Notes/mixed.md" \
 [ "$(cat "$V/Notes/mixed.md")" != "$MIXED_BEFORE" ] \
   || fail 'a heading inside mixed backtick/tilde fences was read as a real capture; the commit was silently dropped'
 
+# 17g. CommonMark indented code fences (1-3 spaces) must toggle fence state,
+#      so headings inside indented fences are ignored by --skip-if-hash.
+printf '%s\n' '   ```' '## 111111 — indented illustrative heading' '   ```' \
+  > "$TMP/indented.md"
+bash "$KEEPER" append --vault "$V" --target "Notes/indented.md" \
+  --section '## 18:00 — init' --body-file "$TMP/indented.md" >/dev/null
+INDENTED_BEFORE="$(cat "$V/Notes/indented.md")"
+bash "$KEEPER" append --vault "$V" --target "Notes/indented.md" \
+  --section '## 111111 — real commit' --body-file "$TMP/b.md" --skip-if-hash 111111 >/dev/null
+[ "$(cat "$V/Notes/indented.md")" != "$INDENTED_BEFORE" ] \
+  || fail 'a heading inside a 1-3 space indented fence was read as a real capture; commit was silently dropped'
+
+# 17h. Under CommonMark, a mismatched fence pair (e.g. ``` closed with ~~~)
+#      remains an unterminated fence extending to EOF. Headings after the
+#      mismatched opening delimiter are treated as fenced content.
+printf '%s\n' '```' 'some content' '~~~' '## 222222 — heading after mismatched fence' \
+  > "$TMP/mismatched.md"
+bash "$KEEPER" append --vault "$V" --target "Notes/mismatched.md" \
+  --section '## 18:00 — init' --body-file "$TMP/mismatched.md" >/dev/null
+MISMATCHED_BEFORE="$(cat "$V/Notes/mismatched.md")"
+bash "$KEEPER" append --vault "$V" --target "Notes/mismatched.md" \
+  --section '## 222222 — real commit' --body-file "$TMP/b.md" --skip-if-hash 222222 >/dev/null
+[ "$(cat "$V/Notes/mismatched.md")" != "$MISMATCHED_BEFORE" ] \
+  || fail 'a heading after a mismatched fence pair was incorrectly treated as an un-fenced heading'
+
 # 18. a malformed --skip-if-hash fails loudly. Silently treating an unusable
 #     value as "no guard" turns a typo into a duplicate note, which is the
 #     failure this flag exists to prevent.
