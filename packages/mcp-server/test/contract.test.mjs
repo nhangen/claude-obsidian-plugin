@@ -44,6 +44,8 @@ test("pins tool surface including write tools", () => {
   assert.equal(contract.tools.obsidian_commit_meta.scope, "repo:read");
   assert.equal(contract.tools.obsidian_keeper_save.scope, "vault:write");
   assert.equal(contract.tools.obsidian_daily_append.scope, "vault:write");
+  assert.deepEqual(contract.tools.obsidian_keeper_save.inputSchema.required, ["title", "body", "resolved", "folder_hint"]);
+  assert.deepEqual(contract.tools.obsidian_keeper_save.inputSchema.properties.resolved, { type: "boolean", const: true });
   assert.ok(!contract.tools.obsidian_keeper_save.inputSchema.required.includes("idempotency_key"));
   assert.ok(!contract.tools.obsidian_daily_append.inputSchema.required.includes("idempotency_key"));
   assert.match(contract.tools.obsidian_keeper_save.idempotency, /required for Streamable HTTP writes/);
@@ -59,7 +61,7 @@ test("pins tool surface including write tools", () => {
   assert.deepEqual(fixtures.toolCalls.map(({ name }) => name), Object.keys(contract.tools));
 });
 
-test("pins read prompts and keeps admin prompts and writes gated", () => {
+test("pins read prompts and released write status", () => {
   assert.deepEqual(contract.protocol.transports.compatibilityOnly, ["http+sse"]);
   assert.deepEqual(contract.protocol.transports.planned, []);
   assert.ok(Object.values(contract.resources).every((resource) => resource.status === "mvp"));
@@ -75,7 +77,9 @@ test("pins read prompts and keeps admin prompts and writes gated", () => {
   assert.equal(contract.prompts.summarize_session.scope, "vault:read");
   assert.equal(contract.prompts.reorganize_vault.status, "excluded-from-mcp-mvp");
   assert.equal(contract.prompts.reorganize_vault.scope, "vault:admin");
-  assert.equal(contract.writes.mvp, false);
+  assert.equal(contract.writes.status, "released");
+  assert.equal(contract.writes.released, true);
+  assert.equal(contract.writes.mvp, true);
   assert.deepEqual(contract.writes.statuses, fixtures.writeStatuses);
   assert.ok(fixtures.errors.every(({ isError }) => isError === true));
   assert.ok(contract.cancellation.handlerSignal.includes("mcpReq.signal"));

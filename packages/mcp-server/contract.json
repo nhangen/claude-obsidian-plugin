@@ -120,18 +120,19 @@
       "errors": ["INVALID_INPUT", "PATH_INVALID", "METADATA_INCOMPLETE", "READ_FAILED", "SUBPROCESS_TIMEOUT", "SUBPROCESS_OUTPUT_LIMIT"]
     },
     "obsidian_keeper_save": {
-      "status": "preview-gated",
+      "status": "mvp",
       "readOnly": false,
       "scope": "vault:write",
       "privacy": "user-authored-content",
       "inputSchema": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["title", "body"],
+        "required": ["title", "body", "resolved", "folder_hint"],
         "properties": {
           "title": { "type": "string", "minLength": 1, "maxLength": 240, "pattern": "^[^\\u0000-\\u001F\\u007F]*$" },
           "body": { "type": "string", "minLength": 1, "maxLength": 65536 },
-          "folder_hint": { "type": "string", "maxLength": 1024, "pattern": "^[^\\u0000-\\u001F\\u007F]*$" },
+          "resolved": { "type": "boolean", "const": true },
+          "folder_hint": { "type": "string", "minLength": 1, "maxLength": 1024, "pattern": "^[^\\u0000-\\u001F\\u007F]*$" },
           "type": { "type": "string", "maxLength": 100, "pattern": "^[^\\u0000-\\u001F\\u007F]*$" },
           "links": { "type": "array", "items": { "type": "string", "maxLength": 2048, "pattern": "^[^\\u0000-\\u001F\\u007F]*$" }, "maxItems": 20 },
           "idempotency_key": { "type": "string", "minLength": 1, "maxLength": 240, "pattern": "^[A-Za-z0-9._:-]+$" },
@@ -163,7 +164,7 @@
       "errors": ["INVALID_INPUT", "PATH_INVALID", "CONFIG_INVALID", "FORBIDDEN", "IDEMPOTENCY_CONFLICT", "CONFLICT", "PARTIAL", "WRITE_FAILED", "KEEPER_PROTOCOL_ERROR", "SUBPROCESS_TIMEOUT", "SUBPROCESS_OUTPUT_LIMIT", "CANCELLED"]
     },
     "obsidian_daily_append": {
-      "status": "preview-gated",
+      "status": "mvp",
       "readOnly": false,
       "scope": "vault:write",
       "privacy": "user-authored-content",
@@ -261,24 +262,18 @@
     }
   },
   "writes": {
-    "status": "preview-gated",
-    "released": false,
-    "mvp": false,
-    "releaseGate": {
-      "issue": "#129",
-      "state": "open",
-      "requiredEvidence": [
-        "Native watcher/hook contention through packaged entrypoints.",
-        "The complete packaged fault matrix.",
-        "Operator-recovery assertions for every write outcome."
-      ]
-    },
-    "requiredScopes": ["vault:write", "vault:admin"],
+    "status": "released",
+    "released": true,
+    "mvp": true,
+    "requiredScopes": ["vault:write"],
     "statuses": ["committed", "skipped", "partial", "conflict", "failed"],
     "invariants": [
       "Canonical containment rejects traversal and symlink escape for keeper-cooperating same-host writers.",
       "Path publication is revalidated while holding the canonical vault lock; non-cooperating filesystem mutation is outside the portable shell threat model.",
       "A response never reports success for a partial or conflicted write.",
+      "Keeper-save callers must set resolved=true and provide a vault-relative target folder; MCP does not invoke librarian routing or deduplication.",
+      "A keyless partial result is downgraded to failed and never advertises automatic recovery.",
+      "A keeper request-body pipe error cannot produce a successful response.",
       "Remote writes require authentication, explicit gating, and an idempotency key."
     ]
   },

@@ -90,8 +90,11 @@ error contract instead of leaking SDK validation text.
 
 ## Write contract
 
-`obsidian_keeper_save` accepts `title`, `body`, optional `folder_hint`, `type`,
-and `links`, plus optional `idempotency_key` and `request_id`. Streamable HTTP
+`obsidian_keeper_save` accepts `title`, `body`, required `resolved: true` and
+`folder_hint`, plus optional `type`,
+and `links`, plus optional `idempotency_key` and `request_id`. `folder_hint` is
+the caller-resolved vault-relative target folder; this MCP adapter does not run
+librarian routing or deduplication. Streamable HTTP
 writes require `idempotency_key`; local stdio calls retain keyless compatibility.
 `obsidian_daily_append` accepts `content`, optional `section`, `date`, and
 `skip_if_hash` (a 7-64 character hexadecimal commit hash), plus the same request fields. Daily writes use the configured
@@ -108,8 +111,9 @@ Reuse an idempotency key only for the same payload. A repeated key and payload
 returns `skipped`; a repeated key with different content returns
 `IDEMPOTENCY_CONFLICT`. After a retryable timeout, cancellation, or partial
 result, inspect `affected_paths` and `recovery`, then retry with the same key.
-Keyless ambiguous failures are not automatically retryable; verify
-`affected_paths` before any manual retry.
+Keyless ambiguous failures, including partial outcomes, are not automatically
+retryable. Their recovery action requires manual verification of
+`affected_paths` before any retry.
 If `recovery.required` remains true, follow its action before changing the key
 or editing affected files manually.
 
@@ -128,4 +132,5 @@ The machine-readable contract is [`contract.json`](contract.json). Its fixture
 cases are in [`test/fixtures/contract-fixtures.json`](test/fixtures/contract-fixtures.json)
 and are checked by `test/contract.test.mjs`.
 
-Admin prompts, legacy HTTP+SSE, and writes remain explicitly gated in the contract.
+Admin prompts and legacy HTTP+SSE remain explicitly gated in the contract. Writes
+are released behind the `vault:write` scope and authenticated HTTP idempotency.
