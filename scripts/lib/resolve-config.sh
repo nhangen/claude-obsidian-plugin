@@ -46,8 +46,13 @@ resolve_obsidian_config() {
 # in a SKILL and written by setup were otherwise read by whichever call site
 # remembered to (#103) — dedup_jaccard_threshold reached none of its three.
 obsidian_config_value() {
-  local key="$1" cfg v
+  local key="$1" cfg v first_line
   cfg="$(resolve_obsidian_config "${2:-${CLAUDE_PLUGIN_ROOT:-}}")" || return 1
+  IFS= read -r first_line < "$cfg" 2>/dev/null || first_line=""
+  if ! [[ "$first_line" =~ ^---[[:space:]]*$ ]]; then
+    printf 'obsidian: warning — config at %s has no frontmatter block (line 1 must be ---)\n' "$cfg" >&2
+    return 1
+  fi
   # Bounded to the frontmatter block: the body of a config is prose that can
   # legitimately open a line with `vault_path:` inside an example, and the
   # first such line would otherwise win.

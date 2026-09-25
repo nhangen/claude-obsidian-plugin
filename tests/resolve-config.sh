@@ -108,10 +108,26 @@ set +e; obsidian_config_value prose_only_key >/dev/null; RC=$?; set -e
   || fail "case7: a quoted scalar with a trailing comment: '$(obsidian_config_value quoted_comment)'"
 # A config with no frontmatter markers at all must not scan arbitrary prose body.
 printf 'vault_path: /nofm\n' > "$CV"
-set +e; obsidian_config_value vault_path >/dev/null; RC=$?; set -e
+set +e; obsidian_config_value vault_path 2>/dev/null >/dev/null; RC=$?; set -e
 [ "$RC" -eq 1 ] \
   || fail "case7: a config without opening frontmatter marker unexpectedly resolved: '$(obsidian_config_value vault_path)'"
 unset OBSIDIAN_LOCAL_MD
 PASS_COUNT=$((PASS_COUNT + 1))
 
-printf '%d/7 cases passed\n' "$PASS_COUNT"
+# ----- Case 8: obsidian_config_value on config with no frontmatter marker emits stderr warning -----
+BAD_CFG="${SANDBOX}/bad-cfg.md"
+printf 'vault_path: /nofm\n' > "$BAD_CFG"
+STDERR_OUT="${SANDBOX}/stderr.txt"
+set +e
+GOT=$(OBSIDIAN_LOCAL_MD="$BAD_CFG" bash -c '. "'"$RESOLVER"'"; obsidian_config_value vault_path' 2>"$STDERR_OUT")
+RC=$?
+set -e
+[ "$RC" -eq 1 ] || fail "case8: expected rc=1, got $RC"
+[ -z "$GOT" ] || fail "case8: expected empty stdout, got '$GOT'"
+grep -q "obsidian: warning — config at $BAD_CFG has no frontmatter block" "$STDERR_OUT" \
+  || fail "case8: expected warning on stderr, got '$(cat "$STDERR_OUT")'"
+PASS_COUNT=$((PASS_COUNT + 1))
+
+printf '%d/8 cases passed\n' "$PASS_COUNT"
+
+
