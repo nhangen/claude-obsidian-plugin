@@ -18,6 +18,7 @@ KEEPER_DIR="$(cd "$(dirname "$0")" && pwd -P)"
 
 . "$KEEPER_DIR/lib/note-hash.sh"
 . "$KEEPER_DIR/lib/vault-index.sh"
+. "$KEEPER_DIR/lib/resolve-config.sh"
 
 KEEPER_FORMAT=text
 KEEPER_OUTCOME_EMITTED=0
@@ -82,9 +83,7 @@ keeper_select_format() {
 keeper_resolve_vault() {
   local v="$1"
   if [ -z "$v" ]; then
-    local cfg
-    cfg="$(bash "$KEEPER_DIR/lib/resolve-config.sh" 2>/dev/null || true)"
-    [ -n "$cfg" ] && [ -f "$cfg" ] && v="$(grep '^vault_path:' "$cfg" | sed 's/vault_path: //')"
+    v="$(obsidian_config_value vault_path "$KEEPER_DIR" 2>/dev/null || true)"
   fi
   [ -n "$v" ] || keeper_die "--vault required (or configure via /obsidian:setup)"
   [ -d "$v" ] || keeper_die "vault is not a directory: $v"

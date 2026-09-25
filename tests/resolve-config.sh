@@ -106,6 +106,21 @@ set +e; obsidian_config_value prose_only_key >/dev/null; RC=$?; set -e
   || fail "case7: a '#' inside the value was treated as a comment: '$(obsidian_config_value hashy)'"
 [ "$(obsidian_config_value quoted_comment)" = "0.3" ] \
   || fail "case7: a quoted scalar with a trailing comment: '$(obsidian_config_value quoted_comment)'"
+
+# Set-but-empty key (key: "") must return 0 with empty stdout (distinguished from absent key which returns 1).
+EMPTY_CFG="$XDG/emptycfg.md"
+printf -- '---\nempty_key:\nblank_key: ""\n---\n' > "$EMPTY_CFG"
+OBSIDIAN_LOCAL_MD="$EMPTY_CFG"
+GOT_EMPTY=$(obsidian_config_value empty_key)
+RC_EMPTY=$?
+[ "$RC_EMPTY" -eq 0 ] || fail "case7: set-but-empty key returned $RC_EMPTY, expected 0"
+[ -z "$GOT_EMPTY" ] || fail "case7: set-but-empty key returned non-empty stdout: '$GOT_EMPTY'"
+GOT_BLANK=$(obsidian_config_value blank_key)
+RC_BLANK=$?
+[ "$RC_BLANK" -eq 0 ] || fail "case7: set-but-blank key returned $RC_BLANK, expected 0"
+[ -z "$GOT_BLANK" ] || fail "case7: set-but-blank key returned non-empty stdout: '$GOT_BLANK'"
+export OBSIDIAN_LOCAL_MD="$CV"
+
 # A config with no frontmatter markers at all must not scan arbitrary prose body.
 printf 'vault_path: /nofm\n' > "$CV"
 set +e; obsidian_config_value vault_path 2>/dev/null >/dev/null; RC=$?; set -e
