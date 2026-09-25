@@ -172,6 +172,7 @@ keeper_lock_acquire() {
 
 keeper_lock_release() {
   local record="$1" lock token owner published
+  local force_failure="${KEEPER_TEST_LOCK_RELEASE_FAIL:-0}"
   lock="${record%%|*}"
   token="${record#*|}"
   if [ -d "$lock" ]; then
@@ -184,25 +185,39 @@ keeper_lock_release() {
   [ "$owner" = "$$" ] && [ "$published" = "$token" ] || return 1
   if [ -d "$lock" ]; then
     rm -f "$lock/owner" 2>/dev/null || return 1
-    rmdir "$lock" 2>/dev/null
+    rmdir "$lock" 2>/dev/null || return 1
   else
-    rm -f "$lock" 2>/dev/null
+    rm -f "$lock" 2>/dev/null || return 1
   fi
+  [ "$force_failure" != 1 ]
 }
 
 keeper_with_lock() {
   local key="$1" lock rc
   shift
   lock="$(keeper_lock_acquire "$key")" || return 1
+  KEEPER_DEFER_OUTPUT=1
   if "$@"; then rc=0; else rc=$?; fi
-  keeper_lock_release "$lock" \
-    || printf 'keeper: warning — local write lock release failed; manual cleanup may be required\n' >&2
+  if ! keeper_lock_release "$lock"; then
+    printf 'keeper: warning — local write lock release failed; manual cleanup may be required\n' >&2
+    KEEPER_WARNINGS="${KEEPER_WARNINGS:-}${KEEPER_WARNINGS:+$'\n'}local write lock release failed; manual cleanup may be required"
+  fi
+  if [ "${KEEPER_CRASH_AFTER_LOCK:-0}" = 1 ]; then
+    kill -KILL "$$"
+  fi
+  KEEPER_DEFER_OUTPUT=0
+  if [ "${KEEPER_OUTCOME_EMITTED:-0}" = 1 ] && type keeper_print_outcome >/dev/null 2>&1; then
+    keeper_print_outcome "$KEEPER_PENDING_OUTCOME" "$KEEPER_PENDING_VALUE"
+  fi
   return "$rc"
 }
 
 keeper_fault() {
   [ "${KEEPER_FAULT_INJECT:-}" = "$1" ] || return 0
   printf 'keeper: injected fault at %s\n' "$1" >&2
+  if [ "${KEEPER_FAULT_MODE:-}" = crash ]; then
+    KEEPER_CRASH_AFTER_LOCK=1
+  fi
   return 91
 }
 

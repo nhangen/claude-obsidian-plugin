@@ -23,6 +23,24 @@
         "time": "10:00",
         "subject": "Example commit"
       }
+    },
+    {
+      "name": "obsidian_keeper_save",
+      "arguments": { "title": "Test Note", "body": "Note content", "resolved": true, "folder_hint": "Inbox", "idempotency_key": "save-example" },
+      "result": {
+        "status": "committed", "request_id": "request-example", "idempotency_key": "save-example",
+        "path": "Inbox/Test Note.md", "affected_paths": ["Inbox/Test Note.md", "Inbox/INDEX.md"],
+        "warnings": [], "recovery": { "required": false, "action": "" }, "error_code": null, "retryable": false
+      }
+    },
+    {
+      "name": "obsidian_daily_append",
+      "arguments": { "content": "Daily entry", "idempotency_key": "daily-example" },
+      "result": {
+        "status": "committed", "request_id": "request-example", "idempotency_key": "daily-example",
+        "path": "Daily/2026-09-20.md", "affected_paths": ["Daily/2026-09-20.md"],
+        "warnings": [], "recovery": { "required": false, "action": "" }, "error_code": null, "retryable": false
+      }
     }
   ],
   "resources": [
@@ -34,6 +52,11 @@
   "errors": [
     { "code": "INVALID_INPUT", "isError": true },
     { "code": "PATH_INVALID", "isError": true },
+    { "code": "FORBIDDEN", "isError": true },
+    { "code": "CONFLICT", "isError": true },
+    { "code": "PARTIAL", "isError": true },
+    { "code": "WRITE_FAILED", "isError": true },
+    { "code": "KEEPER_PROTOCOL_ERROR", "isError": true },
     { "code": "SUBPROCESS_TIMEOUT", "isError": true },
     { "code": "SUBPROCESS_OUTPUT_LIMIT", "isError": true }
   ],

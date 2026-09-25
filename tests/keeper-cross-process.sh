@@ -20,8 +20,8 @@ run_parallel_append() {
       n=$(( n + 1 ))
       (
         bash "$KEEPER" append --vault "$V" --target "Daily/2026-09-22.md" \
-          --section "## 12:00 — abc117" --body-file "$TMP/body.md" \
-          --skip-if-hash abc117 --format json > "$out/$caller-$round.json"
+          --section "## 12:00 — abc1174" --body-file "$TMP/body.md" \
+          --skip-if-hash abc1174 --format json > "$out/$caller-$round.json"
       ) &
     done
   done
@@ -30,7 +30,7 @@ run_parallel_append() {
     || fail "$label append did not produce exactly one committed outcome"
   [ "$(grep -l '"status":"skipped"' "$out"/*.json | wc -l | tr -d ' ')" = 23 ] \
     || fail "$label append did not report every duplicate as skipped"
-  [ "$(grep -c '^## 12:00 — abc117$' "$V/Daily/2026-09-22.md" | tr -d ' ')" = 1 ] \
+  [ "$(grep -c '^## 12:00 — abc1174$' "$V/Daily/2026-09-22.md" | tr -d ' ')" = 1 ] \
     || fail "$label append wrote the idempotency key more than once"
 }
 
@@ -59,7 +59,7 @@ for _ in $(seq 1 500); do [ -e "$WPAUSE/ready" ] && break; sleep 0.01; done
 [ -e "$WPAUSE/ready" ] || fail "watcher never entered the canonical vault lock"
 (
   bash "$BUNDLED_KEEPER" append --vault "$WV" --target 'Hook/capture.md' \
-    --section 'hook capture abc117' --body-file "$TMP/body.md" --skip-if-hash abc117 \
+    --section 'hook capture abc1174' --body-file "$TMP/body.md" --skip-if-hash abc1174 \
     --format json > "$TMP/hook.json"
   : > "$TMP/hook-done"
 ) & hook_pid=$!

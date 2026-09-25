@@ -1,10 +1,8 @@
 # MCP server
 
 This package is the isolated MCP adapter for `claude-obsidian-plugin`.
-It runs over stdio or authenticated Streamable HTTP and exposes the read-only `obsidian_find_notes` and
-`obsidian_commit_meta` tools plus bounded read-only resources for taxonomy,
-daily notes, the librarian index, and pending items. The existing root plugin,
-hooks, commands, and keeper remain unchanged.
+It runs over stdio or authenticated Streamable HTTP. The packaged hardened
+keeper performs every vault mutation.
 
 ```bash
 npm ci
@@ -62,10 +60,11 @@ The HTTP server binds `127.0.0.1:3000` by default. Set `MCP_HTTP_BIND` and
 `MCP_HTTP_PORT` explicitly when needed. Remote deployments must terminate TLS
 in a trusted reverse proxy and restrict network access to the configured bind
 address. Every request requires an HS256 bearer JWT with the exact configured
-issuer and audience, a future `exp`, and either `vault:read` or `repo:read`.
-Vault tools and resources require `vault:read`; repository metadata requires
-`repo:read`. Query strings are rejected, so credentials cannot be supplied in
-URLs.
+issuer and audience, a future `exp`, and a scope accepted by the requested
+surface. Vault tools and resources require `vault:read`; repository metadata
+requires `repo:read`; write tools require `vault:write`. `vault:admin` is
+accepted for authentication but does not expose an additional MCP operation.
+Query strings are rejected, so credentials cannot be supplied in URLs.
 
 `MCP_HTTP_MAX_BODY_BYTES` and `MCP_HTTP_MAX_RESPONSE_BYTES` default to 1 MiB.
 `MCP_HTTP_CONCURRENCY_LIMIT` defaults to 16, and
@@ -78,7 +77,7 @@ stateful adapter does not classify modern envelopes; it is not advertised as
 supported.
 
 The server resolves `OBSIDIAN_LOCAL_MD` through the existing stable resolver.
-The stdio entrypoint does not start an HTTP listener. Neither entrypoint exposes vault mutation tools. In this
+The stdio entrypoint does not start an HTTP listener. In this
 repository's source checkout, the source entrypoint retains the documented
 behavior of defaulting repository metadata access to the repository root. An
 installed package never infers authorization from its install location or
@@ -88,6 +87,35 @@ variable to enable `obsidian_commit_meta` for explicit local repository roots.
 The taxonomy resource returns only the project-taxonomy table. Tool arguments
 are validated inside the handlers so invalid input uses the stable structured
 error contract instead of leaking SDK validation text.
+
+## Write contract
+
+`obsidian_keeper_save` accepts `title`, `body`, required `resolved: true` and
+`folder_hint`, plus optional `type`,
+and `links`, plus optional `idempotency_key` and `request_id`. `folder_hint` is
+the caller-resolved vault-relative target folder; this MCP adapter does not run
+librarian routing or deduplication. Streamable HTTP
+writes require `idempotency_key`; local stdio calls retain keyless compatibility.
+`obsidian_daily_append` accepts `content`, optional `section`, `date`, and
+`skip_if_hash` (a 7-64 character hexadecimal commit hash), plus the same request fields. Daily writes use the configured
+`daily_path`, and results report the vault-relative path actually written. MCP
+writes fail with `CONFIG_INVALID` when `daily_path` is absent or invalid; the
+adapter never silently substitutes `Daily/`.
+
+Both tools return `status`, `request_id`, `idempotency_key`, `path`,
+`affected_paths`, `warnings`, `recovery`, `error_code`, and `retryable`.
+`committed` and `skipped` are successful. `conflict`, `partial`, and `failed`
+return `isError=true`.
+
+Reuse an idempotency key only for the same payload. A repeated key and payload
+returns `skipped`; a repeated key with different content returns
+`IDEMPOTENCY_CONFLICT`. After a retryable timeout, cancellation, or partial
+result, inspect `affected_paths` and `recovery`, then retry with the same key.
+Keyless ambiguous failures, including partial outcomes, are not automatically
+retryable. Their recovery action requires manual verification of
+`affected_paths` before any retry.
+If `recovery.required` remains true, follow its action before changing the key
+or editing affected files manually.
 
 The `ask_vault_librarian` prompt is a bounded read-only MCP workflow over the
 taxonomy, librarian, pending, and search-preview surfaces. It does not invoke
@@ -104,4 +132,5 @@ The machine-readable contract is [`contract.json`](contract.json). Its fixture
 cases are in [`test/fixtures/contract-fixtures.json`](test/fixtures/contract-fixtures.json)
 and are checked by `test/contract.test.mjs`.
 
-Admin prompts, legacy HTTP+SSE, and writes remain explicitly gated in the contract.
+Admin prompts and legacy HTTP+SSE remain explicitly gated in the contract. Writes
+are released behind the `vault:write` scope and authenticated HTTP idempotency.

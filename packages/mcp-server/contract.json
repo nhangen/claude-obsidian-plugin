@@ -19,8 +19,8 @@
     ]
   },
   "scopes": {
-    "stdio": ["vault:read", "repo:read"],
-    "streamableHttp": ["vault:read", "repo:read"],
+    "stdio": ["vault:read", "repo:read", "vault:write"],
+    "streamableHttp": ["vault:read", "repo:read", "vault:write"],
     "available": ["vault:read", "repo:read", "vault:write", "vault:admin"]
   },
   "http": {
@@ -118,6 +118,92 @@
       },
       "idempotency": "not-required-read-only",
       "errors": ["INVALID_INPUT", "PATH_INVALID", "METADATA_INCOMPLETE", "READ_FAILED", "SUBPROCESS_TIMEOUT", "SUBPROCESS_OUTPUT_LIMIT"]
+    },
+    "obsidian_keeper_save": {
+      "status": "mvp",
+      "readOnly": false,
+      "scope": "vault:write",
+      "privacy": "user-authored-content",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["title", "body", "resolved", "folder_hint"],
+        "properties": {
+          "title": { "type": "string", "minLength": 1, "maxLength": 240, "pattern": "^[^\\u0000-\\u001F\\u007F]*$" },
+          "body": { "type": "string", "minLength": 1, "maxLength": 65536 },
+          "resolved": { "type": "boolean", "const": true },
+          "folder_hint": { "type": "string", "minLength": 1, "maxLength": 1024, "pattern": "^[^\\u0000-\\u001F\\u007F]*$" },
+          "type": { "type": "string", "maxLength": 100, "pattern": "^[^\\u0000-\\u001F\\u007F]*$" },
+          "links": { "type": "array", "items": { "type": "string", "maxLength": 2048, "pattern": "^[^\\u0000-\\u001F\\u007F]*$" }, "maxItems": 20 },
+          "idempotency_key": { "type": "string", "minLength": 1, "maxLength": 240, "pattern": "^[A-Za-z0-9._:-]+$" },
+          "request_id": { "type": "string", "minLength": 1, "maxLength": 240, "pattern": "^[A-Za-z0-9._:-]+$" }
+        }
+      },
+      "resultSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["status", "request_id", "idempotency_key", "path", "affected_paths", "warnings", "recovery", "error_code", "retryable"],
+        "properties": {
+          "status": { "type": "string", "enum": ["committed", "skipped", "conflict", "partial", "failed"] },
+          "request_id": { "type": "string" },
+          "idempotency_key": { "type": "string" },
+          "path": { "type": "string" },
+          "affected_paths": { "type": "array", "items": { "type": "string" } },
+          "warnings": { "type": "array", "items": { "type": "string" } },
+          "recovery": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["required", "action"],
+            "properties": { "required": { "type": "boolean" }, "action": { "type": "string" } }
+          },
+          "error_code": { "type": ["string", "null"] },
+          "retryable": { "type": "boolean" }
+        }
+      },
+      "idempotency": "required for Streamable HTTP writes and optional for local stdio compatibility; same key and payload skips, same key with a different payload conflicts",
+      "errors": ["INVALID_INPUT", "PATH_INVALID", "CONFIG_INVALID", "FORBIDDEN", "IDEMPOTENCY_CONFLICT", "CONFLICT", "PARTIAL", "WRITE_FAILED", "KEEPER_PROTOCOL_ERROR", "SUBPROCESS_TIMEOUT", "SUBPROCESS_OUTPUT_LIMIT", "CANCELLED"]
+    },
+    "obsidian_daily_append": {
+      "status": "mvp",
+      "readOnly": false,
+      "scope": "vault:write",
+      "privacy": "user-authored-content",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["content"],
+        "properties": {
+          "content": { "type": "string", "minLength": 1, "maxLength": 65536 },
+          "section": { "type": "string", "maxLength": 240, "pattern": "^[^\\u0000-\\u001F\\u007F]*$" },
+          "date": { "type": "string", "pattern": "^\\d{4}-\\d{2}-\\d{2}$" },
+          "skip_if_hash": { "type": "string", "minLength": 7, "maxLength": 64, "pattern": "^[0-9a-fA-F]+$" },
+          "idempotency_key": { "type": "string", "minLength": 1, "maxLength": 240, "pattern": "^[A-Za-z0-9._:-]+$" },
+          "request_id": { "type": "string", "minLength": 1, "maxLength": 240, "pattern": "^[A-Za-z0-9._:-]+$" }
+        }
+      },
+      "resultSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["status", "request_id", "idempotency_key", "path", "affected_paths", "warnings", "recovery", "error_code", "retryable"],
+        "properties": {
+          "status": { "type": "string", "enum": ["committed", "skipped", "conflict", "partial", "failed"] },
+          "request_id": { "type": "string" },
+          "idempotency_key": { "type": "string" },
+          "path": { "type": "string" },
+          "affected_paths": { "type": "array", "items": { "type": "string" } },
+          "warnings": { "type": "array", "items": { "type": "string" } },
+          "recovery": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["required", "action"],
+            "properties": { "required": { "type": "boolean" }, "action": { "type": "string" } }
+          },
+          "error_code": { "type": ["string", "null"] },
+          "retryable": { "type": "boolean" }
+        }
+      },
+      "idempotency": "required for Streamable HTTP writes and optional for local stdio compatibility; same key and payload skips, same key with a different payload conflicts",
+      "errors": ["INVALID_INPUT", "PATH_INVALID", "CONFIG_INVALID", "FORBIDDEN", "IDEMPOTENCY_CONFLICT", "CONFLICT", "PARTIAL", "WRITE_FAILED", "KEEPER_PROTOCOL_ERROR", "SUBPROCESS_TIMEOUT", "SUBPROCESS_OUTPUT_LIMIT", "CANCELLED"]
     }
   },
   "resources": {
@@ -176,25 +262,44 @@
     }
   },
   "writes": {
-    "mvp": false,
-    "requiredScopes": ["vault:write", "vault:admin"],
+    "status": "released",
+    "released": true,
+    "mvp": true,
+    "requiredScopes": ["vault:write"],
     "statuses": ["committed", "skipped", "partial", "conflict", "failed"],
     "invariants": [
       "Canonical containment rejects traversal and symlink escape for keeper-cooperating same-host writers.",
       "Path publication is revalidated while holding the canonical vault lock; non-cooperating filesystem mutation is outside the portable shell threat model.",
       "A response never reports success for a partial or conflicted write.",
+      "Keeper-save callers must set resolved=true and provide a vault-relative target folder; MCP does not invoke librarian routing or deduplication.",
+      "A keyless partial result is downgraded to failed and never advertises automatic recovery.",
+      "A keeper request-body pipe error cannot produce a successful response.",
       "Remote writes require authentication, explicit gating, and an idempotency key."
     ]
   },
   "errors": {
-    "codes": ["INVALID_INPUT", "PATH_INVALID", "READ_FAILED", "SCAN_LIMIT", "METADATA_INCOMPLETE", "SUBPROCESS_TIMEOUT", "SUBPROCESS_OUTPUT_LIMIT", "CANCELLED"],
+    "codes": ["INVALID_INPUT", "PATH_INVALID", "CONFIG_INVALID", "READ_FAILED", "SCAN_LIMIT", "METADATA_INCOMPLETE", "FORBIDDEN", "IDEMPOTENCY_CONFLICT", "CONFLICT", "PARTIAL", "WRITE_FAILED", "KEEPER_PROTOCOL_ERROR", "SUBPROCESS_TIMEOUT", "SUBPROCESS_OUTPUT_LIMIT", "CANCELLED"],
     "schema": {
       "type": "object",
       "additionalProperties": false,
       "required": ["code", "detail"],
       "properties": {
         "code": { "type": "string" },
-        "detail": { "type": "string", "maxLength": 240 }
+        "detail": { "type": "string", "maxLength": 240 },
+        "status": { "type": "string", "enum": ["conflict", "partial", "failed"] },
+        "request_id": { "type": "string" },
+        "idempotency_key": { "type": "string" },
+        "path": { "type": "string" },
+        "affected_paths": { "type": "array", "items": { "type": "string" } },
+        "warnings": { "type": "array", "items": { "type": "string" } },
+        "recovery": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["required", "action"],
+          "properties": { "required": { "type": "boolean" }, "action": { "type": "string" } }
+        },
+        "error_code": { "type": "string" },
+        "retryable": { "type": "boolean" }
       }
     },
     "transport": "Use standard JSON-RPC/MCP errors for invalid requests and stable tool codes for execution failures.",

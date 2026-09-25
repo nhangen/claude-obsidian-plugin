@@ -128,7 +128,7 @@ function validateToken(req, configuration) {
     const scopes = Array.isArray(claims.scope)
       ? claims.scope.filter((scope) => typeof scope === "string")
       : typeof claims.scope === "string" ? claims.scope.split(/\s+/).filter(Boolean) : [];
-    if (!scopes.includes("vault:read") && !scopes.includes("repo:read")) {
+    if (!scopes.includes("vault:read") && !scopes.includes("repo:read") && !scopes.includes("vault:write") && !scopes.includes("vault:admin")) {
       throw new HttpBoundaryError(403, -32003, "Insufficient scope");
     }
     return {
@@ -209,6 +209,7 @@ function requiredScopes(message) {
     if (!item || typeof item !== "object") continue;
     if (item.method === "tools/call" && item.params?.name === "obsidian_find_notes") scopes.add("vault:read");
     if (item.method === "tools/call" && item.params?.name === "obsidian_commit_meta") scopes.add("repo:read");
+    if (item.method === "tools/call" && (item.params?.name === "obsidian_keeper_save" || item.params?.name === "obsidian_daily_append")) scopes.add("vault:write");
     if (typeof item.method === "string" && item.method.startsWith("resources/")) scopes.add("vault:read");
     if (typeof item.method === "string" && item.method.startsWith("prompts/")) scopes.add("vault:read");
   }
@@ -272,7 +273,7 @@ function createSession(configuration, auth) {
     absoluteExpiresAt: auth.expiresAt,
     expiryTimer: undefined,
     closed: false,
-    server: createServer({ supportedProtocolVersions: protocolVersions }),
+    server: createServer({ supportedProtocolVersions: protocolVersions, scopes: auth.scopes, requireWriteIdempotency: true }),
     transport,
   };
   return session;

@@ -175,7 +175,7 @@ test("authenticated Streamable HTTP is read-only and enforces transport boundari
 
   const insufficientScope = await fetch(`${url}/mcp`, {
     method: "POST",
-    headers: requestHeaders(url, token({ scope: "vault:write" })),
+    headers: requestHeaders(url, token({ scope: "other:scope" })),
     body: JSON.stringify(initializeRequest()),
   });
   assert.equal(insufficientScope.status, 403);
