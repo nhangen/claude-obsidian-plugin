@@ -169,8 +169,9 @@ keeper_heading_has_sha() {
     # very format -- and an illustrative heading then scans as a real capture,
     # which reports a commit as already captured and silently drops it.
     # CommonMark: a fence closes only on the same char, at least as long.
-    /^(```+|~~~+)/ {
-      run = $0; sub(/[^`~].*$/, "", run); ch = substr(run, 1, 1); n = length(run)
+    # Indented 0-3 spaces allowed per CommonMark spec.
+    /^[ ]{0,3}(```+|~~~+)/ {
+      run = $0; sub(/^[ ]*/, "", run); sub(/[^`~].*$/, "", run); ch = substr(run, 1, 1); n = length(run)
       if (fence_ch == "") { fence_ch = ch; fence_n = n }
       else if (ch == fence_ch && n >= fence_n) { fence_ch = ""; fence_n = 0 }
       next
