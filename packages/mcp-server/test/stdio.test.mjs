@@ -12,6 +12,7 @@ const packageRoot = resolve(dirname(new URL(import.meta.url).pathname), "..");
 const entrypoint = join(packageRoot, "src", "stdio.mjs");
 const repositoryRoot = resolve(packageRoot, "../..");
 const packageManifest = JSON.parse(readFileSync(join(packageRoot, "package.json"), "utf8"));
+const contract = JSON.parse(await readFile(join(packageRoot, "contract.json"), "utf8"));
 
 function startServer(configPath, extraEnv = {}) {
   const child = spawn(process.execPath, [entrypoint], {
@@ -151,6 +152,32 @@ test("stdio server exposes read-only tools with clean MCP framing", async (t) =>
   assert.deepEqual(toolNames.sort(), ["obsidian_commit_meta", "obsidian_find_notes"]);
   const searchTool = tools.result.tools.find((tool) => tool.name === "obsidian_find_notes");
   const metadataTool = tools.result.tools.find((tool) => tool.name === "obsidian_commit_meta");
+  for (const tool of tools.result.tools) {
+    const { $schema, ...advertisedInputSchema } = tool.inputSchema;
+    assert.deepEqual(advertisedInputSchema, contract.tools[tool.name].inputSchema);
+    assert.deepEqual(tool.annotations, contract.tools[tool.name].annotations);
+  }
+  assert.equal(searchTool.inputSchema.type, "object");
+  assert.equal(searchTool.inputSchema.additionalProperties, false);
+  assert.deepEqual(searchTool.inputSchema.required, ["query"]);
+  assert.equal(searchTool.inputSchema.properties.query.minLength, 1);
+  assert.equal(searchTool.inputSchema.properties.query.maxLength, 240);
+  assert.deepEqual(searchTool.annotations, {
+    readOnlyHint: true,
+    destructiveHint: false,
+    idempotentHint: true,
+    openWorldHint: false,
+  });
+  assert.equal(metadataTool.inputSchema.type, "object");
+  assert.equal(metadataTool.inputSchema.additionalProperties, false);
+  assert.deepEqual(metadataTool.inputSchema.required, ["repository"]);
+  assert.equal(metadataTool.inputSchema.properties.repository.maxLength, 4096);
+  assert.deepEqual(metadataTool.annotations, {
+    readOnlyHint: true,
+    destructiveHint: false,
+    idempotentHint: true,
+    openWorldHint: false,
+  });
   assert.equal(searchTool.outputSchema.properties.matches.type, "array");
   assert.equal(metadataTool.outputSchema.properties.commit.type, "string");
 
@@ -319,6 +346,11 @@ test("stdio write profile exposes write tools only when explicitly enabled", asy
     tools.result.tools.map((tool) => tool.name).sort(),
     ["obsidian_commit_meta", "obsidian_daily_append", "obsidian_find_notes", "obsidian_keeper_save"],
   );
+  for (const tool of tools.result.tools) {
+    const { $schema, ...advertisedInputSchema } = tool.inputSchema;
+    assert.deepEqual(advertisedInputSchema, contract.tools[tool.name].inputSchema);
+    assert.deepEqual(tool.annotations, contract.tools[tool.name].annotations);
+  }
 });
 
 test("createServer defaults to read scopes for direct callers", async (t) => {

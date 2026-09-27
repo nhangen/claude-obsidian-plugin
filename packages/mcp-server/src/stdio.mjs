@@ -817,19 +817,23 @@ const writeOutput = z.strictObject({
   }
 });
 
-const searchInput = z.strictObject({ query: z.string().trim().min(1).max(240) });
-const metadataInput = z.strictObject({ repository: z.string().trim().min(1).max(maxRepositoryPathCharacters) });
-const safeText = (max) => z.string().max(max).refine((value) => !/[\u0000-\u001F\u007F]/.test(value), "control characters are not allowed");
+const nonBlankText = (max) => z.string().trim().min(1).max(max).regex(/\S/);
+const searchInput = z.strictObject({ query: nonBlankText(240) });
+const metadataInput = z.strictObject({ repository: nonBlankText(maxRepositoryPathCharacters) });
+const safeText = (max) => z.string().max(max).regex(/^[^\u0000-\u001F\u007F]*$/);
+const noteTitle = z.string().trim().min(1).max(240).regex(/^[^\/\\\u0000-\u001F\u007F]*$/);
+const safeFolder = z.string().trim().min(1).max(1024).regex(/^(?!\.{1,2}(?:\/|$))[^\\/\u0000-\u001F\u007F]+(?:\/(?!\.{1,2}(?:\/|$))[^\\/\u0000-\u001F\u007F]+)*$/);
 const keeperSaveInput = z.strictObject({
   title: safeText(240).trim().min(1).refine((value) => Boolean(normalizedKeeperSaveTarget(value, "Inbox")), "title must be a note name without path separators"),
   body: z.string().min(1).max(65536),
-  folder_hint: safeText(1024).trim().min(1),
   resolved: z.literal(true),
+  folder_hint: safeText(1024).trim().min(1),
   type: safeText(100).optional(),
   links: z.array(safeText(2048)).max(20).optional(),
   idempotency_key: z.string().min(1).max(240).regex(/^[A-Za-z0-9._:-]+$/).optional(),
   request_id: z.string().min(1).max(240).regex(/^[A-Za-z0-9._:-]+$/).optional(),
 });
+const keeperSaveAdvertisedInput = keeperSaveInput.extend({ title: noteTitle, folder_hint: safeFolder });
 
 const dailyAppendInput = z.strictObject({
   content: z.string().min(1).max(65536),
@@ -839,6 +843,38 @@ const dailyAppendInput = z.strictObject({
   idempotency_key: z.string().min(1).max(240).regex(/^[A-Za-z0-9._:-]+$/).optional(),
   request_id: z.string().min(1).max(240).regex(/^[A-Za-z0-9._:-]+$/).optional(),
 });
+
+const readToolAnnotations = {
+  readOnlyHint: true,
+  destructiveHint: false,
+  idempotentHint: true,
+  openWorldHint: false,
+};
+const writeToolAnnotations = {
+  readOnlyHint: false,
+  destructiveHint: false,
+  idempotentHint: false,
+  openWorldHint: false,
+};
+const keeperSaveAnnotations = {
+  readOnlyHint: false,
+  destructiveHint: false,
+  idempotentHint: true,
+  openWorldHint: false,
+};
+
+function advertisedInputSchema(schema) {
+  return {
+    "~standard": {
+      version: 1,
+      vendor: "claude-obsidian-mcp",
+      validate: (value) => ({ value }),
+      jsonSchema: {
+        input: (options) => schema["~standard"].jsonSchema.input(options),
+      },
+    },
+  };
+}
 
 export function createServer({ supportedProtocolVersions = protocolVersions, scopes = ["vault:read", "repo:read"], requireWriteIdempotency = false } = {}) {
   const configuration = loadConfiguration();
@@ -852,8 +888,9 @@ export function createServer({ supportedProtocolVersions = protocolVersions, sco
     {
       title: "Find Obsidian notes",
       description: "Search the configured Obsidian vault without modifying it.",
-      inputSchema: z.unknown(),
+      inputSchema: advertisedInputSchema(searchInput),
       outputSchema: searchOutput,
+      annotations: readToolAnnotations,
     },
     async (args, ctx) => {
       try {
@@ -868,8 +905,9 @@ export function createServer({ supportedProtocolVersions = protocolVersions, sco
     {
       title: "Read commit metadata",
       description: "Read sanitized commit metadata for an existing local repository.",
-      inputSchema: z.unknown(),
+      inputSchema: advertisedInputSchema(metadataInput),
       outputSchema: metadataOutput,
+      annotations: readToolAnnotations,
     },
     async (args, ctx) => {
       try {
@@ -885,8 +923,9 @@ export function createServer({ supportedProtocolVersions = protocolVersions, sco
     {
       title: "Save Obsidian note",
       description: "Save a structured note to the Obsidian vault.",
-      inputSchema: z.unknown(),
+      inputSchema: advertisedInputSchema(keeperSaveAdvertisedInput),
       outputSchema: writeOutput,
+      annotations: keeperSaveAnnotations,
     },
     async (args, ctx) => {
       const fallback = writeRequestFallback("obsidian_keeper_save", args, configuration);
@@ -904,8 +943,9 @@ export function createServer({ supportedProtocolVersions = protocolVersions, sco
     {
       title: "Append to daily note",
       description: "Append a section to today's daily note in the Obsidian vault.",
-      inputSchema: z.unknown(),
+      inputSchema: advertisedInputSchema(dailyAppendInput),
       outputSchema: writeOutput,
+      annotations: writeToolAnnotations,
     },
     async (args, ctx) => {
       const fallback = writeRequestFallback("obsidian_daily_append", args, configuration);
