@@ -134,3 +134,45 @@ and are checked by `test/contract.test.mjs`.
 
 Admin prompts and legacy HTTP+SSE remain explicitly gated in the contract. Writes
 are released behind the `vault:write` scope and authenticated HTTP idempotency.
+
+## Release and installation contract
+
+GitHub Actions is the release builder. A pushed `mcp-vVERSION` tag must match the
+private package version exactly. The workflow checks out that tag, installs the
+locked dependencies, runs the package test suite, runs `npm pack`, and retains
+the resulting tarball and release metadata as a CI artifact. Tag builds also
+publish both files as GitHub Release assets. The package remains private and is
+never published to the public npm registry.
+
+The metadata is generated from the packed tarball. It records the source commit,
+package name and version, SHA-256 of the packaged `contract.json`, SHA-256 of the
+tarball, and the Node.js and npm versions used to build it. It intentionally has
+no timestamp or runner-specific fields.
+
+To reproduce and inspect a bundle locally, check out an exact `mcp-vVERSION` tag
+or full commit SHA and run:
+
+```bash
+cd packages/mcp-server
+npm run release:bundle -- --revision mcp-v0.1.0
+ls -l release/
+```
+
+Use the full checked-out commit SHA instead of the tag when preparing a bundle
+before tagging. The command refuses branch names and refuses a revision that does
+not resolve to the checked-out commit. It also requires a clean worktree so the
+recorded commit identifies every packed file. It runs `npm ci`, the package tests,
+and the same pack and metadata path used by CI.
+
+ML-1 installation is a separate, explicit operation. It downloads only the
+pinned tarball and matching metadata from the selected GitHub Release, verifies
+the tarball SHA-256, extracts the tarball to verify the packaged `contract.json`
+SHA-256, and installs that local tarball. A systemd unit then runs the installed
+`claude-obsidian-mcp` or `claude-obsidian-mcp-http` executable with its explicit
+configuration. This repository's release workflow does not connect to ML-1,
+install the package, or restart services.
+
+The corresponding llm-tools pin records the GitHub Release asset, source commit,
+tarball SHA-256, and contract SHA-256. Updating that pin and deploying it are
+separate reviewed changes. A release asset alone is not evidence that ML-1 or
+llm-tools has been updated.
