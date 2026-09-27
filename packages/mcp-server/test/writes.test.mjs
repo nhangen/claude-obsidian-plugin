@@ -29,7 +29,13 @@ function jwtToken({ scope = "vault:read repo:read", exp = Math.floor(Date.now() 
 function startStdioServer(configPath, extraEnv = {}) {
   const child = spawn(process.execPath, [stdioEntrypoint], {
     cwd: tmpdir(),
-    env: { ...process.env, OBSIDIAN_LOCAL_MD: configPath, MCP_REPOSITORY_ROOTS: repositoryRoot, ...extraEnv },
+    env: {
+      ...process.env,
+      OBSIDIAN_LOCAL_MD: configPath,
+      MCP_REPOSITORY_ROOTS: repositoryRoot,
+      MCP_STDIO_PROFILE: "write",
+      ...extraEnv,
+    },
     stdio: ["pipe", "pipe", "pipe"],
   });
   let stdout = "";
@@ -270,9 +276,10 @@ test("stdio server executes obsidian_keeper_save tool call", async (t) => {
     method: "tools/call",
     params: { name: "obsidian_keeper_save", arguments: { title: "No Key", body: "Rejected", resolved: true, folder_hint: "Inbox" } },
   }, 5);
-  assert.equal(localWithoutKey.result.isError, false);
-  assert.equal(localWithoutKey.result.structuredContent.status, "committed");
-  assert.equal(localWithoutKey.result.structuredContent.idempotency_key, "");
+  assert.equal(localWithoutKey.result.isError, true);
+  const localWithoutKeyPayload = JSON.parse(localWithoutKey.result.content[0].text);
+  assert.equal(localWithoutKeyPayload.code, "INVALID_INPUT");
+  assert.equal(localWithoutKeyPayload.idempotency_key, "");
 });
 
 test("stdio keeper save enforces resolved target semantics and input limits", async (t) => {
@@ -845,7 +852,6 @@ test("stdio timeout and cancellation never report false write success and keep s
   assert.equal(timeoutRetry.result.isError, false);
   assert.equal(timeoutRetry.result.structuredContent.status, "committed");
 
-  holder = await holdKeeperLock(vaultPath, root, "timeout-keyless");
   const keylessTimedOut = await server.request({
     jsonrpc: "2.0", id: 6, method: "tools/call",
     params: {
@@ -855,12 +861,11 @@ test("stdio timeout and cancellation never report false write success and keep s
   }, 6);
   assert.equal(keylessTimedOut.result.isError, true);
   const keylessTimeoutOutcome = JSON.parse(keylessTimedOut.result.content[0].text);
-  assert.equal(keylessTimeoutOutcome.code, "SUBPROCESS_TIMEOUT");
+  assert.equal(keylessTimeoutOutcome.code, "INVALID_INPUT");
   assert.equal(keylessTimeoutOutcome.retryable, false);
   assert.equal(keylessTimeoutOutcome.recovery.required, false);
   assert.equal(keylessTimeoutOutcome.recovery.action, "");
-  assert.match(keylessTimeoutOutcome.warnings.join(" "), /may have committed/);
-  await holder.release();
+  assert.equal(keylessTimeoutOutcome.idempotency_key, "");
 
   holder = await holdKeeperLock(vaultPath, root, "cancel");
   const cancelled = server.request({

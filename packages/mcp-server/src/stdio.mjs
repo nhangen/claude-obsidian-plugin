@@ -49,7 +49,18 @@ const maxScanEntries = 10_000;
 const maxScanBytes = 64 * 1024 * 1024;
 const subprocessTimeoutMs = 5_000;
 const protocolVersions = ["2026-07-28", "2025-11-25"];
+const stdioProfiles = {
+  read: { scopes: ["vault:read", "repo:read"], requireWriteIdempotency: false },
+  write: { scopes: ["vault:read", "repo:read", "vault:write"], requireWriteIdempotency: true },
+};
 const activeChildren = new Set();
+
+function stdioServerOptions() {
+  const profile = process.env.MCP_STDIO_PROFILE?.trim() || "read";
+  const options = stdioProfiles[profile];
+  if (!options) throw new Error("MCP_STDIO_PROFILE must be one of: read, write");
+  return options;
+}
 
 function stderr(message) {
   process.stderr.write(`mcp-server: ${message}\n`);
@@ -825,11 +836,11 @@ const dailyAppendInput = z.strictObject({
   request_id: z.string().min(1).max(240).regex(/^[A-Za-z0-9._:-]+$/).optional(),
 });
 
-export function createServer({ supportedProtocolVersions = protocolVersions, scopes = ["vault:read", "repo:read", "vault:write"], requireWriteIdempotency = false } = {}) {
+export function createServer({ supportedProtocolVersions = protocolVersions, scopes = ["vault:read", "repo:read"], requireWriteIdempotency = false } = {}) {
   const configuration = loadConfiguration();
   const availableScopes = new Set(scopes);
   const server = new McpServer(
-    { name: "claude-obsidian-mcp", version: "0.1.0" },
+    { name: "claude-obsidian-mcp", version: "0.2.0" },
     { capabilities: { tools: {}, resources: { listChanged: false }, prompts: { listChanged: false } }, supportedProtocolVersions },
   );
   if (availableScopes.has("vault:read")) server.registerTool(
@@ -1011,7 +1022,7 @@ export async function closeActiveChildren() {
 }
 
 export function startStdio() {
-  const handle = serveStdio(createServer, { onerror: (error) => stderr(error instanceof Error ? error.message : String(error)) });
+  const handle = serveStdio(() => createServer(stdioServerOptions()), { onerror: (error) => stderr(error instanceof Error ? error.message : String(error)) });
   let shuttingDown = false;
   async function shutdown(exit = false) {
     if (shuttingDown) return;

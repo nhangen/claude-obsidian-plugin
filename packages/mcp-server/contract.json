@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "contractVersion": "0.1.0",
+  "contractVersion": "0.2.0",
   "protocol": {
     "sdk": "@modelcontextprotocol/server@2.0.0",
     "modernRevision": "2026-07-28",
@@ -19,7 +19,8 @@
     ]
   },
   "scopes": {
-    "stdio": ["vault:read", "repo:read", "vault:write"],
+    "stdio": ["vault:read", "repo:read"],
+    "stdioWriteProfile": ["vault:read", "repo:read", "vault:write"],
     "streamableHttp": ["vault:read", "repo:read", "vault:write"],
     "available": ["vault:read", "repo:read", "vault:write", "vault:admin"]
   },
@@ -127,7 +128,7 @@
       "inputSchema": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["title", "body", "resolved", "folder_hint"],
+        "required": ["title", "body", "resolved", "folder_hint", "idempotency_key"],
         "properties": {
           "title": { "type": "string", "minLength": 1, "maxLength": 240, "pattern": "^[^\\u0000-\\u001F\\u007F]*$" },
           "body": { "type": "string", "minLength": 1, "maxLength": 65536 },
@@ -160,7 +161,7 @@
           "retryable": { "type": "boolean" }
         }
       },
-      "idempotency": "required for Streamable HTTP writes and optional for local stdio compatibility; same key and payload skips, same key with a different payload conflicts",
+      "idempotency": "required for writes in the explicit write profile and Streamable HTTP; same key and payload skips, same key with a different payload conflicts",
       "errors": ["INVALID_INPUT", "PATH_INVALID", "CONFIG_INVALID", "FORBIDDEN", "IDEMPOTENCY_CONFLICT", "CONFLICT", "PARTIAL", "WRITE_FAILED", "KEEPER_PROTOCOL_ERROR", "SUBPROCESS_TIMEOUT", "SUBPROCESS_OUTPUT_LIMIT", "CANCELLED"]
     },
     "obsidian_daily_append": {
@@ -171,7 +172,7 @@
       "inputSchema": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["content"],
+        "required": ["content", "idempotency_key"],
         "properties": {
           "content": { "type": "string", "minLength": 1, "maxLength": 65536 },
           "section": { "type": "string", "maxLength": 240, "pattern": "^[^\\u0000-\\u001F\\u007F]*$" },
@@ -202,7 +203,7 @@
           "retryable": { "type": "boolean" }
         }
       },
-      "idempotency": "required for Streamable HTTP writes and optional for local stdio compatibility; same key and payload skips, same key with a different payload conflicts",
+      "idempotency": "required for writes in the explicit write profile and Streamable HTTP; same key and payload skips, same key with a different payload conflicts",
       "errors": ["INVALID_INPUT", "PATH_INVALID", "CONFIG_INVALID", "FORBIDDEN", "IDEMPOTENCY_CONFLICT", "CONFLICT", "PARTIAL", "WRITE_FAILED", "KEEPER_PROTOCOL_ERROR", "SUBPROCESS_TIMEOUT", "SUBPROCESS_OUTPUT_LIMIT", "CANCELLED"]
     }
   },

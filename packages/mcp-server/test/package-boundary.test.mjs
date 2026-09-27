@@ -191,7 +191,7 @@ test("packed package exposes a built stdio launcher that works outside the insta
   });
   const explicitChild = spawn(launcher, [], {
     cwd: externalCwd,
-    env: { ...baseEnvironment, OBSIDIAN_LOCAL_MD: config, MCP_REPOSITORY_ROOTS: repositoryRoot },
+    env: { ...baseEnvironment, OBSIDIAN_LOCAL_MD: config, MCP_REPOSITORY_ROOTS: repositoryRoot, MCP_STDIO_PROFILE: "write" },
     stdio: ["pipe", "pipe", "pipe"],
   });
   const defaultOutput = collectOutput(defaultChild);
@@ -332,7 +332,7 @@ test("packed stdio and HTTP entrypoints serialize contended keeper writes", asyn
     await rm(fixture, { recursive: true, force: true });
   });
 
-  const environment = { ...process.env, OBSIDIAN_LOCAL_MD: config };
+  const environment = { ...process.env, OBSIDIAN_LOCAL_MD: config, MCP_STDIO_PROFILE: "write" };
   delete environment.MCP_REPOSITORY_ROOTS;
 
   async function startStdio(overrides = {}) {
@@ -781,7 +781,7 @@ test("source entrypoint uses canonical helpers before a build exists", async (t)
 
   const child = spawn(process.execPath, [join(sourceDirectory, "stdio.mjs")], {
     cwd: fixture,
-    env: { ...environment, OBSIDIAN_LOCAL_MD: config },
+    env: { ...environment, OBSIDIAN_LOCAL_MD: config, MCP_STDIO_PROFILE: "write" },
     stdio: ["pipe", "pipe", "pipe"],
   });
   const output = collectOutput(child);

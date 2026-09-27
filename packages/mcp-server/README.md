@@ -27,6 +27,7 @@ launcher and explicit configuration boundaries:
     "obsidian": {
       "command": "claude-obsidian-mcp",
       "env": {
+        "MCP_STDIO_PROFILE": "read",
         "OBSIDIAN_LOCAL_MD": "/absolute/path/to/obsidian.local.md",
         "MCP_REPOSITORY_ROOTS": "/absolute/path/to/repository"
       }
@@ -43,6 +44,27 @@ The client invokes the package command rather than a file inside the package;
 configuration and repository authorization remain explicit environment values.
 Installed packages authorize no repository roots when `MCP_REPOSITORY_ROOTS`
 is omitted. Multiple roots use the platform path delimiter.
+
+Stdio defaults to the read profile, which exposes only vault and repository
+read tools. The write profile is an explicit opt-in:
+
+    {
+      "mcpServers": {
+        "obsidian-write": {
+          "command": "claude-obsidian-mcp",
+          "env": {
+            "MCP_STDIO_PROFILE": "write",
+            "OBSIDIAN_LOCAL_MD": "/absolute/path/to/obsidian.local.md",
+            "MCP_REPOSITORY_ROOTS": "/absolute/path/to/repository"
+          }
+        }
+      }
+    }
+
+The write profile exposes vault:write and requires an idempotency key for
+every write. The host adapter must still require explicit approval for the two
+write tools; the profile is the server-side scope gate, not a substitute for
+host approval.
 
 Authenticated Streamable HTTP uses stateful sessions at `/mcp` for the
 compatibility revision `2025-11-25`:
@@ -90,13 +112,13 @@ error contract instead of leaking SDK validation text.
 
 ## Write contract
 
-`obsidian_keeper_save` accepts `title`, `body`, required `resolved: true` and
-`folder_hint`, plus optional `type`,
-and `links`, plus optional `idempotency_key` and `request_id`. `folder_hint` is
+`obsidian_keeper_save` accepts `title`, `body`, required `resolved: true`,
+`folder_hint`, and `idempotency_key`, plus optional `type`, `links`, and
+`request_id`. `folder_hint` is
 the caller-resolved vault-relative target folder; this MCP adapter does not run
-librarian routing or deduplication. Streamable HTTP
-writes require `idempotency_key`; local stdio calls retain keyless compatibility.
-`obsidian_daily_append` accepts `content`, optional `section`, `date`, and
+librarian routing or deduplication. The explicit stdio write profile and
+Streamable HTTP both require `idempotency_key` for writes.
+`obsidian_daily_append` accepts `content`, required `idempotency_key`, optional `section`, `date`, and
 `skip_if_hash` (a 7-64 character hexadecimal commit hash), plus the same request fields. Daily writes use the configured
 `daily_path`, and results report the vault-relative path actually written. MCP
 writes fail with `CONFIG_INVALID` when `daily_path` is absent or invalid; the

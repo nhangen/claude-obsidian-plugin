@@ -13,7 +13,7 @@ const repositoryRoot = resolve(packageRoot, "../..");
 function startServer(configPath, extraEnv = {}) {
   const child = spawn(process.execPath, [entrypoint], {
     cwd: tmpdir(),
-    env: { ...process.env, OBSIDIAN_LOCAL_MD: configPath, MCP_REPOSITORY_ROOTS: repositoryRoot, ...extraEnv },
+    env: { ...process.env, OBSIDIAN_LOCAL_MD: configPath, MCP_REPOSITORY_ROOTS: repositoryRoot, MCP_STDIO_PROFILE: "read", ...extraEnv },
     stdio: ["pipe", "pipe", "pipe"],
   });
   let stdout = "";
@@ -144,7 +144,7 @@ test("stdio server exposes read-only tools with clean MCP framing", async (t) =>
     2,
   );
   const toolNames = tools.result.tools.map((tool) => tool.name);
-  assert.deepEqual(toolNames.sort(), ["obsidian_commit_meta", "obsidian_daily_append", "obsidian_find_notes", "obsidian_keeper_save"]);
+  assert.deepEqual(toolNames.sort(), ["obsidian_commit_meta", "obsidian_find_notes"]);
   const searchTool = tools.result.tools.find((tool) => tool.name === "obsidian_find_notes");
   const metadataTool = tools.result.tools.find((tool) => tool.name === "obsidian_commit_meta");
   assert.equal(searchTool.outputSchema.properties.matches.type, "array");
@@ -224,26 +224,29 @@ test("stdio server exposes read-only tools with clean MCP framing", async (t) =>
   assert.doesNotMatch(metadata.result?.content?.[0]?.text ?? "", /vault_path=/);
 
   const beforeMutationAttempt = await readFile(join(vault, "mcp-note.md"), "utf8");
-  const unavailableMutation = await server.request(
-    {
-      jsonrpc: "2.0",
-      id: 80,
-      method: "tools/call",
-      params: { name: "obsidian_insert_note", arguments: { target: "mcp-note.md", body: "changed" } },
-    },
-    80,
-  );
-  assert.ok(unavailableMutation.error);
+  const beforeDailyMutationAttempt = await readFile(join(vault, "Daily", "2026-09-20.md"), "utf8");
+  for (const [id, name, arguments_] of [
+    [80, "obsidian_keeper_save", { title: "Read Profile", body: "changed", resolved: true, folder_hint: "Inbox", idempotency_key: "read-profile-save" }],
+    [81, "obsidian_daily_append", { content: "changed", date: "2026-09-20", idempotency_key: "read-profile-daily" }],
+  ]) {
+    const unavailableMutation = await server.request(
+      { jsonrpc: "2.0", id, method: "tools/call", params: { name, arguments: arguments_ } },
+      id,
+    );
+    assert.ok(unavailableMutation.error);
+  }
   assert.equal(await readFile(join(vault, "mcp-note.md"), "utf8"), beforeMutationAttempt);
+  assert.equal(await readFile(join(vault, "Daily", "2026-09-20.md"), "utf8"), beforeDailyMutationAttempt);
+  await assert.rejects(readFile(join(vault, "Inbox", "Read Profile.md")));
 
   const outOfScope = await server.request(
     {
       jsonrpc: "2.0",
-      id: 81,
+      id: 82,
       method: "tools/call",
       params: { name: "obsidian_commit_meta", arguments: { repository: tmpdir() } },
     },
-    81,
+    82,
   );
   assert.equal(outOfScope.result?.isError, true);
   assert.equal(JSON.parse(outOfScope.result.content[0].text).code, "PATH_INVALID");

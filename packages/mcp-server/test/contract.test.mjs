@@ -6,12 +6,15 @@ const contract = JSON.parse(await readFile(new URL("../contract.json", import.me
 const fixtures = JSON.parse(await readFile(new URL("./fixtures/contract-fixtures.json", import.meta.url), "utf8"));
 
 test("pins the MCP protocol and transport boundary", () => {
+  assert.equal(contract.contractVersion, "0.2.0");
   assert.equal(contract.protocol.sdk, "@modelcontextprotocol/server@2.0.0");
   assert.equal(contract.protocol.modernRevision, "2026-07-28");
   assert.deepEqual(contract.protocol.compatibilityRevisions, ["2025-11-25"]);
   assert.deepEqual(contract.protocol.transports.mvp, ["stdio", "streamable-http"]);
   assert.deepEqual(contract.protocol.transports.planned, []);
   assert.deepEqual(contract.protocol.transports.compatibilityOnly, ["http+sse"]);
+  assert.deepEqual(contract.scopes.stdio, ["vault:read", "repo:read"]);
+  assert.deepEqual(contract.scopes.stdioWriteProfile, ["vault:read", "repo:read", "vault:write"]);
   assert.deepEqual(contract.scopes.streamableHttp, ["vault:read", "repo:read", "vault:write"]);
   assert.deepEqual(contract.protocol.clientMatrix, [
     { protocolRevision: "2026-07-28", transport: "stdio", status: "supported" },
@@ -44,12 +47,11 @@ test("pins tool surface including write tools", () => {
   assert.equal(contract.tools.obsidian_commit_meta.scope, "repo:read");
   assert.equal(contract.tools.obsidian_keeper_save.scope, "vault:write");
   assert.equal(contract.tools.obsidian_daily_append.scope, "vault:write");
-  assert.deepEqual(contract.tools.obsidian_keeper_save.inputSchema.required, ["title", "body", "resolved", "folder_hint"]);
+  assert.deepEqual(contract.tools.obsidian_keeper_save.inputSchema.required, ["title", "body", "resolved", "folder_hint", "idempotency_key"]);
   assert.deepEqual(contract.tools.obsidian_keeper_save.inputSchema.properties.resolved, { type: "boolean", const: true });
-  assert.ok(!contract.tools.obsidian_keeper_save.inputSchema.required.includes("idempotency_key"));
-  assert.ok(!contract.tools.obsidian_daily_append.inputSchema.required.includes("idempotency_key"));
-  assert.match(contract.tools.obsidian_keeper_save.idempotency, /required for Streamable HTTP writes/);
-  assert.match(contract.tools.obsidian_daily_append.idempotency, /optional for local stdio compatibility/);
+  assert.deepEqual(contract.tools.obsidian_daily_append.inputSchema.required, ["content", "idempotency_key"]);
+  assert.match(contract.tools.obsidian_keeper_save.idempotency, /required for writes in the explicit write profile and Streamable HTTP/);
+  assert.match(contract.tools.obsidian_daily_append.idempotency, /required for writes in the explicit write profile and Streamable HTTP/);
   assert.deepEqual(contract.tools.obsidian_keeper_save.resultSchema.required, [
     "status", "request_id", "idempotency_key", "path", "affected_paths", "warnings", "recovery", "error_code", "retryable"
   ]);

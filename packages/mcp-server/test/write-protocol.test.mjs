@@ -71,7 +71,7 @@ exit 9
 
   const child = spawn(process.execPath, [join(install, "dist", "stdio.mjs")], {
     cwd: fixture,
-    env: { ...process.env, OBSIDIAN_LOCAL_MD: config, MCP_TEST_KEEPER_STDIN_ERROR: "1" },
+    env: { ...process.env, OBSIDIAN_LOCAL_MD: config, MCP_STDIO_PROFILE: "write", MCP_TEST_KEEPER_STDIN_ERROR: "1" },
     stdio: ["pipe", "pipe", "pipe"],
   });
   const next = collect(child);
@@ -131,12 +131,9 @@ exit 9
   const keylessPartial = await next(14);
   const keylessPartialResult = JSON.parse(keylessPartial.result.content[0].text);
   assert.equal(keylessPartial.result.isError, true);
-  assert.equal(keylessPartialResult.code, "PARTIAL");
-  assert.equal(keylessPartialResult.status, "failed");
-  assert.equal(keylessPartialResult.recovery.required, true);
+  assert.equal(keylessPartialResult.code, "INVALID_INPUT");
+  assert.equal(keylessPartialResult.idempotency_key, "");
   assert.equal(keylessPartialResult.retryable, false);
-  assert.match(keylessPartialResult.recovery.action, /verify affected_paths manually/);
-  assert.match(keylessPartialResult.warnings.join(" "), /no idempotency key/);
 
   child.stdin.write(`${JSON.stringify({
     jsonrpc: "2.0", id: 15, method: "tools/call",
@@ -157,17 +154,17 @@ exit 9
     jsonrpc: "2.0", id: 20, method: "tools/call",
     params: {
       name: "obsidian_keeper_save",
-      arguments: { title: "Missing Output", body: "Body", resolved: true, folder_hint: "Inbox", request_id: "request-missing-output" },
+      arguments: { title: "Missing Output", body: "Body", resolved: true, folder_hint: "Inbox", idempotency_key: "missing-output-key", request_id: "request-missing-output" },
     },
   })}\n`);
   const missingOutput = await next(20);
   const missingOutputResult = JSON.parse(missingOutput.result.content[0].text);
   assert.equal(missingOutput.result.isError, true);
   assert.equal(missingOutputResult.code, "KEEPER_PROTOCOL_ERROR");
-  assert.equal(missingOutputResult.status, "failed");
-  assert.equal(missingOutputResult.recovery.required, false);
-  assert.equal(missingOutputResult.retryable, false);
-  assert.match(missingOutputResult.warnings.join(" "), /may have committed/);
+  assert.equal(missingOutputResult.status, "partial");
+  assert.equal(missingOutputResult.recovery.required, true);
+  assert.equal(missingOutputResult.retryable, true);
+  assert.match(missingOutputResult.warnings.join(" "), /keeper result was missing or invalid/);
 
   child.stdin.write(`${JSON.stringify({
     jsonrpc: "2.0", id: 21, method: "tools/call",
