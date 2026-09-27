@@ -9,6 +9,7 @@ import { test } from "node:test";
 const packageRoot = resolve(dirname(new URL(import.meta.url).pathname), "..");
 const entrypoint = join(packageRoot, "src", "stdio.mjs");
 const repositoryRoot = resolve(packageRoot, "../..");
+const contract = JSON.parse(await readFile(join(packageRoot, "contract.json"), "utf8"));
 
 function startServer(configPath, extraEnv = {}) {
   const child = spawn(process.execPath, [entrypoint], {
@@ -147,6 +148,52 @@ test("stdio server exposes read-only tools with clean MCP framing", async (t) =>
   assert.deepEqual(toolNames.sort(), ["obsidian_commit_meta", "obsidian_daily_append", "obsidian_find_notes", "obsidian_keeper_save"]);
   const searchTool = tools.result.tools.find((tool) => tool.name === "obsidian_find_notes");
   const metadataTool = tools.result.tools.find((tool) => tool.name === "obsidian_commit_meta");
+  const keeperTool = tools.result.tools.find((tool) => tool.name === "obsidian_keeper_save");
+  const dailyTool = tools.result.tools.find((tool) => tool.name === "obsidian_daily_append");
+  for (const tool of tools.result.tools) {
+    const { $schema, ...advertisedInputSchema } = tool.inputSchema;
+    assert.deepEqual(advertisedInputSchema, contract.tools[tool.name].inputSchema);
+    assert.deepEqual(tool.annotations, contract.tools[tool.name].annotations);
+  }
+  assert.equal(searchTool.inputSchema.type, "object");
+  assert.equal(searchTool.inputSchema.additionalProperties, false);
+  assert.deepEqual(searchTool.inputSchema.required, ["query"]);
+  assert.equal(searchTool.inputSchema.properties.query.minLength, 1);
+  assert.equal(searchTool.inputSchema.properties.query.maxLength, 240);
+  assert.deepEqual(searchTool.annotations, {
+    readOnlyHint: true,
+    destructiveHint: false,
+    idempotentHint: true,
+    openWorldHint: false,
+  });
+  assert.equal(metadataTool.inputSchema.type, "object");
+  assert.equal(metadataTool.inputSchema.additionalProperties, false);
+  assert.deepEqual(metadataTool.inputSchema.required, ["repository"]);
+  assert.equal(metadataTool.inputSchema.properties.repository.maxLength, 4096);
+  assert.deepEqual(metadataTool.annotations, {
+    readOnlyHint: true,
+    destructiveHint: false,
+    idempotentHint: true,
+    openWorldHint: false,
+  });
+  assert.equal(keeperTool.inputSchema.type, "object");
+  assert.equal(keeperTool.inputSchema.additionalProperties, false);
+  assert.deepEqual(keeperTool.inputSchema.required, ["title", "body", "resolved", "folder_hint"]);
+  assert.deepEqual(keeperTool.annotations, {
+    readOnlyHint: false,
+    destructiveHint: false,
+    idempotentHint: true,
+    openWorldHint: false,
+  });
+  assert.equal(dailyTool.inputSchema.type, "object");
+  assert.equal(dailyTool.inputSchema.additionalProperties, false);
+  assert.deepEqual(dailyTool.inputSchema.required, ["content"]);
+  assert.deepEqual(dailyTool.annotations, {
+    readOnlyHint: false,
+    destructiveHint: false,
+    idempotentHint: false,
+    openWorldHint: false,
+  });
   assert.equal(searchTool.outputSchema.properties.matches.type, "array");
   assert.equal(metadataTool.outputSchema.properties.commit.type, "string");
 

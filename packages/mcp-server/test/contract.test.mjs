@@ -44,6 +44,30 @@ test("pins tool surface including write tools", () => {
   assert.equal(contract.tools.obsidian_commit_meta.scope, "repo:read");
   assert.equal(contract.tools.obsidian_keeper_save.scope, "vault:write");
   assert.equal(contract.tools.obsidian_daily_append.scope, "vault:write");
+  assert.deepEqual(contract.tools.obsidian_find_notes.annotations, {
+    readOnlyHint: true,
+    destructiveHint: false,
+    idempotentHint: true,
+    openWorldHint: false,
+  });
+  assert.deepEqual(contract.tools.obsidian_commit_meta.annotations, {
+    readOnlyHint: true,
+    destructiveHint: false,
+    idempotentHint: true,
+    openWorldHint: false,
+  });
+  assert.deepEqual(contract.tools.obsidian_keeper_save.annotations, {
+    readOnlyHint: false,
+    destructiveHint: false,
+    idempotentHint: true,
+    openWorldHint: false,
+  });
+  assert.deepEqual(contract.tools.obsidian_daily_append.annotations, {
+    readOnlyHint: false,
+    destructiveHint: false,
+    idempotentHint: false,
+    openWorldHint: false,
+  });
   assert.deepEqual(contract.tools.obsidian_keeper_save.inputSchema.required, ["title", "body", "resolved", "folder_hint"]);
   assert.deepEqual(contract.tools.obsidian_keeper_save.inputSchema.properties.resolved, { type: "boolean", const: true });
   assert.ok(!contract.tools.obsidian_keeper_save.inputSchema.required.includes("idempotency_key"));
