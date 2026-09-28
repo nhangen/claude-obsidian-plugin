@@ -20,6 +20,10 @@ export function validateExactRevision(revision, packageVersion) {
   }
 }
 
+export function releaseTagForRevision(revision, packageVersion) {
+  return revision === expectedReleaseTag(packageVersion) ? revision : undefined;
+}
+
 export async function sha256File(path) {
   return createHash("sha256").update(await readFile(path)).digest("hex");
 }
@@ -30,6 +34,7 @@ export async function createReleaseMetadata({
   npmVersion,
   nodeVersion,
   sourceCommit,
+  releaseTag,
 }) {
   if (!commitPattern.test(sourceCommit)) {
     throw new Error("source commit must be a full lowercase commit SHA");
@@ -39,6 +44,10 @@ export async function createReleaseMetadata({
   const contractSha256 = await sha256File(join(extractedPackageRoot, "contract.json"));
   const artifactSha256 = await sha256File(artifactPath);
 
+  if (releaseTag !== undefined && releaseTag !== expectedReleaseTag(packageManifest.version)) {
+    throw new Error(`release tag must be ${expectedReleaseTag(packageManifest.version)}`);
+  }
+
   if (!digestPattern.test(contractSha256) || !digestPattern.test(artifactSha256)) {
     throw new Error("release hashes must be SHA-256 digests");
   }
@@ -46,6 +55,7 @@ export async function createReleaseMetadata({
   return {
     schema_version: 1,
     source_commit: sourceCommit,
+    ...(releaseTag === undefined ? {} : { release_tag: releaseTag }),
     package: {
       name: packageManifest.name,
       version: packageManifest.version,

@@ -164,15 +164,16 @@ not resolve to the checked-out commit. It also requires a clean worktree so the
 recorded commit identifies every packed file. It runs `npm ci`, the package tests,
 and the same pack and metadata path used by CI.
 
-ML-1 installation is a separate, explicit operation. It downloads only the
-pinned tarball and matching metadata from the selected GitHub Release, verifies
-the tarball SHA-256, extracts the tarball to verify the packaged `contract.json`
-SHA-256, and installs that local tarball. A systemd unit then runs the installed
-`claude-obsidian-mcp` or `claude-obsidian-mcp-http` executable with its explicit
+ML-1 installation is planned as a separate, explicit operation. The deployment
+contract will require downloading only the pinned tarball and matching metadata
+from the selected GitHub Release, verifying the tarball SHA-256, extracting the
+tarball to verify the packaged `contract.json` SHA-256, and installing that local
+tarball. The planned systemd unit will run the installed
+`claude-obsidian-mcp` or `claude-obsidian-mcp-http` executable with explicit
 configuration. This repository's release workflow does not connect to ML-1,
 install the package, or restart services.
 
-The corresponding llm-tools pin records the GitHub Release asset, source commit,
-tarball SHA-256, and contract SHA-256. Updating that pin and deploying it are
-separate reviewed changes. A release asset alone is not evidence that ML-1 or
-llm-tools has been updated.
+The planned llm-tools pin will record the GitHub Release asset, source commit,
+tarball SHA-256, and contract SHA-256. Updating that pin and deploying it remain
+separate future reviewed changes. A release asset alone is not evidence that
+ML-1 or llm-tools has been updated.

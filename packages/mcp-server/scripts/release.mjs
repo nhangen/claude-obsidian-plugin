@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 
 import {
   createReleaseMetadata,
+  releaseTagForRevision,
   serializeReleaseMetadata,
   validateExactRevision,
 } from "./release-lib.mjs";
@@ -39,19 +40,24 @@ const revisionCommit = run("git", ["rev-parse", `${revision}^{commit}`], { cwd: 
 if (sourceCommit !== revisionCommit) {
   throw new Error(`checked out commit ${sourceCommit} does not match revision ${revision} (${revisionCommit})`);
 }
-const worktreeStatus = run("git", ["status", "--porcelain", "--untracked-files=all"], {
-  cwd: repositoryRoot,
-  stdio: ["ignore", "pipe", "inherit"],
-}).trim();
-if (worktreeStatus !== "") {
-  throw new Error("release bundles require a clean worktree");
+function requireCleanWorktree() {
+  const worktreeStatus = run("git", ["status", "--porcelain", "--untracked-files=all"], {
+    cwd: repositoryRoot,
+    stdio: ["ignore", "pipe", "inherit"],
+  }).trim();
+  if (worktreeStatus !== "") {
+    throw new Error("release bundles require a clean worktree");
+  }
 }
 
+requireCleanWorktree();
 run("npm", ["ci"]);
 run("npm", ["test"]);
+requireCleanWorktree();
 
 await rm(outputRoot, { recursive: true, force: true });
 await mkdir(outputRoot);
+run("npm", ["run", "build"]);
 const packOutput = JSON.parse(run("npm", ["pack", "--json", "--ignore-scripts", "--pack-destination", outputRoot], {
   stdio: ["ignore", "pipe", "inherit"],
 }));
@@ -76,6 +82,7 @@ try {
     npmVersion,
     nodeVersion: process.version,
     sourceCommit,
+    releaseTag: releaseTagForRevision(revision, sourceManifest.version),
   });
   const metadataName = `claude-obsidian-mcp-server-${packedManifest.version}.release.json`;
   await writeFile(join(outputRoot, metadataName), serializeReleaseMetadata(metadata));
