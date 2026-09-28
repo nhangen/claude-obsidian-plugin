@@ -160,7 +160,7 @@ or full commit SHA and run:
 
 ```bash
 cd packages/mcp-server
-npm run release:bundle -- --revision mcp-v0.1.1
+npm run release:bundle -- --revision mcp-v0.1.2
 ls -l release/
 ```
 
