@@ -71,7 +71,7 @@ exit 9
 
   const child = spawn(process.execPath, [join(install, "dist", "stdio.mjs")], {
     cwd: fixture,
-    env: { ...process.env, OBSIDIAN_LOCAL_MD: config, MCP_TEST_KEEPER_STDIN_ERROR: "1" },
+    env: { ...process.env, OBSIDIAN_LOCAL_MD: config, MCP_STDIO_PROFILE: "write", MCP_TEST_KEEPER_STDIN_ERROR: "1" },
     stdio: ["pipe", "pipe", "pipe"],
   });
   const next = collect(child);

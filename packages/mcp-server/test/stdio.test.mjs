@@ -144,7 +144,7 @@ test("stdio server exposes read-only tools with clean MCP framing", async (t) =>
     2,
   );
   const toolNames = tools.result.tools.map((tool) => tool.name);
-  assert.deepEqual(toolNames.sort(), ["obsidian_commit_meta", "obsidian_daily_append", "obsidian_find_notes", "obsidian_keeper_save"]);
+  assert.deepEqual(toolNames.sort(), ["obsidian_commit_meta", "obsidian_find_notes"]);
   const searchTool = tools.result.tools.find((tool) => tool.name === "obsidian_find_notes");
   const metadataTool = tools.result.tools.find((tool) => tool.name === "obsidian_commit_meta");
   assert.equal(searchTool.outputSchema.properties.matches.type, "array");
@@ -288,6 +288,33 @@ test("stdio server exposes read-only tools with clean MCP framing", async (t) =>
   assert.equal(server.messages.some((message) => message.parseFailure), false);
   assert.equal(server.trailing(), "");
   assert.doesNotMatch(server.stderr(), /stdout|MCP message/i);
+});
+
+test("stdio write profile exposes write tools only when explicitly enabled", async (t) => {
+  const fixture = await mkdtemp(join(tmpdir(), "mcp-stdio-write-profile-"));
+  const vault = join(fixture, "vault");
+  const config = join(fixture, "obsidian.local.md");
+  await mkdir(vault);
+  await mkdir(join(vault, "Daily"));
+  await writeFile(config, `---\nvault_path: ${vault}\ndaily_path: Daily/\n---\n`);
+
+  const server = startServer(config, { MCP_STDIO_PROFILE: "write" });
+  t.after(async () => {
+    if (!server.child.killed) server.child.stdin.end();
+    await once(server.child, "close").catch(() => {});
+    await rm(fixture, { recursive: true, force: true });
+  });
+
+  await server.request({
+    jsonrpc: "2.0", id: 1, method: "initialize",
+    params: { protocolVersion: "2025-11-25", capabilities: {}, clientInfo: { name: "write-profile-test", version: "1" } },
+  }, 1);
+  server.notification({ jsonrpc: "2.0", method: "notifications/initialized" });
+  const tools = await server.request({ jsonrpc: "2.0", id: 2, method: "tools/list", params: {} }, 2);
+  assert.deepEqual(
+    tools.result.tools.map((tool) => tool.name).sort(),
+    ["obsidian_commit_meta", "obsidian_daily_append", "obsidian_find_notes", "obsidian_keeper_save"],
+  );
 });
 
 test("cancellation stops active child work and shutdown reaps it", async (t) => {

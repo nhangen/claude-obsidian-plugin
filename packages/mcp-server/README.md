@@ -44,6 +44,12 @@ configuration and repository authorization remain explicit environment values.
 Installed packages authorize no repository roots when `MCP_REPOSITORY_ROOTS`
 is omitted. Multiple roots use the platform path delimiter.
 
+The stdio server defaults to the read profile, exposing only vault and
+repository read tools. Set `MCP_STDIO_PROFILE=write` explicitly when a host is
+configured for guarded vault writes; the host must still require user approval
+and provide the write tool's idempotency key. Unknown profile values fail
+closed.
+
 Authenticated Streamable HTTP uses stateful sessions at `/mcp` for the
 compatibility revision `2025-11-25`:
 
@@ -154,7 +160,7 @@ or full commit SHA and run:
 
 ```bash
 cd packages/mcp-server
-npm run release:bundle -- --revision mcp-v0.1.0
+npm run release:bundle -- --revision mcp-v0.1.1
 ls -l release/
 ```
 
