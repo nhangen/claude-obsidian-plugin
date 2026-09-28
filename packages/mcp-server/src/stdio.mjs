@@ -50,6 +50,10 @@ const maxScanBytes = 64 * 1024 * 1024;
 const subprocessTimeoutMs = 5_000;
 const protocolVersions = ["2026-07-28", "2025-11-25"];
 const activeChildren = new Set();
+const stdioScopesByProfile = Object.freeze({
+  read: Object.freeze(["vault:read", "repo:read"]),
+  write: Object.freeze(["vault:read", "repo:read", "vault:write"]),
+});
 
 function stderr(message) {
   process.stderr.write(`mcp-server: ${message}\n`);
@@ -1010,8 +1014,15 @@ export async function closeActiveChildren() {
   await Promise.all([...activeChildren].map((child) => terminateChild(child)));
 }
 
+function stdioScopes() {
+  const profile = process.env.MCP_STDIO_PROFILE?.trim() || "read";
+  const scopes = stdioScopesByProfile[profile];
+  if (!scopes) throw new Error("MCP_STDIO_PROFILE must be read or write");
+  return scopes;
+}
+
 export function startStdio() {
-  const handle = serveStdio(createServer, { onerror: (error) => stderr(error instanceof Error ? error.message : String(error)) });
+  const handle = serveStdio(() => createServer({ scopes: stdioScopes() }), { onerror: (error) => stderr(error instanceof Error ? error.message : String(error)) });
   let shuttingDown = false;
   async function shutdown(exit = false) {
     if (shuttingDown) return;

@@ -29,7 +29,7 @@ function jwtToken({ scope = "vault:read repo:read", exp = Math.floor(Date.now() 
 function startStdioServer(configPath, extraEnv = {}) {
   const child = spawn(process.execPath, [stdioEntrypoint], {
     cwd: tmpdir(),
-    env: { ...process.env, OBSIDIAN_LOCAL_MD: configPath, MCP_REPOSITORY_ROOTS: repositoryRoot, ...extraEnv },
+    env: { ...process.env, OBSIDIAN_LOCAL_MD: configPath, MCP_REPOSITORY_ROOTS: repositoryRoot, MCP_STDIO_PROFILE: "write", ...extraEnv },
     stdio: ["pipe", "pipe", "pipe"],
   });
   let stdout = "";
