@@ -829,7 +829,7 @@ const dailyAppendInput = z.strictObject({
   request_id: z.string().min(1).max(240).regex(/^[A-Za-z0-9._:-]+$/).optional(),
 });
 
-export function createServer({ supportedProtocolVersions = protocolVersions, scopes = ["vault:read", "repo:read", "vault:write"], requireWriteIdempotency = false } = {}) {
+export function createServer({ supportedProtocolVersions = protocolVersions, scopes = ["vault:read", "repo:read"], requireWriteIdempotency = false } = {}) {
   const configuration = loadConfiguration();
   const availableScopes = new Set(scopes);
   const server = new McpServer(

@@ -5,6 +5,7 @@ import { dirname, join, resolve } from "node:path";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
 import { test } from "node:test";
+import { createServer } from "../src/stdio.mjs";
 
 const packageRoot = resolve(dirname(new URL(import.meta.url).pathname), "..");
 const entrypoint = join(packageRoot, "src", "stdio.mjs");
@@ -315,6 +316,34 @@ test("stdio write profile exposes write tools only when explicitly enabled", asy
     tools.result.tools.map((tool) => tool.name).sort(),
     ["obsidian_commit_meta", "obsidian_daily_append", "obsidian_find_notes", "obsidian_keeper_save"],
   );
+});
+
+test("createServer defaults to read scopes for direct callers", async (t) => {
+  const fixture = await mkdtemp(join(tmpdir(), "mcp-create-server-default-"));
+  const vault = join(fixture, "vault");
+  const config = join(fixture, "obsidian.local.md");
+  await mkdir(vault);
+  await mkdir(join(vault, "Daily"));
+  await writeFile(config, `---\nvault_path: ${vault}\ndaily_path: Daily/\n---\n`);
+
+  const previousConfig = process.env.OBSIDIAN_LOCAL_MD;
+  const previousRoots = process.env.MCP_REPOSITORY_ROOTS;
+  const previousProfile = process.env.MCP_STDIO_PROFILE;
+  t.after(async () => {
+    if (previousConfig === undefined) delete process.env.OBSIDIAN_LOCAL_MD;
+    else process.env.OBSIDIAN_LOCAL_MD = previousConfig;
+    if (previousRoots === undefined) delete process.env.MCP_REPOSITORY_ROOTS;
+    else process.env.MCP_REPOSITORY_ROOTS = previousRoots;
+    if (previousProfile === undefined) delete process.env.MCP_STDIO_PROFILE;
+    else process.env.MCP_STDIO_PROFILE = previousProfile;
+    await rm(fixture, { recursive: true, force: true });
+  });
+
+  process.env.OBSIDIAN_LOCAL_MD = config;
+  delete process.env.MCP_REPOSITORY_ROOTS;
+  delete process.env.MCP_STDIO_PROFILE;
+  const server = createServer();
+  assert.deepEqual(Object.keys(server._registeredTools).sort(), ["obsidian_commit_meta", "obsidian_find_notes"]);
 });
 
 test("cancellation stops active child work and shutdown reaps it", async (t) => {

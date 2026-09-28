@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "contractVersion": "0.1.1",
+  "contractVersion": "0.1.2",
   "protocol": {
     "sdk": "@modelcontextprotocol/server@2.0.0",
     "modernRevision": "2026-07-28",
