@@ -365,3 +365,40 @@ test("monitor CLI runs through the deployed current symlink", async (t) => {
   assert.equal(code, 1);
   assert.match(stderr, /MCP_HTTP_JWT_SECRET is required/);
 });
+
+test("monitor health check requests the Streamable HTTP media types", async () => {
+  const { checkHealth } = await import("../monitor.mjs");
+  const previous = new Map();
+  for (const name of ["MCP_MONITOR_URL", "MCP_MONITOR_HOST", "MCP_MONITOR_ORIGIN", "MCP_MONITOR_EXPECTED_VERSION", "MCP_HTTP_JWT_SECRET", "MCP_HTTP_JWT_ISSUER", "MCP_HTTP_JWT_AUDIENCE"]) {
+    previous.set(name, process.env[name]);
+  }
+  const originalFetch = globalThis.fetch;
+  let requestOptions;
+  globalThis.fetch = async (_url, options) => {
+    requestOptions = options;
+    return new Response(JSON.stringify({
+      result: { protocolVersion: "2025-11-25", serverInfo: { name: "claude-obsidian-mcp", version: "0.1.6" } },
+    }), { status: 200 });
+  };
+  Object.assign(process.env, {
+    MCP_MONITOR_URL: "http://127.0.0.1:3000/mcp",
+    MCP_MONITOR_HOST: "127.0.0.1:3000",
+    MCP_MONITOR_ORIGIN: "http://127.0.0.1:3000",
+    MCP_MONITOR_EXPECTED_VERSION: "0.1.6",
+    MCP_HTTP_JWT_SECRET: "0123456789abcdef0123456789abcdef",
+    MCP_HTTP_JWT_ISSUER: "https://issuer.example",
+    MCP_HTTP_JWT_AUDIENCE: "claude-obsidian",
+  });
+  try {
+    await checkHealth();
+    assert.equal(requestOptions.headers.Accept, "application/json, text/event-stream");
+    assert.match(requestOptions.headers.Authorization, /^Bearer /);
+    assert.match(requestOptions.body, /"method":"initialize"/);
+  } finally {
+    globalThis.fetch = originalFetch;
+    for (const [name, value] of previous) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
+  }
+});
