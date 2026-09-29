@@ -48,6 +48,7 @@ const maxPromptTranscriptCharacters = 256 * 1024;
 const maxRepositoryPathCharacters = 4096;
 const maxScanEntries = 10_000;
 const maxScanBytes = 64 * 1024 * 1024;
+const searchConcurrency = 16;
 const subprocessTimeoutMs = 5_000;
 const protocolVersions = ["2026-07-28", "2025-11-25"];
 const activeChildren = new Set();
@@ -156,27 +157,29 @@ function loadConfiguration() {
 async function collectMarkdownFiles(root, current = root, files = [], signal, state = { entries: 0, bytes: 0 }) {
   throwIfAborted(signal);
   const entries = await readdir(current, { withFileTypes: true });
+  const directories = [];
   for (const entry of entries) {
     throwIfAborted(signal);
     if (entry.name === ".obsidian") continue;
     const path = join(current, entry.name);
     state.entries += 1;
     if (state.entries > maxScanEntries) throw codedError("SCAN_LIMIT", "vault scan exceeded entry limit");
-    let details;
-    try {
-      details = await lstat(path);
-    } catch (error) {
-      if (error.code === "ENOENT") continue;
-      throw codedError("READ_FAILED", "vault entry could not be inspected");
-    }
-    if (details.isDirectory()) {
-      await collectMarkdownFiles(root, path, files, signal, state);
-    } else if (details.isFile() && extname(entry.name).toLowerCase() === ".md") {
+    if (entry.isDirectory()) {
+      directories.push(path);
+    } else if (entry.isFile() && extname(entry.name).toLowerCase() === ".md") {
+      let details;
+      try {
+        details = await lstat(path);
+      } catch (error) {
+        if (error.code === "ENOENT") continue;
+        throw codedError("READ_FAILED", "vault entry could not be inspected");
+      }
       state.bytes += details.size;
       if (state.bytes > maxScanBytes) throw codedError("SCAN_LIMIT", "vault scan exceeded byte limit");
       files.push(path);
     }
   }
+  await Promise.all(directories.map((path) => collectMarkdownFiles(root, path, files, signal, state)));
   return files;
 }
 
@@ -192,23 +195,30 @@ async function findNotes({ query }, vaultPath, signal) {
   const lowered = query.toLowerCase();
   const files = await collectMarkdownFiles(vaultPath, vaultPath, [], signal);
   const matches = [];
-  for (const path of files) {
-    throwIfAborted(signal);
-    const contents = await readRegularFile(path, signal, maxFileBytes, true);
-    if (contents === null) continue;
-    const relativePath = relative(vaultPath, path).split("\\").join("/");
-    const filenameMatch = relativePath.toLowerCase().includes(lowered);
-    const contentMatch = contents.toLowerCase().includes(lowered);
-    const tagLine = contents.match(/^tags:.*$/im)?.[0] || "";
-    const tagMatch = tagLine.toLowerCase().includes(lowered);
-    if (!filenameMatch && !contentMatch && !tagMatch) continue;
-    const occurrences = contents.toLowerCase().split(lowered).length - 1;
-    matches.push({
-      path: relativePath,
-      preview: preview(contents, query),
-      score: (filenameMatch ? 1_000_000 : 0) + (tagMatch ? 10_000 : 0) + occurrences * 100,
-    });
+  let nextIndex = 0;
+  async function searchWorker() {
+    while (nextIndex < files.length) {
+      const path = files[nextIndex];
+      nextIndex += 1;
+      throwIfAborted(signal);
+      const contents = await readRegularFile(path, signal, maxFileBytes, true);
+      if (contents === null) continue;
+      const loweredContents = contents.toLowerCase();
+      const relativePath = relative(vaultPath, path).split("\\").join("/");
+      const filenameMatch = relativePath.toLowerCase().includes(lowered);
+      const contentMatch = loweredContents.includes(lowered);
+      const tagLine = contents.match(/^tags:.*$/im)?.[0] || "";
+      const tagMatch = tagLine.toLowerCase().includes(lowered);
+      if (!filenameMatch && !contentMatch && !tagMatch) continue;
+      const occurrences = loweredContents.split(lowered).length - 1;
+      matches.push({
+        path: relativePath,
+        preview: preview(contents, query),
+        score: (filenameMatch ? 1_000_000 : 0) + (tagMatch ? 10_000 : 0) + occurrences * 100,
+      });
+    }
   }
+  await Promise.all(Array.from({ length: Math.min(searchConcurrency, files.length) }, () => searchWorker()));
   matches.sort((left, right) => right.score - left.score);
   return { matches: matches.slice(0, maxResults).map(({ path, preview: text }) => ({ path, preview: text })) };
 }
