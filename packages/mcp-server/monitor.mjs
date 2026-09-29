@@ -108,6 +108,7 @@ function aggregateUsage(output) {
     }
   });
   const durations = events
+    .filter((event) => event.method !== "GET")
     .map((event) => event.duration_ms)
     .filter((value) => Number.isInteger(value) && value >= 0)
     .sort((left, right) => left - right);
@@ -117,6 +118,7 @@ function aggregateUsage(output) {
     successful_requests: events.filter((event) => event.status >= 200 && event.status < 400).length,
     failed_requests: events.filter((event) => event.status < 200 || event.status >= 400).length,
     tool_calls: events.filter((event) => typeof event.tool === "string").length,
+    stream_requests: events.filter((event) => event.method === "GET").length,
     clients: [...new Set(events.map((event) => event.client_id).filter((value) => typeof value === "string"))].sort(),
     p95_duration_ms: durations.length ? durations[p95Index] : null,
   };
