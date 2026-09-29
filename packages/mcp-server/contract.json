@@ -49,7 +49,7 @@
     "httpResponseBytesDefault": 1048576,
     "httpSessionTtlMsDefault": 900000,
     "httpConcurrentRequestsDefault": 16,
-    "httpRequestTimeoutMsDefault": 10000
+    "httpRequestTimeoutMsDefault": 30000
   },
   "tools": {
     "obsidian_find_notes": {

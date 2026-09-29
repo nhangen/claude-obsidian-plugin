@@ -66,7 +66,7 @@ function loadHttpConfiguration() {
     maxBodyBytes: integerSetting("MCP_HTTP_MAX_BODY_BYTES", 1024 * 1024, 1, 64 * 1024 * 1024),
     maxResponseBytes: integerSetting("MCP_HTTP_MAX_RESPONSE_BYTES", 1024 * 1024, 1024, 64 * 1024 * 1024),
     concurrencyLimit: integerSetting("MCP_HTTP_CONCURRENCY_LIMIT", 16, 1, 1024),
-    requestTimeoutMs: integerSetting("MCP_HTTP_REQUEST_TIMEOUT_MS", 10_000, 100, 300_000),
+    requestTimeoutMs: integerSetting("MCP_HTTP_REQUEST_TIMEOUT_MS", 30_000, 100, 300_000),
     sessionTtlMs: integerSetting("MCP_HTTP_SESSION_TTL_MS", 15 * 60 * 1000, 100, 24 * 60 * 60 * 1000),
   };
 }
