@@ -57,12 +57,18 @@
       "readOnly": true,
       "scope": "vault:read",
       "privacy": "vault-note-path-and-preview",
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
+      },
       "inputSchema": {
         "type": "object",
         "additionalProperties": false,
         "required": ["query"],
         "properties": {
-          "query": { "type": "string", "minLength": 1, "maxLength": 240 }
+          "query": { "type": "string", "minLength": 1, "maxLength": 240, "pattern": "\\S" }
         }
       },
       "resultSchema": {
@@ -93,13 +99,19 @@
       "readOnly": true,
       "scope": "repo:read",
       "privacy": "sanitized-git-metadata",
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
+      },
       "repositoryRoots": "Source checkouts default to the adapter repository root; installed packages default to no roots; MCP_REPOSITORY_ROOTS is an explicit path-delimited allowlist.",
       "inputSchema": {
         "type": "object",
         "additionalProperties": false,
         "required": ["repository"],
         "properties": {
-          "repository": { "type": "string", "minLength": 1, "maxLength": 4096 }
+          "repository": { "type": "string", "minLength": 1, "maxLength": 4096, "pattern": "\\S" }
         }
       },
       "resultSchema": {
@@ -125,15 +137,21 @@
       "readOnly": false,
       "scope": "vault:write",
       "privacy": "user-authored-content",
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
+      },
       "inputSchema": {
         "type": "object",
         "additionalProperties": false,
         "required": ["title", "body", "resolved", "folder_hint"],
         "properties": {
-          "title": { "type": "string", "minLength": 1, "maxLength": 240, "pattern": "^[^\\u0000-\\u001F\\u007F]*$" },
+          "title": { "type": "string", "minLength": 1, "maxLength": 240, "pattern": "^[^\\/\\\\\\u0000-\\u001F\\u007F]*$" },
           "body": { "type": "string", "minLength": 1, "maxLength": 65536 },
           "resolved": { "type": "boolean", "const": true },
-          "folder_hint": { "type": "string", "minLength": 1, "maxLength": 1024, "pattern": "^[^\\u0000-\\u001F\\u007F]*$" },
+          "folder_hint": { "type": "string", "minLength": 1, "maxLength": 1024, "pattern": "^(?!\\.{1,2}(?:\\/|$))[^\\\\/\\u0000-\\u001F\\u007F]+(?:\\/(?!\\.{1,2}(?:\\/|$))[^\\\\/\\u0000-\\u001F\\u007F]+)*$" },
           "type": { "type": "string", "maxLength": 100, "pattern": "^[^\\u0000-\\u001F\\u007F]*$" },
           "links": { "type": "array", "items": { "type": "string", "maxLength": 2048, "pattern": "^[^\\u0000-\\u001F\\u007F]*$" }, "maxItems": 20 },
           "idempotency_key": { "type": "string", "minLength": 1, "maxLength": 240, "pattern": "^[A-Za-z0-9._:-]+$" },
@@ -169,6 +187,12 @@
       "readOnly": false,
       "scope": "vault:write",
       "privacy": "user-authored-content",
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": false
+      },
       "inputSchema": {
         "type": "object",
         "additionalProperties": false,
