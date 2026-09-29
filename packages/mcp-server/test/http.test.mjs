@@ -374,23 +374,27 @@ test("monitor health check requests the Streamable HTTP media types", async () =
   }
   const originalFetch = globalThis.fetch;
   let requestOptions;
+  let attempts = 0;
   globalThis.fetch = async (_url, options) => {
+    attempts += 1;
+    if (attempts === 1) throw new TypeError("fetch failed");
     requestOptions = options;
     return new Response(JSON.stringify({
-      result: { protocolVersion: "2025-11-25", serverInfo: { name: "claude-obsidian-mcp", version: "0.1.6" } },
+      result: { protocolVersion: "2025-11-25", serverInfo: { name: "claude-obsidian-mcp", version: "0.1.7" } },
     }), { status: 200 });
   };
   Object.assign(process.env, {
     MCP_MONITOR_URL: "http://127.0.0.1:3000/mcp",
     MCP_MONITOR_HOST: "127.0.0.1:3000",
     MCP_MONITOR_ORIGIN: "http://127.0.0.1:3000",
-    MCP_MONITOR_EXPECTED_VERSION: "0.1.6",
+    MCP_MONITOR_EXPECTED_VERSION: "0.1.7",
     MCP_HTTP_JWT_SECRET: "0123456789abcdef0123456789abcdef",
     MCP_HTTP_JWT_ISSUER: "https://issuer.example",
     MCP_HTTP_JWT_AUDIENCE: "claude-obsidian",
   });
   try {
     await checkHealth();
+    assert.equal(attempts, 2);
     assert.equal(requestOptions.headers.Accept, "application/json, text/event-stream");
     assert.match(requestOptions.headers.Authorization, /^Bearer /);
     assert.match(requestOptions.body, /"method":"initialize"/);
