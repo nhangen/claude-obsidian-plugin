@@ -4,7 +4,7 @@ import { createHmac } from "node:crypto";
 import { execFile } from "node:child_process";
 import { mkdir, rename, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
-import { dirname } from "node:path";
+import { basename, dirname } from "node:path";
 import { promisify } from "node:util";
 
 const execFileAsync = promisify(execFile);
@@ -143,7 +143,7 @@ async function writeState(state) {
 
 export { aggregateUsage, checkHealth, issueToken, readUsage, writeState };
 
-if (import.meta.url === `file://${process.argv[1]}`) {
+if (basename(process.argv[1] ?? "") === "monitor.mjs") {
   const checkedAt = new Date().toISOString();
   try {
     const health = await checkHealth();
