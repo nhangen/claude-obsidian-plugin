@@ -1,6 +1,6 @@
 {
   "name": "@claude-obsidian/mcp-server",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "private": true,
   "description": "Obsidian MCP server over stdio and authenticated Streamable HTTP.",
   "type": "module",
