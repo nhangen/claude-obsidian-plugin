@@ -79,6 +79,37 @@ function jsonResponse(status, code, message, headers = {}) {
   });
 }
 
+function metricLabel(value, fallback = "unknown") {
+  return typeof value === "string" && /^[A-Za-z0-9._:/-]{1,128}$/.test(value) ? value : fallback;
+}
+
+function requestSummary(message) {
+  const messages = Array.isArray(message) ? message : [message];
+  if (messages.length !== 1 || !messages[0] || typeof messages[0] !== "object") {
+    return { mcpMethod: messages.length > 1 ? "batch" : "unknown" };
+  }
+  const item = messages[0];
+  const summary = { mcpMethod: metricLabel(item.method) };
+  if (item.method === "tools/call") {
+    const tool = metricLabel(item.params?.name, "");
+    if (tool) summary.tool = tool;
+  }
+  return summary;
+}
+
+function logRequest({ method, status, startedAt, clientId, summary = {} }) {
+  const event = {
+    event: "mcp-http-request",
+    method: metricLabel(method),
+    status,
+    duration_ms: Math.max(0, Date.now() - startedAt),
+    mcp_method: summary.mcpMethod ?? "unknown",
+    client_id: metricLabel(clientId),
+  };
+  if (summary.tool) event.tool = summary.tool;
+  process.stderr.write(`mcp-http-request ${JSON.stringify(event)}\n`);
+}
+
 function validateTransportBoundary(req, configuration) {
   const host = validateHostHeader(req.headers.host, configuration.allowedHosts);
   if (!host.ok) throw new HttpBoundaryError(403, -32000, "Forbidden");
@@ -135,6 +166,7 @@ function validateToken(req, configuration) {
       fingerprint: createHash("sha256").update(token).digest("base64url"),
       scopes: new Set(scopes),
       expiresAt: claims.exp * 1000,
+      subject: metricLabel(claims.sub),
     };
   } catch (error) {
     if (error instanceof HttpBoundaryError) throw error;
@@ -416,9 +448,15 @@ function sendBoundaryError(error, res) {
 
 async function handleRequest(req, res, configuration) {
   const method = req.method?.toUpperCase() ?? "";
+  const startedAt = Date.now();
+  let status = 500;
+  let clientId = "unknown";
+  let summary;
   const activeSet = method === "GET" ? activeStreams : activeRequests;
   if (method !== "DELETE" && activeSet.size >= configuration.concurrencyLimit) {
+    status = 429;
     await sendBoundaryError(new HttpBoundaryError(429, -32009, "Too many requests"), res);
+    logRequest({ method, status, startedAt, clientId });
     return;
   }
   const controller = new AbortController();
@@ -433,6 +471,7 @@ async function handleRequest(req, res, configuration) {
   try {
     const requestUrl = validateTransportBoundary(req, configuration);
     const auth = validateToken(req, configuration);
+    clientId = auth.subject;
     if (!["GET", "POST", "DELETE"].includes(method)) {
       throw new HttpBoundaryError(405, -32000, "Method not allowed");
     }
@@ -445,6 +484,7 @@ async function handleRequest(req, res, configuration) {
     }
     if (method !== "POST" && body.length > 0) throw new HttpBoundaryError(400, -32600, "Request body is not allowed");
     const parsedBody = method === "POST" ? parseJsonBody(body) : undefined;
+    summary = requestSummary(parsedBody);
     if (parsedBody !== undefined) enforceMessageScopes(parsedBody, auth);
     const sessionId = req.headers["mcp-session-id"];
     const normalizedSessionId = Array.isArray(sessionId) ? undefined : sessionId;
@@ -463,9 +503,11 @@ async function handleRequest(req, res, configuration) {
     touchSession(session, configuration);
     const request = webRequest(req, requestUrl, body, controller.signal);
     const response = await transportResponse(session, request, parsedBody, configuration.requestTimeoutMs, controller);
+    status = response.status;
     await sendWebResponse(response, res, configuration.maxResponseBytes, controller.signal);
     if (provisionalSession && !provisionalSession.id) await closeSession(provisionalSession);
   } catch (error) {
+    status = error instanceof HttpBoundaryError ? error.status : 500;
     if (provisionalSession && !provisionalSession.id) await closeSession(provisionalSession);
     if (!res.headersSent) await sendBoundaryError(error, res);
     else res.end();
@@ -473,6 +515,7 @@ async function handleRequest(req, res, configuration) {
     req.off("aborted", abort);
     if (controller.signal.aborted && session && method !== "GET") await closeSession(session);
     activeSet.delete(controller);
+    logRequest({ method, status, startedAt, clientId, summary });
   }
 }
 

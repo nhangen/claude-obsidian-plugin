@@ -18,9 +18,9 @@ function base64url(value) {
   return Buffer.from(value).toString("base64url");
 }
 
-function token({ scope = "vault:read repo:read", exp = Math.floor(Date.now() / 1000) + 300, aud = audience, iss = issuer } = {}) {
+function token({ scope = "vault:read repo:read", exp = Math.floor(Date.now() / 1000) + 300, aud = audience, iss = issuer, sub = "http-contract-test" } = {}) {
   const header = base64url(JSON.stringify({ alg: "HS256", typ: "JWT" }));
-  const payload = base64url(JSON.stringify({ aud, exp, iss, scope }));
+  const payload = base64url(JSON.stringify({ aud, exp, iss, scope, sub }));
   const signature = createHmac("sha256", secret).update(`${header}.${payload}`).digest("base64url");
   return `${header}.${payload}.${signature}`;
 }
@@ -316,5 +316,34 @@ test("authenticated Streamable HTTP is read-only and enforces transport boundari
   assert.equal(closed.status, 200);
 
   assert.equal(server.stdout(), "");
+  const requestEvents = server.stderr()
+    .split("\n")
+    .filter((line) => line.startsWith("mcp-http-request "))
+    .map((line) => JSON.parse(line.slice("mcp-http-request ".length)));
+  assert.ok(requestEvents.some((event) => event.status === 200 && event.mcp_method === "initialize"));
+  assert.ok(requestEvents.some((event) => event.status === 200 && event.mcp_method === "tools/call" && event.tool === "obsidian_find_notes"));
+  assert.ok(requestEvents.some((event) => event.status === 401 && event.client_id === "unknown"));
+  assert.ok(requestEvents.every((event) => Number.isInteger(event.duration_ms) && event.duration_ms >= 0));
+  assert.ok(requestEvents.some((event) => event.client_id === "http-contract-test"));
   assert.doesNotMatch(server.stderr(), new RegExp(secret));
+  assert.doesNotMatch(server.stderr(), /remote compatibility|changed/);
+});
+
+test("usage aggregation ignores malformed and unstructured journal lines", async () => {
+  const { aggregateUsage } = await import("../monitor.mjs");
+  const output = [
+    "unrelated line",
+    'mcp-http-request {"status":200,"duration_ms":10,"client_id":"codex","tool":"obsidian_find_notes"}',
+    'mcp-http-request {"status":403,"duration_ms":30,"client_id":"unknown"}',
+    "mcp-http-request not-json",
+    'mcp-http-request {"status":200,"duration_ms":20,"client_id":"claude"}',
+  ].join("\n");
+  assert.deepEqual(aggregateUsage(output), {
+    requests: 3,
+    successful_requests: 2,
+    failed_requests: 1,
+    tool_calls: 1,
+    clients: ["claude", "codex", "unknown"],
+    p95_duration_ms: 30,
+  });
 });

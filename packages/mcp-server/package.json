@@ -1,12 +1,13 @@
 {
   "name": "@claude-obsidian/mcp-server",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "private": true,
   "description": "Obsidian MCP server over stdio and authenticated Streamable HTTP.",
   "type": "module",
   "main": "dist/stdio.mjs",
   "files": [
     "dist/",
+    "monitor.mjs",
     "contract.json",
     "README.md"
   ],
@@ -19,6 +20,7 @@
     "prepack": "npm run build",
     "pretest": "npm run build",
     "release:bundle": "node scripts/release.mjs",
+    "monitor": "node monitor.mjs",
     "start": "node dist/stdio.mjs",
     "start:http": "node dist/http.mjs",
     "test": "node --test test/*.test.mjs"

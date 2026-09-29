@@ -82,6 +82,19 @@ modern `2026-07-28` Streamable HTTP envelope remains planned because the pinned
 stateful adapter does not classify modern envelopes; it is not advertised as
 supported.
 
+## Monitoring
+
+The HTTP server writes one bounded `mcp-http-request` JSON event per request to
+stderr. Events contain the HTTP status, duration, MCP method, tool name when
+applicable, and sanitized JWT subject. They never contain bearer tokens,
+request arguments, or vault content. A deployment can run the packaged
+`node monitor.mjs` command to perform an authenticated initialize handshake and
+aggregate recent request counts, failures, tool calls, clients, and p95 latency
+from the systemd journal. Set `MCP_MONITOR_URL`, the `MCP_HTTP_JWT_*` values,
+and `MCP_MONITOR_EXPECTED_VERSION` in the monitor's environment. The command
+writes an atomic state file and exits non-zero when the handshake, version
+check, or journal read fails.
+
 The server resolves `OBSIDIAN_LOCAL_MD` through the existing stable resolver.
 The stdio entrypoint does not start an HTTP listener. In this
 repository's source checkout, the source entrypoint retains the documented
