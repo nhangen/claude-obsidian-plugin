@@ -56,18 +56,27 @@ async function checkHealth() {
     issuer: required("MCP_HTTP_JWT_ISSUER"),
     audience: required("MCP_HTTP_JWT_AUDIENCE"),
   });
-  const response = await fetch(endpoint, {
-    method: "POST",
-    headers: {
-      Accept: "application/json, text/event-stream",
-      Authorization: `Bearer ${token}`,
-      "Content-Type": "application/json",
-      Host: process.env.MCP_MONITOR_HOST?.trim() || parsed.host,
-      Origin: allowedOrigin,
-    },
-    body: JSON.stringify(initializeRequest()),
-    signal: AbortSignal.timeout(5_000),
-  });
+  let response;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    try {
+      response = await fetch(endpoint, {
+        method: "POST",
+        headers: {
+          Accept: "application/json, text/event-stream",
+          Authorization: `Bearer ${token}`,
+          "Content-Type": "application/json",
+          Host: process.env.MCP_MONITOR_HOST?.trim() || parsed.host,
+          Origin: allowedOrigin,
+        },
+        body: JSON.stringify(initializeRequest()),
+        signal: AbortSignal.timeout(5_000),
+      });
+      break;
+    } catch (error) {
+      if (attempt === 2) throw new Error("health fetch failed after 3 attempts", { cause: error });
+      await new Promise((resolve) => setTimeout(resolve, 250 * (attempt + 1)));
+    }
+  }
   const body = await response.text();
   if (!response.ok) throw new Error(`health HTTP ${response.status}`);
   if (Buffer.byteLength(body, "utf8") > 64 * 1024) throw new Error("health response too large");
