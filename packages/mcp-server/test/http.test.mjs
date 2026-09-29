@@ -335,14 +335,16 @@ test("usage aggregation ignores malformed and unstructured journal lines", async
     "unrelated line",
     'mcp-http-request {"status":200,"duration_ms":10,"client_id":"codex","tool":"obsidian_find_notes"}',
     'mcp-http-request {"status":403,"duration_ms":30,"client_id":"unknown"}',
+    'mcp-http-request {"method":"GET","status":408,"duration_ms":999999,"client_id":"codex"}',
     "mcp-http-request not-json",
     'mcp-http-request {"status":200,"duration_ms":20,"client_id":"claude"}',
   ].join("\n");
   assert.deepEqual(aggregateUsage(output), {
-    requests: 3,
+    requests: 4,
     successful_requests: 2,
-    failed_requests: 1,
+    failed_requests: 2,
     tool_calls: 1,
+    stream_requests: 1,
     clients: ["claude", "codex", "unknown"],
     p95_duration_ms: 30,
   });
@@ -380,14 +382,14 @@ test("monitor health check requests the Streamable HTTP media types", async () =
     if (attempts === 1) throw new TypeError("fetch failed");
     requestOptions = options;
     return new Response(JSON.stringify({
-      result: { protocolVersion: "2025-11-25", serverInfo: { name: "claude-obsidian-mcp", version: "0.1.7" } },
+      result: { protocolVersion: "2025-11-25", serverInfo: { name: "claude-obsidian-mcp", version: "0.1.8" } },
     }), { status: 200 });
   };
   Object.assign(process.env, {
     MCP_MONITOR_URL: "http://127.0.0.1:3000/mcp",
     MCP_MONITOR_HOST: "127.0.0.1:3000",
     MCP_MONITOR_ORIGIN: "http://127.0.0.1:3000",
-    MCP_MONITOR_EXPECTED_VERSION: "0.1.7",
+    MCP_MONITOR_EXPECTED_VERSION: "0.1.8",
     MCP_HTTP_JWT_SECRET: "0123456789abcdef0123456789abcdef",
     MCP_HTTP_JWT_ISSUER: "https://issuer.example",
     MCP_HTTP_JWT_AUDIENCE: "claude-obsidian",

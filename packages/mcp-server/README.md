@@ -89,8 +89,9 @@ stderr. Events contain the HTTP status, duration, MCP method, tool name when
 applicable, and sanitized JWT subject. They never contain bearer tokens,
 request arguments, or vault content. A deployment can run the packaged
 `node monitor.mjs` command to perform an authenticated initialize handshake and
-aggregate recent request counts, failures, tool calls, clients, and p95 latency
-from the systemd journal. Set `MCP_MONITOR_URL`, the `MCP_HTTP_JWT_*` values,
+aggregate recent request counts, failures, tool calls, clients, stream counts,
+and p95 request latency from the systemd journal. The p95 excludes long-lived
+GET/SSE streams, which are reported separately. Set `MCP_MONITOR_URL`, the `MCP_HTTP_JWT_*` values,
 and `MCP_MONITOR_EXPECTED_VERSION` in the monitor's environment. The command
 writes an atomic state file and exits non-zero when the handshake, version
 check, or journal read fails.
