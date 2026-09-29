@@ -43,6 +43,7 @@ test("built stdio fails closed on invalid or contradictory keeper results", asyn
   await mkdir(join(helperRoot, "lib"), { recursive: true });
   await mkdir(join(vault, "Daily"), { recursive: true });
   await copyFile(join(packageRoot, "dist", "stdio.mjs"), join(install, "dist", "stdio.mjs"));
+  await copyFile(join(packageRoot, "dist", "version.mjs"), join(install, "dist", "version.mjs"));
   await copyFile(join(packageRoot, "dist", "helpers", "lib", "resolve-config.sh"), join(helperRoot, "lib", "resolve-config.sh"));
   await symlink(join(packageRoot, "node_modules"), join(install, "node_modules"), "dir");
   await writeFile(config, `---\nvault_path: ${vault}\ndaily_path: Daily/\n---\n`);
