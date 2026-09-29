@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { spawn } from "node:child_process";
@@ -346,4 +346,22 @@ test("usage aggregation ignores malformed and unstructured journal lines", async
     clients: ["claude", "codex", "unknown"],
     p95_duration_ms: 30,
   });
+});
+
+test("monitor CLI runs through the deployed current symlink", async (t) => {
+  const fixture = await mkdtemp(join(tmpdir(), "mcp-monitor-"));
+  const link = join(fixture, "monitor.mjs");
+  await symlink(join(packageRoot, "monitor.mjs"), link);
+  t.after(() => rm(fixture, { recursive: true, force: true }));
+  const child = spawn(process.execPath, [link], {
+    env: Object.fromEntries(Object.entries(process.env).filter(([name]) => !name.startsWith("MCP_HTTP_"))),
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  let stderr = "";
+  child.stderr.on("data", (chunk) => {
+    stderr += chunk;
+  });
+  const [code] = await once(child, "close");
+  assert.equal(code, 1);
+  assert.match(stderr, /MCP_HTTP_JWT_SECRET is required/);
 });
