@@ -376,14 +376,17 @@ test("monitor health check requests the Streamable HTTP media types", async () =
   }
   const originalFetch = globalThis.fetch;
   let requestOptions;
+  const requests = [];
   let attempts = 0;
   globalThis.fetch = async (_url, options) => {
     attempts += 1;
+    requests.push(options);
     if (attempts === 1) throw new TypeError("fetch failed");
+    if (attempts === 3) return new Response("", { status: 200 });
     requestOptions = options;
     return new Response(JSON.stringify({
       result: { protocolVersion: "2025-11-25", serverInfo: { name: "claude-obsidian-mcp", version: "0.1.8" } },
-    }), { status: 200 });
+    }), { status: 200, headers: { "Mcp-Session-Id": "health-session" } });
   };
   Object.assign(process.env, {
     MCP_MONITOR_URL: "http://127.0.0.1:3000/mcp",
@@ -396,10 +399,13 @@ test("monitor health check requests the Streamable HTTP media types", async () =
   });
   try {
     await checkHealth();
-    assert.equal(attempts, 2);
+    assert.equal(attempts, 3);
     assert.equal(requestOptions.headers.Accept, "application/json, text/event-stream");
     assert.match(requestOptions.headers.Authorization, /^Bearer /);
     assert.match(requestOptions.body, /"method":"initialize"/);
+    assert.equal(requestOptions.method, "POST");
+    assert.equal(requests[2].method, "DELETE");
+    assert.equal(requests[2].headers["Mcp-Session-Id"], "health-session");
   } finally {
     globalThis.fetch = originalFetch;
     for (const [name, value] of previous) {

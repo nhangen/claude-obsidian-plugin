@@ -57,6 +57,7 @@ async function checkHealth() {
     audience: required("MCP_HTTP_JWT_AUDIENCE"),
   });
   let response;
+  let sessionId;
   for (let attempt = 0; attempt < 3; attempt += 1) {
     try {
       response = await fetch(endpoint, {
@@ -71,30 +72,49 @@ async function checkHealth() {
         body: JSON.stringify(initializeRequest()),
         signal: AbortSignal.timeout(5_000),
       });
+      sessionId = response.headers.get("mcp-session-id");
       break;
     } catch (error) {
       if (attempt === 2) throw new Error("health fetch failed after 3 attempts", { cause: error });
       await new Promise((resolve) => setTimeout(resolve, 250 * (attempt + 1)));
     }
   }
-  const body = await response.text();
-  if (!response.ok) throw new Error(`health HTTP ${response.status}`);
-  if (Buffer.byteLength(body, "utf8") > 64 * 1024) throw new Error("health response too large");
-  let parsedBody;
   try {
-    parsedBody = JSON.parse(body);
-  } catch {
-    throw new Error("health response was not JSON");
+    const body = await response.text();
+    if (!response.ok) throw new Error(`health HTTP ${response.status}`);
+    if (Buffer.byteLength(body, "utf8") > 64 * 1024) throw new Error("health response too large");
+    let parsedBody;
+    try {
+      parsedBody = JSON.parse(body);
+    } catch {
+      throw new Error("health response was not JSON");
+    }
+    const serverInfo = parsedBody?.result?.serverInfo;
+    if (serverInfo?.name !== "claude-obsidian-mcp" || typeof serverInfo.version !== "string") {
+      throw new Error("health response missing server identity");
+    }
+    const expectedVersion = process.env.MCP_MONITOR_EXPECTED_VERSION?.trim();
+    if (expectedVersion && serverInfo.version !== expectedVersion) {
+      throw new Error(`server version ${serverInfo.version} != ${expectedVersion}`);
+    }
+    return { version: serverInfo.version, protocol_version: parsedBody.result.protocolVersion };
+  } finally {
+    if (sessionId) {
+      const closed = await fetch(endpoint, {
+        method: "DELETE",
+        headers: {
+          Accept: "application/json, text/event-stream",
+          Authorization: `Bearer ${token}`,
+          Host: process.env.MCP_MONITOR_HOST?.trim() || parsed.host,
+          Origin: allowedOrigin,
+          "Mcp-Session-Id": sessionId,
+        },
+        signal: AbortSignal.timeout(5_000),
+      });
+      await closed.arrayBuffer();
+      if (!closed.ok) throw new Error(`health session cleanup HTTP ${closed.status}`);
+    }
   }
-  const serverInfo = parsedBody?.result?.serverInfo;
-  if (serverInfo?.name !== "claude-obsidian-mcp" || typeof serverInfo.version !== "string") {
-    throw new Error("health response missing server identity");
-  }
-  const expectedVersion = process.env.MCP_MONITOR_EXPECTED_VERSION?.trim();
-  if (expectedVersion && serverInfo.version !== expectedVersion) {
-    throw new Error(`server version ${serverInfo.version} != ${expectedVersion}`);
-  }
-  return { version: serverInfo.version, protocol_version: parsedBody.result.protocolVersion };
 }
 
 function aggregateUsage(output) {
