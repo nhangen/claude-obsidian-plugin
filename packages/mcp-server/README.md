@@ -74,7 +74,7 @@ Query strings are rejected, so credentials cannot be supplied in URLs.
 
 `MCP_HTTP_MAX_BODY_BYTES` and `MCP_HTTP_MAX_RESPONSE_BYTES` default to 1 MiB.
 `MCP_HTTP_CONCURRENCY_LIMIT` defaults to 16, and
-`MCP_HTTP_REQUEST_TIMEOUT_MS` defaults to 10000, and
+`MCP_HTTP_REQUEST_TIMEOUT_MS` defaults to 30000, and
 `MCP_HTTP_SESSION_TTL_MS` defaults to 15 minutes. Host and Origin allowlists
 are checked before authentication and before any MCP handler runs. POST carries
 JSON-RPC, GET opens the session SSE stream, and DELETE closes the session. The

@@ -86,6 +86,7 @@ test("pins read prompts and released write status", () => {
   assert.ok(contract.tools.obsidian_commit_meta.errors.includes("PATH_INVALID"));
   assert.equal(contract.tools.obsidian_commit_meta.resultSchema.properties.repositoryPath, undefined);
   assert.equal(contract.limits.maxScanEntries, 10000);
+  assert.equal(contract.limits.httpRequestTimeoutMsDefault, 30000);
   assert.deepEqual(contract.errors.schema.required, ["code", "detail"]);
 });
 
