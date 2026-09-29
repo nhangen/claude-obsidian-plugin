@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { chmod, mkdtemp, mkdir, readFile, writeFile, rm } from "node:fs/promises";
+import { readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { spawn } from "node:child_process";
@@ -10,6 +11,7 @@ import { createServer } from "../src/stdio.mjs";
 const packageRoot = resolve(dirname(new URL(import.meta.url).pathname), "..");
 const entrypoint = join(packageRoot, "src", "stdio.mjs");
 const repositoryRoot = resolve(packageRoot, "../..");
+const packageManifest = JSON.parse(readFileSync(join(packageRoot, "package.json"), "utf8"));
 
 function startServer(configPath, extraEnv = {}) {
   const child = spawn(process.execPath, [entrypoint], {
@@ -137,6 +139,7 @@ test("stdio server exposes read-only tools with clean MCP framing", async (t) =>
   assert.equal(initialized.jsonrpc, "2.0");
   assert.equal(initialized.id, 1);
   assert.equal(typeof initialized.result?.serverInfo?.name, "string");
+  assert.equal(initialized.result?.serverInfo?.version, packageManifest.version);
   assert.equal(initialized.result?.protocolVersion, "2025-11-25");
   server.notification({ jsonrpc: "2.0", method: "notifications/initialized" });
 

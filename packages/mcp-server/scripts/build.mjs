@@ -1,11 +1,12 @@
 import { execFileSync } from "node:child_process";
-import { chmod, copyFile, mkdir, rm } from "node:fs/promises";
+import { chmod, copyFile, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const repositoryRoot = resolve(packageRoot, "../..");
 const outputRoot = join(packageRoot, "dist");
+const packageManifest = JSON.parse(await readFile(join(packageRoot, "package.json"), "utf8"));
 const helpers = [
   ["scripts/lib/resolve-config.sh", "helpers/lib/resolve-config.sh"],
   ["scripts/lib/commit-capture-parse.sh", "helpers/lib/commit-capture-parse.sh"],
@@ -32,3 +33,4 @@ for (const [source, destination] of helpers) {
 
 await chmod(join(outputRoot, "stdio.mjs"), 0o755);
 await chmod(join(outputRoot, "http.mjs"), 0o755);
+await writeFile(join(outputRoot, "version.mjs"), `export const packageVersion = ${JSON.stringify(packageManifest.version)};\n`);

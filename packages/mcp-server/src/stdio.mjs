@@ -9,6 +9,7 @@ import { delimiter, dirname, extname, isAbsolute, join, relative, resolve } from
 import { McpServer, ResourceTemplate } from "@modelcontextprotocol/server";
 import { serveStdio } from "@modelcontextprotocol/server/stdio";
 import { z } from "zod";
+import { packageVersion } from "./version.mjs";
 
 const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const sourceRepositoryRoot = resolve(packageRoot, "../..");
@@ -833,7 +834,7 @@ export function createServer({ supportedProtocolVersions = protocolVersions, sco
   const configuration = loadConfiguration();
   const availableScopes = new Set(scopes);
   const server = new McpServer(
-    { name: "claude-obsidian-mcp", version: "0.1.0" },
+    { name: "claude-obsidian-mcp", version: packageVersion },
     { capabilities: { tools: {}, resources: { listChanged: false }, prompts: { listChanged: false } }, supportedProtocolVersions },
   );
   if (availableScopes.has("vault:read")) server.registerTool(
