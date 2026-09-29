@@ -59,7 +59,7 @@ async function checkHealth() {
   const response = await fetch(endpoint, {
     method: "POST",
     headers: {
-      Accept: "application/json",
+      Accept: "application/json, text/event-stream",
       Authorization: `Bearer ${token}`,
       "Content-Type": "application/json",
       Host: process.env.MCP_MONITOR_HOST?.trim() || parsed.host,
