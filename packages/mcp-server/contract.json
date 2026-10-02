@@ -299,7 +299,7 @@
       "Keeper-save callers must set resolved=true and provide a vault-relative target folder; MCP does not invoke librarian routing or deduplication.",
       "A keyless partial result is downgraded to failed and never advertises automatic recovery.",
       "A keeper request-body pipe error cannot produce a successful response.",
-      "Remote writes require authentication, explicit gating, and an idempotency key."
+      "Remote writes require authentication, the configured vault:write policy, and an idempotency key."
     ]
   },
   "errors": {
