@@ -13,6 +13,14 @@ test("pins the MCP protocol and transport boundary", () => {
   assert.deepEqual(contract.protocol.transports.planned, []);
   assert.deepEqual(contract.protocol.transports.compatibilityOnly, ["http+sse"]);
   assert.deepEqual(contract.scopes.streamableHttp, ["vault:read", "repo:read", "vault:write"]);
+  assert.deepEqual(contract.writeAuthorization, {
+    mode: "host-policy",
+    perWriteApproval: false,
+    stdioProfile: "write",
+    httpScope: "vault:write",
+    routineTools: ["obsidian_keeper_save", "obsidian_daily_append"],
+    outOfContract: "fail-closed",
+  });
   assert.deepEqual(contract.protocol.clientMatrix, [
     { protocolRevision: "2026-07-28", transport: "stdio", status: "supported" },
     { protocolRevision: "2025-11-25", transport: "stdio", status: "compatibility" },

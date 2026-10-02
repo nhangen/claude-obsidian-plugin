@@ -47,10 +47,10 @@ is omitted. Multiple roots use the platform path delimiter.
 The stdio server defaults to the read profile, exposing only vault and
 repository read tools. Set `MCP_STDIO_PROFILE=write` explicitly as the
 host-level policy authorization for trusted routine Obsidian writes. The write
-profile provides the write tools and requires their idempotency keys; it does
-not require a per-write user approval prompt. Unknown profile values fail
-closed, and requests outside the configured path, scope, or recovery contract
-are rejected.
+profile provides the write tools. The supported client policy requires an
+idempotency key for routine writes and does not require a per-write user
+approval prompt. Unknown profile values fail closed, and requests outside the
+configured path, scope, or recovery contract are rejected.
 
 Authenticated Streamable HTTP uses stateful sessions at `/mcp` for the
 compatibility revision `2025-11-25`:
