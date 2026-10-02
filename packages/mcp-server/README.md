@@ -46,7 +46,8 @@ Installed packages authorize no repository roots when `MCP_REPOSITORY_ROOTS`
 is omitted. Multiple roots use the platform path delimiter.
 
 Stdio defaults to the read profile, which exposes only vault and repository
-read tools. The write profile is an explicit opt-in:
+read tools. The write profile is an explicit host-level opt-in for trusted
+Obsidian workflows:
 
     {
       "mcpServers": {
@@ -61,10 +62,12 @@ read tools. The write profile is an explicit opt-in:
       }
     }
 
-The write profile exposes vault:write and requires an idempotency key for
-every write. The host adapter must still require explicit approval for the two
-write tools; the profile is the server-side scope gate, not a substitute for
-host approval.
+The write profile exposes vault:write and requires an idempotency key for every
+write. Enabling the profile is the standing policy authorization for routine
+Obsidian note saves and daily appends; clients must not add a per-write approval
+prompt. Path containment, resolved targets, write-tool scope, idempotency, and
+recovery handling remain mandatory. Requests outside those boundaries fail
+closed.
 
 Authenticated Streamable HTTP uses stateful sessions at `/mcp` for the
 compatibility revision `2025-11-25`:
@@ -148,11 +151,12 @@ contract, including configured routing, taxonomy, scoring thresholds, and
 keeper outcome boundaries. It does not run a provider or persist the result;
 persistence remains in the client-side shell workflow. Both prompts are exposed
 to clients with `vault:read`. The admin-only `reorganize_vault` workflow remains
-outside the MCP MVP until an explicit approval and write contract exists.
+outside the MCP MVP until a separate policy and write contract exists.
 
 The machine-readable contract is [`contract.json`](contract.json). Its fixture
 cases are in [`test/fixtures/contract-fixtures.json`](test/fixtures/contract-fixtures.json)
 and are checked by `test/contract.test.mjs`.
 
-Admin prompts and legacy HTTP+SSE remain explicitly gated in the contract. Writes
-are released behind the `vault:write` scope and authenticated HTTP idempotency.
+Admin prompts and legacy HTTP+SSE remain explicitly gated in the contract. Routine
+writes are released behind the configured write profile, the `vault:write` scope,
+and authenticated HTTP idempotency.
