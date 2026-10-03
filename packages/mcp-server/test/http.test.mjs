@@ -355,6 +355,7 @@ test("usage aggregation ignores malformed and unstructured journal lines", async
     stream_requests: 1,
     clients: ["claude", "codex", "unknown"],
     p95_duration_ms: 30,
+    rejection_reasons: {},
   });
 });
 
@@ -377,7 +378,22 @@ test("session telemetry aggregation reports lifecycle pressure without secrets",
     "capacity-rejected": 1,
     max_active_sessions: 64,
     current_active_sessions: 63,
+    close_reasons: { "ttl-expired": 1 },
   });
+});
+
+test("monitor retains usage telemetry when health is unavailable", async () => {
+  const { collectState } = await import("../monitor.mjs");
+  const state = await collectState({
+    healthCheck: async () => { throw new Error("health HTTP 429"); },
+    usageReader: async () => ({
+      window_minutes: 15,
+      sessions: { "capacity-rejected": 2, current_active_sessions: 64 },
+    }),
+  });
+  assert.equal(state.status, "failed");
+  assert.equal(state.error, "health HTTP 429");
+  assert.deepEqual(state.sessions, { "capacity-rejected": 2, current_active_sessions: 64 });
 });
 
 test("monitor CLI runs through the deployed current symlink", async (t) => {

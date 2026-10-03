@@ -141,6 +141,11 @@ function aggregateUsage(output) {
     stream_requests: events.filter((event) => event.method === "GET").length,
     clients: [...new Set(events.map((event) => event.client_id).filter((value) => typeof value === "string"))].sort(),
     p95_duration_ms: durations.length ? durations[p95Index] : null,
+    rejection_reasons: Object.fromEntries(
+      [...new Set(events.map((event) => event.rejection_reason).filter((value) => typeof value === "string"))]
+        .sort()
+        .map((reason) => [reason, events.filter((event) => event.rejection_reason === reason).length]),
+    ),
   };
 }
 
@@ -157,8 +162,12 @@ function aggregateSessionTelemetry(output) {
   const counts = Object.fromEntries(["created", "initialized", "touched", "closed", "transport-disconnect", "capacity-rejected"].map((action) => [action, 0]));
   let maxActiveSessions = 0;
   let currentActiveSessions = null;
+  const closeReasons = {};
   for (const event of events) {
     if (typeof event.action === "string" && event.action in counts) counts[event.action] += 1;
+    if (event.action === "closed" && typeof event.reason === "string") {
+      closeReasons[event.reason] = (closeReasons[event.reason] ?? 0) + 1;
+    }
     if (Number.isInteger(event.active_sessions) && event.active_sessions >= 0) {
       maxActiveSessions = Math.max(maxActiveSessions, event.active_sessions);
       currentActiveSessions = event.active_sessions;
@@ -169,6 +178,7 @@ function aggregateSessionTelemetry(output) {
     ...counts,
     max_active_sessions: maxActiveSessions,
     current_active_sessions: currentActiveSessions,
+    close_reasons: closeReasons,
   };
 }
 
@@ -200,16 +210,38 @@ async function writeState(state) {
   await rename(temporary, target);
 }
 
-export { aggregateSessionTelemetry, aggregateUsage, checkHealth, issueToken, readUsage, writeState };
+async function collectState({ healthCheck = checkHealth, usageReader = readUsage } = {}) {
+  let health;
+  let usage;
+  let failure;
+  try {
+    health = await healthCheck();
+  } catch (error) {
+    failure = error;
+  }
+  try {
+    usage = await usageReader();
+  } catch (error) {
+    failure ??= error;
+  }
+  return {
+    status: failure ? "failed" : "ok",
+    ...(health ?? {}),
+    ...(usage ?? {}),
+    ...(failure ? { error: failure instanceof Error ? failure.message : "monitor failed" } : {}),
+  };
+}
+
+export { aggregateSessionTelemetry, aggregateUsage, checkHealth, collectState, issueToken, readUsage, writeState };
 
 if (basename(process.argv[1] ?? "") === "monitor.mjs") {
   const checkedAt = new Date().toISOString();
   try {
-    const health = await checkHealth();
-    const usage = await readUsage();
-    const state = { status: "ok", checked_at: checkedAt, ...health, ...usage };
+    const state = { checked_at: checkedAt, ...(await collectState()) };
     await writeState(state);
-    process.stdout.write(`mcp-monitor ${JSON.stringify(state)}\n`);
+    const stream = state.status === "ok" ? process.stdout : process.stderr;
+    stream.write(`mcp-monitor ${JSON.stringify(state)}\n`);
+    if (state.status !== "ok") process.exitCode = 1;
   } catch (error) {
     const state = {
       status: "failed",

@@ -9,6 +9,7 @@ const protocolVersions = ["2025-11-25"];
 const sessions = new Map();
 const activeRequests = new Set();
 const activeStreams = new Set();
+let pendingSessionInitializations = 0;
 
 class HttpBoundaryError extends Error {
   constructor(status, code, message) {
@@ -68,6 +69,7 @@ function loadHttpConfiguration() {
     concurrencyLimit: integerSetting("MCP_HTTP_CONCURRENCY_LIMIT", 16, 1, 1024),
     requestTimeoutMs: integerSetting("MCP_HTTP_REQUEST_TIMEOUT_MS", 30_000, 100, 300_000),
     sessionTtlMs: integerSetting("MCP_HTTP_SESSION_TTL_MS", 15 * 60 * 1000, 100, 24 * 60 * 60 * 1000),
+    disconnectGraceMs: integerSetting("MCP_HTTP_DISCONNECT_GRACE_MS", 30_000, 100, 24 * 60 * 60 * 1000),
   };
 }
 
@@ -123,6 +125,7 @@ function sessionSnapshot(configuration) {
     active_requests: activeRequests.size,
     active_get_streams: activeStreams.size,
     session_limit: configuration.concurrencyLimit,
+    pending_initializations: pendingSessionInitializations,
   };
 }
 
@@ -306,10 +309,27 @@ function webRequest(req, requestUrl, body, signal) {
 function touchSession(session, configuration) {
   if (!session.id || session.closed) return;
   if (session.expiryTimer) clearTimeout(session.expiryTimer);
+  if (session.disconnectTimer) clearTimeout(session.disconnectTimer);
+  session.disconnectTimer = undefined;
+  session.disconnectReason = undefined;
   const deadline = Math.min(session.absoluteExpiresAt, Date.now() + configuration.sessionTtlMs);
   session.expiryTimer = setTimeout(() => void closeSession(session, configuration, "ttl-expired"), Math.max(1, deadline - Date.now()));
   session.expiryTimer.unref?.();
   logSession({ action: "touched", session, configuration });
+}
+
+function scheduleSessionClose(session, configuration, reason) {
+  if (!session.id || session.closed) return;
+  session.disconnectReason = reason;
+  if (session.disconnectTimer) return;
+  session.disconnectTimer = setTimeout(() => {
+    session.disconnectTimer = undefined;
+    const closeReason = session.disconnectReason ?? reason;
+    session.disconnectReason = undefined;
+    void closeSession(session, configuration, closeReason);
+  }, configuration.disconnectGraceMs);
+  session.disconnectTimer.unref?.();
+  logSession({ action: "transport-disconnect", session, configuration, reason });
 }
 
 function createSession(configuration, auth) {
@@ -335,6 +355,8 @@ function createSession(configuration, auth) {
     absoluteExpiresAt: auth.expiresAt,
     createdAt: Date.now(),
     expiryTimer: undefined,
+    disconnectTimer: undefined,
+    disconnectReason: undefined,
     closed: false,
     closeReason: undefined,
     closeLogged: false,
@@ -350,6 +372,9 @@ function closeSessionState(session, configuration, reason) {
   session.closed = true;
   session.closeReason = reason;
   if (session.expiryTimer) clearTimeout(session.expiryTimer);
+  if (session.disconnectTimer) clearTimeout(session.disconnectTimer);
+  session.disconnectTimer = undefined;
+  session.disconnectReason = undefined;
   if (session.id) sessions.delete(session.id);
   if (!session.closeLogged) {
     session.closeLogged = true;
@@ -373,7 +398,8 @@ async function transportResponse(session, request, parsedBody, timeoutMs, contro
     }, timeoutMs);
   });
   const abortSession = () => {
-    if (request.method !== "GET") void closeSession(session, configuration, "request-aborted");
+    if (request.method === "GET") scheduleSessionClose(session, configuration, "transport-disconnect");
+    else void closeSession(session, configuration, "request-aborted");
   };
   controller.signal.addEventListener("abort", abortSession, { once: true });
   try {
@@ -546,7 +572,7 @@ async function handleRequest(req, res, configuration) {
       const messages = Array.isArray(parsedBody) ? parsedBody : [parsedBody];
       const initializing = method === "POST" && messages.length === 1 && messages[0]?.method === "initialize";
       if (!initializing) throw new HttpBoundaryError(400, -32600, "Mcp-Session-Id header is required");
-      if (sessions.size >= configuration.concurrencyLimit) {
+      if (sessions.size + pendingSessionInitializations >= configuration.concurrencyLimit) {
         summary = { ...summary, rejectionReason: "session-cap" };
         logSession({
           action: "capacity-rejected",
@@ -556,15 +582,26 @@ async function handleRequest(req, res, configuration) {
         });
         throw new HttpBoundaryError(429, -32009, "Too many sessions");
       }
-      provisionalSession = createSession(configuration, auth);
-      await provisionalSession.server.connect(provisionalSession.transport);
-      session = provisionalSession;
+      pendingSessionInitializations += 1;
+      try {
+        provisionalSession = createSession(configuration, auth);
+        await provisionalSession.server.connect(provisionalSession.transport);
+        session = provisionalSession;
+      } finally {
+        pendingSessionInitializations -= 1;
+      }
     }
     touchSession(session, configuration);
     const request = webRequest(req, requestUrl, body, controller.signal);
     const response = await transportResponse(session, request, parsedBody, configuration.requestTimeoutMs, controller, configuration);
     status = response.status;
-    await sendWebResponse(response, res, configuration.maxResponseBytes, controller.signal);
+    if (method === "GET" && response.status === 408) scheduleSessionClose(session, configuration, "stream-timeout");
+    const responseTimer = setTimeout(() => controller.abort(), configuration.requestTimeoutMs);
+    try {
+      await sendWebResponse(response, res, configuration.maxResponseBytes, controller.signal);
+    } finally {
+      clearTimeout(responseTimer);
+    }
     if (provisionalSession && !provisionalSession.id) await closeSession(provisionalSession, configuration, "initialize-failed");
   } catch (error) {
     status = error instanceof HttpBoundaryError ? error.status : 500;
@@ -574,12 +611,11 @@ async function handleRequest(req, res, configuration) {
   } finally {
     req.off("aborted", abort);
     if (controller.signal.aborted && session) {
-      logSession({
-        action: "transport-disconnect",
-        session,
-        configuration,
-        reason: method === "GET" ? "stream-aborted" : "request-aborted",
-      });
+      if (method === "GET") {
+        scheduleSessionClose(session, configuration, status === 408 ? "stream-timeout" : "transport-disconnect");
+      } else {
+        logSession({ action: "transport-disconnect", session, configuration, reason: "request-aborted" });
+      }
     }
     if (controller.signal.aborted && session && method !== "GET") await closeSession(session, configuration, "request-aborted");
     activeSet.delete(controller);
