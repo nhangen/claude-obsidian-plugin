@@ -320,11 +320,19 @@ test("authenticated Streamable HTTP is read-only and enforces transport boundari
     .split("\n")
     .filter((line) => line.startsWith("mcp-http-request "))
     .map((line) => JSON.parse(line.slice("mcp-http-request ".length)));
+  const sessionEvents = server.stderr()
+    .split("\n")
+    .filter((line) => line.startsWith("mcp-http-session "))
+    .map((line) => JSON.parse(line.slice("mcp-http-session ".length)));
   assert.ok(requestEvents.some((event) => event.status === 200 && event.mcp_method === "initialize"));
   assert.ok(requestEvents.some((event) => event.status === 200 && event.mcp_method === "tools/call" && event.tool === "obsidian_find_notes"));
   assert.ok(requestEvents.some((event) => event.status === 401 && event.client_id === "unknown"));
   assert.ok(requestEvents.every((event) => Number.isInteger(event.duration_ms) && event.duration_ms >= 0));
   assert.ok(requestEvents.some((event) => event.client_id === "http-contract-test"));
+  assert.ok(sessionEvents.some((event) => event.action === "created" && event.client_id === "http-contract-test"));
+  assert.ok(sessionEvents.some((event) => event.action === "initialized" && event.session_id !== "pending"));
+  assert.ok(sessionEvents.some((event) => event.action === "closed" && event.reason === "client-delete"));
+  assert.ok(sessionEvents.every((event) => event.session_id.length <= 12 && event.auth_fingerprint.length <= 12));
   assert.doesNotMatch(server.stderr(), new RegExp(secret));
   assert.doesNotMatch(server.stderr(), /remote compatibility|changed/);
 });
@@ -347,6 +355,28 @@ test("usage aggregation ignores malformed and unstructured journal lines", async
     stream_requests: 1,
     clients: ["claude", "codex", "unknown"],
     p95_duration_ms: 30,
+  });
+});
+
+test("session telemetry aggregation reports lifecycle pressure without secrets", async () => {
+  const { aggregateSessionTelemetry } = await import("../monitor.mjs");
+  const output = [
+    'mcp-http-session {"action":"created","active_sessions":1}',
+    'mcp-http-session {"action":"initialized","active_sessions":1}',
+    'mcp-http-session {"action":"capacity-rejected","reason":"session-cap","active_sessions":64}',
+    'mcp-http-session {"action":"closed","reason":"ttl-expired","active_sessions":63}',
+    "mcp-http-session not-json",
+  ].join("\n");
+  assert.deepEqual(aggregateSessionTelemetry(output), {
+    events: 4,
+    created: 1,
+    initialized: 1,
+    touched: 0,
+    closed: 1,
+    "transport-disconnect": 0,
+    "capacity-rejected": 1,
+    max_active_sessions: 64,
+    current_active_sessions: 63,
   });
 });
 

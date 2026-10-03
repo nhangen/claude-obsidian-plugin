@@ -144,6 +144,34 @@ function aggregateUsage(output) {
   };
 }
 
+function aggregateSessionTelemetry(output) {
+  const events = output.split("\n").flatMap((line) => {
+    if (!line.startsWith("mcp-http-session ")) return [];
+    try {
+      const event = JSON.parse(line.slice("mcp-http-session ".length));
+      return event && typeof event === "object" ? [event] : [];
+    } catch {
+      return [];
+    }
+  });
+  const counts = Object.fromEntries(["created", "initialized", "touched", "closed", "transport-disconnect", "capacity-rejected"].map((action) => [action, 0]));
+  let maxActiveSessions = 0;
+  let currentActiveSessions = null;
+  for (const event of events) {
+    if (typeof event.action === "string" && event.action in counts) counts[event.action] += 1;
+    if (Number.isInteger(event.active_sessions) && event.active_sessions >= 0) {
+      maxActiveSessions = Math.max(maxActiveSessions, event.active_sessions);
+      currentActiveSessions = event.active_sessions;
+    }
+  }
+  return {
+    events: events.length,
+    ...counts,
+    max_active_sessions: maxActiveSessions,
+    current_active_sessions: currentActiveSessions,
+  };
+}
+
 async function readUsage() {
   const service = process.env.MCP_MONITOR_SERVICE?.trim() || "claude-obsidian-mcp.service";
   const windowMinutes = Number(process.env.MCP_MONITOR_WINDOW_MINUTES || 15);
@@ -160,7 +188,7 @@ async function readUsage() {
     "--output",
     "cat",
   ], { maxBuffer: 4 * 1024 * 1024 });
-  return { window_minutes: windowMinutes, ...aggregateUsage(stdout) };
+  return { window_minutes: windowMinutes, ...aggregateUsage(stdout), sessions: aggregateSessionTelemetry(stdout) };
 }
 
 async function writeState(state) {
@@ -172,7 +200,7 @@ async function writeState(state) {
   await rename(temporary, target);
 }
 
-export { aggregateUsage, checkHealth, issueToken, readUsage, writeState };
+export { aggregateSessionTelemetry, aggregateUsage, checkHealth, issueToken, readUsage, writeState };
 
 if (basename(process.argv[1] ?? "") === "monitor.mjs") {
   const checkedAt = new Date().toISOString();

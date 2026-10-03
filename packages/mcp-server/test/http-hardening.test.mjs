@@ -61,6 +61,7 @@ function startServer(configPath, settings = {}) {
   return {
     child,
     ready,
+    stderr: () => stderr,
     async stop() {
       if (child.exitCode === null) child.kill("SIGTERM");
       await Promise.race([once(child, "close").catch(() => {}), new Promise((resolveStop) => setTimeout(resolveStop, 500))]);
@@ -158,6 +159,13 @@ test("HTTP hardening covers legacy negotiation, malformed signatures, body limit
   const sessionId = initialized.headers.get("mcp-session-id");
   assert.ok(sessionId);
 
+  const capacityRejected = await fetch(`${url}/mcp`, {
+    method: "POST",
+    headers: headers(url, validToken),
+    body: JSON.stringify(initialize(2)),
+  });
+  assert.equal(capacityRejected.status, 429);
+
   const unsupportedModern = await fetch(`${url}/mcp`, {
     method: "POST",
     headers: headers(url, validToken, { "MCP-Protocol-Version": "2026-07-28", "Mcp-Session-Id": sessionId }),
@@ -209,4 +217,6 @@ test("HTTP hardening covers legacy negotiation, malformed signatures, body limit
     body: JSON.stringify({ jsonrpc: "2.0", id: 4, method: "tools/list", params: {} }),
   });
   assert.equal(afterExpiry.status, 404);
+  assert.match(server.stderr(), /mcp-http-session .*"action":"capacity-rejected".*"reason":"session-cap"/);
+  assert.match(server.stderr(), /mcp-http-request .*"status":429.*"rejection_reason":"session-cap"/);
 });
