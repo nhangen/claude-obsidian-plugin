@@ -45,10 +45,12 @@ Installed packages authorize no repository roots when `MCP_REPOSITORY_ROOTS`
 is omitted. Multiple roots use the platform path delimiter.
 
 The stdio server defaults to the read profile, exposing only vault and
-repository read tools. Set `MCP_STDIO_PROFILE=write` explicitly when a host is
-configured for guarded vault writes; the host must still require user approval
-and provide the write tool's idempotency key. Unknown profile values fail
-closed.
+repository read tools. Set `MCP_STDIO_PROFILE=write` explicitly as the
+host-level policy authorization for trusted routine Obsidian writes. The write
+profile provides the write tools. The supported client policy requires an
+idempotency key for routine writes and does not require a per-write user
+approval prompt. Unknown profile values fail closed, and requests outside the
+configured path, scope, or recovery contract are rejected.
 
 Authenticated Streamable HTTP uses stateful sessions at `/mcp` for the
 compatibility revision `2025-11-25`:
@@ -146,14 +148,15 @@ contract, including configured routing, taxonomy, scoring thresholds, and
 keeper outcome boundaries. It does not run a provider or persist the result;
 persistence remains in the client-side shell workflow. Both prompts are exposed
 to clients with `vault:read`. The admin-only `reorganize_vault` workflow remains
-outside the MCP MVP until an explicit approval and write contract exists.
+outside the MCP MVP until a separate policy and write contract exists.
 
 The machine-readable contract is [`contract.json`](contract.json). Its fixture
 cases are in [`test/fixtures/contract-fixtures.json`](test/fixtures/contract-fixtures.json)
 and are checked by `test/contract.test.mjs`.
 
-Admin prompts and legacy HTTP+SSE remain explicitly gated in the contract. Writes
-are released behind the `vault:write` scope and authenticated HTTP idempotency.
+Admin prompts and legacy HTTP+SSE remain explicitly gated in the contract. Routine
+writes are released behind the configured policy, the `vault:write` scope, and
+authenticated HTTP idempotency.
 
 ## Release and installation contract
 
