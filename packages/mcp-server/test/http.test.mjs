@@ -344,18 +344,19 @@ test("usage aggregation ignores malformed and unstructured journal lines", async
     'mcp-http-request {"status":200,"duration_ms":10,"client_id":"codex","tool":"obsidian_find_notes"}',
     'mcp-http-request {"status":403,"duration_ms":30,"client_id":"unknown"}',
     'mcp-http-request {"method":"GET","status":408,"duration_ms":999999,"client_id":"codex"}',
+    'mcp-http-request {"status":429,"duration_ms":2,"client_id":"codex","rejection_reason":"active-stream-cap"}',
     "mcp-http-request not-json",
     'mcp-http-request {"status":200,"duration_ms":20,"client_id":"claude"}',
   ].join("\n");
   assert.deepEqual(aggregateUsage(output), {
-    requests: 4,
+    requests: 5,
     successful_requests: 2,
-    failed_requests: 2,
+    failed_requests: 3,
     tool_calls: 1,
     stream_requests: 1,
     clients: ["claude", "codex", "unknown"],
     p95_duration_ms: 30,
-    rejection_reasons: {},
+    rejection_reasons: { "active-stream-cap": 1 },
   });
 });
 

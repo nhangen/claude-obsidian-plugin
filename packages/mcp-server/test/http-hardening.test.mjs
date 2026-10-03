@@ -226,7 +226,6 @@ test("HTTP session reservations and disconnected stream grace prevent pool exhau
   const server = startServer(config, {
     MCP_HTTP_CONCURRENCY_LIMIT: "1",
     MCP_HTTP_DISCONNECT_GRACE_MS: "100",
-    MCP_HTTP_REQUEST_TIMEOUT_MS: "100",
   });
   t.after(async () => {
     await server.stop();
@@ -234,12 +233,14 @@ test("HTTP session reservations and disconnected stream grace prevent pool exhau
   });
   const url = await server.ready;
   const validToken = token();
-  const responses = await Promise.all([1, 2].map((id) => fetch(`${url}/mcp`, {
+  const responses = await Promise.all(Array.from({ length: 20 }, (_, id) => fetch(`${url}/mcp`, {
     method: "POST",
     headers: headers(url, validToken),
     body: JSON.stringify(initialize(id)),
   })));
-  assert.deepEqual(responses.map((response) => response.status).sort(), [200, 429]);
+  const statuses = responses.map((response) => response.status);
+  assert.equal(statuses.filter((status) => status === 200).length, 1);
+  assert.equal(statuses.filter((status) => status === 429).length, 19);
   const initialized = responses.find((response) => response.status === 200);
   const sessionId = initialized.headers.get("mcp-session-id");
   assert.ok(sessionId);
@@ -258,5 +259,5 @@ test("HTTP session reservations and disconnected stream grace prevent pool exhau
     body: JSON.stringify({ jsonrpc: "2.0", id: 3, method: "tools/list", params: {} }),
   });
   assert.equal(afterDisconnect.status, 404);
-  assert.match(server.stderr(), /mcp-http-session .*"action":"closed".*"reason":"stream-timeout"/);
+  assert.match(server.stderr(), /mcp-http-session .*"action":"closed".*"reason":"transport-disconnect"/);
 });
