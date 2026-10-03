@@ -9,6 +9,7 @@ const protocolVersions = ["2025-11-25"];
 const sessions = new Map();
 const activeRequests = new Set();
 const activeStreams = new Set();
+let pendingSessionInitializations = 0;
 
 class HttpBoundaryError extends Error {
   constructor(status, code, message) {
@@ -68,6 +69,7 @@ function loadHttpConfiguration() {
     concurrencyLimit: integerSetting("MCP_HTTP_CONCURRENCY_LIMIT", 16, 1, 1024),
     requestTimeoutMs: integerSetting("MCP_HTTP_REQUEST_TIMEOUT_MS", 30_000, 100, 300_000),
     sessionTtlMs: integerSetting("MCP_HTTP_SESSION_TTL_MS", 15 * 60 * 1000, 100, 24 * 60 * 60 * 1000),
+    disconnectGraceMs: integerSetting("MCP_HTTP_DISCONNECT_GRACE_MS", 30_000, 100, 24 * 60 * 60 * 1000),
   };
 }
 
@@ -81,6 +83,12 @@ function jsonResponse(status, code, message, headers = {}) {
 
 function metricLabel(value, fallback = "unknown") {
   return typeof value === "string" && /^[A-Za-z0-9._:/-]{1,128}$/.test(value) ? value : fallback;
+}
+
+function metricPrefix(value, fallback = "unknown") {
+  if (typeof value !== "string") return fallback;
+  const prefix = value.slice(0, 12);
+  return /^[A-Za-z0-9._:/-]{1,12}$/.test(prefix) ? prefix : fallback;
 }
 
 function requestSummary(message) {
@@ -107,7 +115,32 @@ function logRequest({ method, status, startedAt, clientId, summary = {} }) {
     client_id: metricLabel(clientId),
   };
   if (summary.tool) event.tool = summary.tool;
+  if (summary.rejectionReason) event.rejection_reason = summary.rejectionReason;
   process.stderr.write(`mcp-http-request ${JSON.stringify(event)}\n`);
+}
+
+function sessionSnapshot(configuration) {
+  return {
+    active_sessions: sessions.size,
+    active_requests: activeRequests.size,
+    active_get_streams: activeStreams.size,
+    session_limit: configuration.concurrencyLimit,
+    pending_initializations: pendingSessionInitializations,
+  };
+}
+
+function logSession({ action, session, configuration, reason }) {
+  const event = {
+    event: "mcp-http-session",
+    action,
+    session_id: metricPrefix(session?.id, "pending"),
+    client_id: metricLabel(session?.clientId),
+    auth_fingerprint: metricPrefix(session?.fingerprint),
+    age_ms: session?.createdAt ? Math.max(0, Date.now() - session.createdAt) : 0,
+    ...sessionSnapshot(configuration),
+  };
+  if (reason) event.reason = reason;
+  process.stderr.write(`mcp-http-session ${JSON.stringify(event)}\n`);
 }
 
 function validateTransportBoundary(req, configuration) {
@@ -276,9 +309,33 @@ function webRequest(req, requestUrl, body, signal) {
 function touchSession(session, configuration) {
   if (!session.id || session.closed) return;
   if (session.expiryTimer) clearTimeout(session.expiryTimer);
+  if (session.disconnectTimer) clearTimeout(session.disconnectTimer);
+  session.disconnectTimer = undefined;
+  session.disconnectReason = undefined;
   const deadline = Math.min(session.absoluteExpiresAt, Date.now() + configuration.sessionTtlMs);
-  session.expiryTimer = setTimeout(() => void closeSession(session), Math.max(1, deadline - Date.now()));
+  session.expiryTimer = setTimeout(() => void closeSession(session, configuration, "ttl-expired"), Math.max(1, deadline - Date.now()));
   session.expiryTimer.unref?.();
+  logSession({ action: "touched", session, configuration });
+}
+
+function releaseSessionReservation(session) {
+  if (session.reservationReleased) return;
+  session.reservationReleased = true;
+  pendingSessionInitializations -= 1;
+}
+
+function scheduleSessionClose(session, configuration, reason) {
+  if (!session.id || session.closed) return;
+  session.disconnectReason = reason;
+  if (session.disconnectTimer) return;
+  session.disconnectTimer = setTimeout(() => {
+    session.disconnectTimer = undefined;
+    const closeReason = session.disconnectReason ?? reason;
+    session.disconnectReason = undefined;
+    void closeSession(session, configuration, closeReason);
+  }, configuration.disconnectGraceMs);
+  session.disconnectTimer.unref?.();
+  logSession({ action: "transport-disconnect", session, configuration, reason });
 }
 
 function createSession(configuration, auth) {
@@ -290,46 +347,68 @@ function createSession(configuration, auth) {
     onsessioninitialized: (sessionId) => {
       session.id = sessionId;
       sessions.set(sessionId, session);
+      releaseSessionReservation(session);
       touchSession(session, configuration);
+      logSession({ action: "initialized", session, configuration });
     },
-    onsessionclosed: (sessionId) => {
-      sessions.delete(sessionId);
-      session.closed = true;
-      if (session.expiryTimer) clearTimeout(session.expiryTimer);
-      session.expiryTimer = undefined;
+    onsessionclosed: () => {
+      closeSessionState(session, configuration, session.closeReason ?? "transport-closed");
     },
   });
   session = {
     id: undefined,
     fingerprint: auth.fingerprint,
+    clientId: auth.subject,
     absoluteExpiresAt: auth.expiresAt,
+    createdAt: Date.now(),
     expiryTimer: undefined,
+    disconnectTimer: undefined,
+    disconnectReason: undefined,
+    reservationReleased: false,
     closed: false,
+    closeReason: undefined,
+    closeLogged: false,
     server: createServer({ supportedProtocolVersions: protocolVersions, scopes: auth.scopes, requireWriteIdempotency: true }),
     transport,
   };
+  logSession({ action: "created", session, configuration });
   return session;
 }
 
-async function closeSession(session) {
+function closeSessionState(session, configuration, reason) {
   if (session.closed) return;
+  releaseSessionReservation(session);
   session.closed = true;
+  session.closeReason = reason;
   if (session.expiryTimer) clearTimeout(session.expiryTimer);
+  if (session.disconnectTimer) clearTimeout(session.disconnectTimer);
+  session.disconnectTimer = undefined;
+  session.disconnectReason = undefined;
   if (session.id) sessions.delete(session.id);
+  if (!session.closeLogged) {
+    session.closeLogged = true;
+    logSession({ action: "closed", session, configuration, reason });
+  }
+}
+
+async function closeSession(session, configuration, reason = "server-close") {
+  if (session.closed) return;
+  closeSessionState(session, configuration, reason);
   await session.transport.close().catch(() => {});
   await session.server.close().catch(() => {});
 }
 
-async function transportResponse(session, request, parsedBody, timeoutMs, controller) {
+async function transportResponse(session, request, parsedBody, timeoutMs, controller, configuration, onTimeout) {
   let timer;
   const timeout = new Promise((_, reject) => {
     timer = setTimeout(() => {
+      onTimeout?.();
       controller.abort();
       reject(new HttpBoundaryError(408, -32008, "Request timed out"));
     }, timeoutMs);
   });
   const abortSession = () => {
-    if (request.method !== "GET") void closeSession(session);
+    if (request.method !== "GET") void closeSession(session, configuration, "request-aborted");
   };
   controller.signal.addEventListener("abort", abortSession, { once: true });
   try {
@@ -337,7 +416,7 @@ async function transportResponse(session, request, parsedBody, timeoutMs, contro
   } finally {
     clearTimeout(timer);
     controller.signal.removeEventListener("abort", abortSession);
-    if (controller.signal.aborted && request.method !== "GET") await closeSession(session);
+    if (controller.signal.aborted && request.method !== "GET") await closeSession(session, configuration, "request-aborted");
   }
 }
 
@@ -452,16 +531,26 @@ async function handleRequest(req, res, configuration) {
   let status = 500;
   let clientId = "unknown";
   let summary;
+  let abortReason;
   const activeSet = method === "GET" ? activeStreams : activeRequests;
   if (method !== "DELETE" && activeSet.size >= configuration.concurrencyLimit) {
     status = 429;
     await sendBoundaryError(new HttpBoundaryError(429, -32009, "Too many requests"), res);
-    logRequest({ method, status, startedAt, clientId });
+    logRequest({
+      method,
+      status,
+      startedAt,
+      clientId,
+      summary: { rejectionReason: method === "GET" ? "active-stream-cap" : "active-request-cap" },
+    });
     return;
   }
   const controller = new AbortController();
   activeSet.add(controller);
-  const abort = () => controller.abort();
+  const abort = () => {
+    abortReason ??= "transport-disconnect";
+    controller.abort();
+  };
   req.once("aborted", abort);
   res.once("close", () => {
     if (!res.writableEnded) abort();
@@ -491,29 +580,64 @@ async function handleRequest(req, res, configuration) {
     session = normalizedSessionId ? sessions.get(normalizedSessionId) : undefined;
     if (normalizedSessionId && !session) throw new HttpBoundaryError(404, -32001, "Session not found");
     if (session && session.fingerprint !== auth.fingerprint) throw new HttpBoundaryError(403, -32000, "Forbidden");
+    if (session && method === "DELETE") session.closeReason = "client-delete";
     if (!session) {
       const messages = Array.isArray(parsedBody) ? parsedBody : [parsedBody];
       const initializing = method === "POST" && messages.length === 1 && messages[0]?.method === "initialize";
       if (!initializing) throw new HttpBoundaryError(400, -32600, "Mcp-Session-Id header is required");
-      if (sessions.size >= configuration.concurrencyLimit) throw new HttpBoundaryError(429, -32009, "Too many sessions");
+      if (sessions.size + pendingSessionInitializations >= configuration.concurrencyLimit) {
+        summary = { ...summary, rejectionReason: "session-cap" };
+        logSession({
+          action: "capacity-rejected",
+          session: { clientId: auth.subject, fingerprint: auth.fingerprint },
+          configuration,
+          reason: "session-cap",
+        });
+        throw new HttpBoundaryError(429, -32009, "Too many sessions");
+      }
+      pendingSessionInitializations += 1;
       provisionalSession = createSession(configuration, auth);
       await provisionalSession.server.connect(provisionalSession.transport);
       session = provisionalSession;
     }
     touchSession(session, configuration);
     const request = webRequest(req, requestUrl, body, controller.signal);
-    const response = await transportResponse(session, request, parsedBody, configuration.requestTimeoutMs, controller);
+    const response = await transportResponse(
+      session,
+      request,
+      parsedBody,
+      configuration.requestTimeoutMs,
+      controller,
+      configuration,
+      () => { abortReason ??= "stream-timeout"; },
+    );
     status = response.status;
-    await sendWebResponse(response, res, configuration.maxResponseBytes, controller.signal);
-    if (provisionalSession && !provisionalSession.id) await closeSession(provisionalSession);
+    if (method === "GET" && response.status === 408) scheduleSessionClose(session, configuration, "stream-timeout");
+    const responseTimer = setTimeout(() => {
+      abortReason ??= "stream-timeout";
+      controller.abort();
+    }, configuration.requestTimeoutMs);
+    try {
+      await sendWebResponse(response, res, configuration.maxResponseBytes, controller.signal);
+    } finally {
+      clearTimeout(responseTimer);
+    }
+    if (provisionalSession && !provisionalSession.id) await closeSession(provisionalSession, configuration, "initialize-failed");
   } catch (error) {
     status = error instanceof HttpBoundaryError ? error.status : 500;
-    if (provisionalSession && !provisionalSession.id) await closeSession(provisionalSession);
+    if (provisionalSession && !provisionalSession.id) await closeSession(provisionalSession, configuration, "initialize-failed");
     if (!res.headersSent) await sendBoundaryError(error, res);
     else res.end();
   } finally {
     req.off("aborted", abort);
-    if (controller.signal.aborted && session && method !== "GET") await closeSession(session);
+    if (controller.signal.aborted && session) {
+      if (method === "GET") {
+        scheduleSessionClose(session, configuration, abortReason ?? (status === 408 ? "stream-timeout" : "transport-disconnect"));
+      } else {
+        logSession({ action: "transport-disconnect", session, configuration, reason: "request-aborted" });
+      }
+    }
+    if (controller.signal.aborted && session && method !== "GET") await closeSession(session, configuration, "request-aborted");
     activeSet.delete(controller);
     logRequest({ method, status, startedAt, clientId, summary });
   }
@@ -530,7 +654,7 @@ async function shutdown() {
   shuttingDown = true;
   for (const controller of activeRequests) controller.abort();
   for (const controller of activeStreams) controller.abort();
-  await Promise.all([...sessions.values()].map((session) => closeSession(session)));
+  await Promise.all([...sessions.values()].map((session) => closeSession(session, configuration, "service-shutdown")));
   await closeActiveChildren();
   await new Promise((resolve) => httpServer.close(resolve));
 }

@@ -87,6 +87,15 @@ function requestHeaders(url, bearer, extra = {}) {
   };
 }
 
+async function waitForServerLog(server, predicate, timeoutMs = 1_000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (predicate(server.stderr())) return;
+    await new Promise((resolveSleep) => setTimeout(resolveSleep, 10));
+  }
+  assert.equal(predicate(server.stderr()), true);
+}
+
 function initializeRequest(id = 1) {
   return {
     jsonrpc: "2.0",
@@ -314,17 +323,29 @@ test("authenticated Streamable HTTP is read-only and enforces transport boundari
     headers: requestHeaders(url, validToken, { "MCP-Protocol-Version": "2025-11-25", "Mcp-Session-Id": sessionId }),
   });
   assert.equal(closed.status, 200);
+  await waitForServerLog(server, (stderr) => stderr
+    .split("\n")
+    .filter((line) => line.startsWith("mcp-http-session "))
+    .some((line) => line.includes('"action":"closed"') && line.includes('"reason":"client-delete"')));
 
   assert.equal(server.stdout(), "");
   const requestEvents = server.stderr()
     .split("\n")
     .filter((line) => line.startsWith("mcp-http-request "))
     .map((line) => JSON.parse(line.slice("mcp-http-request ".length)));
+  const sessionEvents = server.stderr()
+    .split("\n")
+    .filter((line) => line.startsWith("mcp-http-session "))
+    .map((line) => JSON.parse(line.slice("mcp-http-session ".length)));
   assert.ok(requestEvents.some((event) => event.status === 200 && event.mcp_method === "initialize"));
   assert.ok(requestEvents.some((event) => event.status === 200 && event.mcp_method === "tools/call" && event.tool === "obsidian_find_notes"));
   assert.ok(requestEvents.some((event) => event.status === 401 && event.client_id === "unknown"));
   assert.ok(requestEvents.every((event) => Number.isInteger(event.duration_ms) && event.duration_ms >= 0));
   assert.ok(requestEvents.some((event) => event.client_id === "http-contract-test"));
+  assert.ok(sessionEvents.some((event) => event.action === "created" && event.client_id === "http-contract-test"));
+  assert.ok(sessionEvents.some((event) => event.action === "initialized" && event.session_id !== "pending"));
+  assert.ok(sessionEvents.some((event) => event.action === "closed" && event.reason === "client-delete"));
+  assert.ok(sessionEvents.every((event) => event.session_id.length <= 12 && event.auth_fingerprint.length <= 12));
   assert.doesNotMatch(server.stderr(), new RegExp(secret));
   assert.doesNotMatch(server.stderr(), /remote compatibility|changed/);
 });
@@ -336,18 +357,57 @@ test("usage aggregation ignores malformed and unstructured journal lines", async
     'mcp-http-request {"status":200,"duration_ms":10,"client_id":"codex","tool":"obsidian_find_notes"}',
     'mcp-http-request {"status":403,"duration_ms":30,"client_id":"unknown"}',
     'mcp-http-request {"method":"GET","status":408,"duration_ms":999999,"client_id":"codex"}',
+    'mcp-http-request {"status":429,"duration_ms":2,"client_id":"codex","rejection_reason":"active-stream-cap"}',
     "mcp-http-request not-json",
     'mcp-http-request {"status":200,"duration_ms":20,"client_id":"claude"}',
   ].join("\n");
   assert.deepEqual(aggregateUsage(output), {
-    requests: 4,
+    requests: 5,
     successful_requests: 2,
-    failed_requests: 2,
+    failed_requests: 3,
     tool_calls: 1,
     stream_requests: 1,
     clients: ["claude", "codex", "unknown"],
     p95_duration_ms: 30,
+    rejection_reasons: { "active-stream-cap": 1 },
   });
+});
+
+test("session telemetry aggregation reports lifecycle pressure without secrets", async () => {
+  const { aggregateSessionTelemetry } = await import("../monitor.mjs");
+  const output = [
+    'mcp-http-session {"action":"created","active_sessions":1}',
+    'mcp-http-session {"action":"initialized","active_sessions":1}',
+    'mcp-http-session {"action":"capacity-rejected","reason":"session-cap","active_sessions":64}',
+    'mcp-http-session {"action":"closed","reason":"ttl-expired","active_sessions":63}',
+    "mcp-http-session not-json",
+  ].join("\n");
+  assert.deepEqual(aggregateSessionTelemetry(output), {
+    events: 4,
+    created: 1,
+    initialized: 1,
+    touched: 0,
+    closed: 1,
+    "transport-disconnect": 0,
+    "capacity-rejected": 1,
+    max_active_sessions: 64,
+    current_active_sessions: 63,
+    close_reasons: { "ttl-expired": 1 },
+  });
+});
+
+test("monitor retains usage telemetry when health is unavailable", async () => {
+  const { collectState } = await import("../monitor.mjs");
+  const state = await collectState({
+    healthCheck: async () => { throw new Error("health HTTP 429"); },
+    usageReader: async () => ({
+      window_minutes: 15,
+      sessions: { "capacity-rejected": 2, current_active_sessions: 64 },
+    }),
+  });
+  assert.equal(state.status, "failed");
+  assert.equal(state.error, "health HTTP 429");
+  assert.deepEqual(state.sessions, { "capacity-rejected": 2, current_active_sessions: 64 });
 });
 
 test("monitor CLI runs through the deployed current symlink", async (t) => {

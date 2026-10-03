@@ -61,6 +61,7 @@ function startServer(configPath, settings = {}) {
   return {
     child,
     ready,
+    stderr: () => stderr,
     async stop() {
       if (child.exitCode === null) child.kill("SIGTERM");
       await Promise.race([once(child, "close").catch(() => {}), new Promise((resolveStop) => setTimeout(resolveStop, 500))]);
@@ -158,6 +159,13 @@ test("HTTP hardening covers legacy negotiation, malformed signatures, body limit
   const sessionId = initialized.headers.get("mcp-session-id");
   assert.ok(sessionId);
 
+  const capacityRejected = await fetch(`${url}/mcp`, {
+    method: "POST",
+    headers: headers(url, validToken),
+    body: JSON.stringify(initialize(2)),
+  });
+  assert.equal(capacityRejected.status, 429);
+
   const unsupportedModern = await fetch(`${url}/mcp`, {
     method: "POST",
     headers: headers(url, validToken, { "MCP-Protocol-Version": "2026-07-28", "Mcp-Session-Id": sessionId }),
@@ -209,4 +217,47 @@ test("HTTP hardening covers legacy negotiation, malformed signatures, body limit
     body: JSON.stringify({ jsonrpc: "2.0", id: 4, method: "tools/list", params: {} }),
   });
   assert.equal(afterExpiry.status, 404);
+  assert.match(server.stderr(), /mcp-http-session .*"action":"capacity-rejected".*"reason":"session-cap"/);
+  assert.match(server.stderr(), /mcp-http-request .*"status":429.*"rejection_reason":"session-cap"/);
+});
+
+test("HTTP session reservations and disconnected stream grace prevent pool exhaustion", async (t) => {
+  const { directory, config } = await fixture();
+  const server = startServer(config, {
+    MCP_HTTP_CONCURRENCY_LIMIT: "1",
+    MCP_HTTP_DISCONNECT_GRACE_MS: "100",
+  });
+  t.after(async () => {
+    await server.stop();
+    await rm(directory, { recursive: true, force: true });
+  });
+  const url = await server.ready;
+  const validToken = token();
+  const responses = await Promise.all(Array.from({ length: 20 }, (_, id) => fetch(`${url}/mcp`, {
+    method: "POST",
+    headers: headers(url, validToken),
+    body: JSON.stringify(initialize(id)),
+  })));
+  const statuses = responses.map((response) => response.status);
+  assert.equal(statuses.filter((status) => status === 200).length, 1);
+  assert.equal(statuses.filter((status) => status === 429).length, 19);
+  const initialized = responses.find((response) => response.status === 200);
+  const sessionId = initialized.headers.get("mcp-session-id");
+  assert.ok(sessionId);
+
+  const stream = await fetch(`${url}/mcp`, {
+    method: "GET",
+    headers: headers(url, validToken, { Accept: "text/event-stream", "Mcp-Session-Id": sessionId }),
+  });
+  assert.equal(stream.status, 200);
+  await stream.body?.cancel();
+  await new Promise((resolveSleep) => setTimeout(resolveSleep, 220));
+
+  const afterDisconnect = await fetch(`${url}/mcp`, {
+    method: "POST",
+    headers: headers(url, validToken, { "MCP-Protocol-Version": "2025-11-25", "Mcp-Session-Id": sessionId }),
+    body: JSON.stringify({ jsonrpc: "2.0", id: 3, method: "tools/list", params: {} }),
+  });
+  assert.equal(afterDisconnect.status, 404);
+  assert.match(server.stderr(), /mcp-http-session .*"action":"closed".*"reason":"transport-disconnect"/);
 });
