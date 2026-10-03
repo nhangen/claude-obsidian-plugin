@@ -87,6 +87,15 @@ function requestHeaders(url, bearer, extra = {}) {
   };
 }
 
+async function waitForServerLog(server, predicate, timeoutMs = 1_000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (predicate(server.stderr())) return;
+    await new Promise((resolveSleep) => setTimeout(resolveSleep, 10));
+  }
+  assert.equal(predicate(server.stderr()), true);
+}
+
 function initializeRequest(id = 1) {
   return {
     jsonrpc: "2.0",
@@ -314,6 +323,10 @@ test("authenticated Streamable HTTP is read-only and enforces transport boundari
     headers: requestHeaders(url, validToken, { "MCP-Protocol-Version": "2025-11-25", "Mcp-Session-Id": sessionId }),
   });
   assert.equal(closed.status, 200);
+  await waitForServerLog(server, (stderr) => stderr
+    .split("\n")
+    .filter((line) => line.startsWith("mcp-http-session "))
+    .some((line) => line.includes('"action":"closed"') && line.includes('"reason":"client-delete"')));
 
   assert.equal(server.stdout(), "");
   const requestEvents = server.stderr()
