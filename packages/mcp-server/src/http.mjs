@@ -306,12 +306,14 @@ function webRequest(req, requestUrl, body, signal) {
   });
 }
 
-function touchSession(session, configuration) {
+function touchSession(session, configuration, method) {
   if (!session.id || session.closed) return;
   if (session.expiryTimer) clearTimeout(session.expiryTimer);
-  if (session.disconnectTimer) clearTimeout(session.disconnectTimer);
-  session.disconnectTimer = undefined;
-  session.disconnectReason = undefined;
+  if (method === "POST" && session.disconnectTimer) {
+    clearTimeout(session.disconnectTimer);
+    session.disconnectTimer = undefined;
+    session.disconnectReason = undefined;
+  }
   const deadline = Math.min(session.absoluteExpiresAt, Date.now() + configuration.sessionTtlMs);
   session.expiryTimer = setTimeout(() => void closeSession(session, configuration, "ttl-expired"), Math.max(1, deadline - Date.now()));
   session.expiryTimer.unref?.();
@@ -600,7 +602,7 @@ async function handleRequest(req, res, configuration) {
       await provisionalSession.server.connect(provisionalSession.transport);
       session = provisionalSession;
     }
-    touchSession(session, configuration);
+    touchSession(session, configuration, method);
     const request = webRequest(req, requestUrl, body, controller.signal);
     const response = await transportResponse(
       session,
