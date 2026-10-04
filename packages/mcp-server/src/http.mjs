@@ -306,18 +306,20 @@ function webRequest(req, requestUrl, body, signal) {
   });
 }
 
-function touchSession(session, configuration, method) {
+function touchSession(session, configuration) {
   if (!session.id || session.closed) return;
   if (session.expiryTimer) clearTimeout(session.expiryTimer);
-  if (method === "POST" && session.disconnectTimer) {
-    clearTimeout(session.disconnectTimer);
-    session.disconnectTimer = undefined;
-    session.disconnectReason = undefined;
-  }
   const deadline = Math.min(session.absoluteExpiresAt, Date.now() + configuration.sessionTtlMs);
   session.expiryTimer = setTimeout(() => void closeSession(session, configuration, "ttl-expired"), Math.max(1, deadline - Date.now()));
   session.expiryTimer.unref?.();
   logSession({ action: "touched", session, configuration });
+}
+
+function reviveSession(session) {
+  if (session.closed || !session.disconnectTimer) return;
+  clearTimeout(session.disconnectTimer);
+  session.disconnectTimer = undefined;
+  session.disconnectReason = undefined;
 }
 
 function releaseSessionReservation(session) {
@@ -602,7 +604,7 @@ async function handleRequest(req, res, configuration) {
       await provisionalSession.server.connect(provisionalSession.transport);
       session = provisionalSession;
     }
-    touchSession(session, configuration, method);
+    touchSession(session, configuration);
     const request = webRequest(req, requestUrl, body, controller.signal);
     const response = await transportResponse(
       session,
@@ -624,6 +626,7 @@ async function handleRequest(req, res, configuration) {
     } finally {
       clearTimeout(responseTimer);
     }
+    if (method === "POST" && response.status >= 200 && response.status < 300) reviveSession(session);
     if (provisionalSession && !provisionalSession.id) await closeSession(provisionalSession, configuration, "initialize-failed");
   } catch (error) {
     status = error instanceof HttpBoundaryError ? error.status : 500;
