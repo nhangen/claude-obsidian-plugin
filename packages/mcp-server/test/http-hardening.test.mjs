@@ -261,3 +261,142 @@ test("HTTP session reservations and disconnected stream grace prevent pool exhau
   assert.equal(afterDisconnect.status, 404);
   assert.match(server.stderr(), /mcp-http-session .*"action":"closed".*"reason":"transport-disconnect"/);
 });
+
+test("repeated GET timeouts cannot keep an abandoned session at capacity", async (t) => {
+  const { directory, config } = await fixture();
+  const server = startServer(config, {
+    MCP_HTTP_CONCURRENCY_LIMIT: "1",
+    MCP_HTTP_REQUEST_TIMEOUT_MS: "100",
+    MCP_HTTP_DISCONNECT_GRACE_MS: "300",
+  });
+  t.after(async () => {
+    await server.stop();
+    await rm(directory, { recursive: true, force: true });
+  });
+  const url = await server.ready;
+  const validToken = token();
+  const initialized = await fetch(`${url}/mcp`, {
+    method: "POST",
+    headers: headers(url, validToken),
+    body: JSON.stringify(initialize()),
+  });
+  assert.equal(initialized.status, 200);
+  const sessionId = initialized.headers.get("mcp-session-id");
+  assert.ok(sessionId);
+
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    const stream = await fetch(`${url}/mcp`, {
+      method: "GET",
+      headers: headers(url, validToken, { Accept: "text/event-stream", "Mcp-Session-Id": sessionId }),
+    });
+    if (stream.status === 404) break;
+    assert.equal(stream.status, 200);
+    await stream.text();
+  }
+
+  const replacement = await fetch(`${url}/mcp`, {
+    method: "POST",
+    headers: headers(url, validToken),
+    body: JSON.stringify(initialize(2)),
+  });
+  assert.equal(replacement.status, 200);
+  assert.match(server.stderr(), /mcp-http-session .*"action":"closed".*"reason":"stream-timeout"/);
+});
+
+test("a POST after stream timeout retains the active session", async (t) => {
+  const { directory, config } = await fixture();
+  const server = startServer(config, {
+    MCP_HTTP_REQUEST_TIMEOUT_MS: "100",
+    MCP_HTTP_DISCONNECT_GRACE_MS: "300",
+  });
+  t.after(async () => {
+    await server.stop();
+    await rm(directory, { recursive: true, force: true });
+  });
+  const url = await server.ready;
+  const validToken = token();
+  const initialized = await fetch(`${url}/mcp`, {
+    method: "POST",
+    headers: headers(url, validToken),
+    body: JSON.stringify(initialize()),
+  });
+  assert.equal(initialized.status, 200);
+  const sessionId = initialized.headers.get("mcp-session-id");
+  assert.ok(sessionId);
+
+  const stream = await fetch(`${url}/mcp`, {
+    method: "GET",
+    headers: headers(url, validToken, { Accept: "text/event-stream", "Mcp-Session-Id": sessionId }),
+  });
+  assert.equal(stream.status, 200);
+  await stream.text();
+
+  const activeHeaders = headers(url, validToken, { "MCP-Protocol-Version": "2025-11-25", "Mcp-Session-Id": sessionId });
+  const active = await fetch(`${url}/mcp`, {
+    method: "POST",
+    headers: activeHeaders,
+    body: JSON.stringify({ jsonrpc: "2.0", id: 2, method: "tools/list", params: {} }),
+  });
+  assert.equal(active.status, 200);
+  await new Promise((resolveSleep) => setTimeout(resolveSleep, 350));
+  const retained = await fetch(`${url}/mcp`, {
+    method: "POST",
+    headers: activeHeaders,
+    body: JSON.stringify({ jsonrpc: "2.0", id: 3, method: "tools/list", params: {} }),
+  });
+  assert.equal(retained.status, 200);
+
+  const deleted = await fetch(`${url}/mcp`, { method: "DELETE", headers: activeHeaders });
+  assert.equal(deleted.status, 200);
+  const afterDelete = await fetch(`${url}/mcp`, {
+    method: "POST",
+    headers: activeHeaders,
+    body: JSON.stringify({ jsonrpc: "2.0", id: 4, method: "tools/list", params: {} }),
+  });
+  assert.equal(afterDelete.status, 404);
+});
+
+test("a rejected POST does not revive a timed-out session", async (t) => {
+  const { directory, config } = await fixture();
+  const server = startServer(config, {
+    MCP_HTTP_REQUEST_TIMEOUT_MS: "100",
+    MCP_HTTP_DISCONNECT_GRACE_MS: "300",
+  });
+  t.after(async () => {
+    await server.stop();
+    await rm(directory, { recursive: true, force: true });
+  });
+  const url = await server.ready;
+  const validToken = token();
+  const initialized = await fetch(`${url}/mcp`, {
+    method: "POST",
+    headers: headers(url, validToken),
+    body: JSON.stringify(initialize()),
+  });
+  assert.equal(initialized.status, 200);
+  const sessionId = initialized.headers.get("mcp-session-id");
+  assert.ok(sessionId);
+
+  const stream = await fetch(`${url}/mcp`, {
+    method: "GET",
+    headers: headers(url, validToken, { Accept: "text/event-stream", "Mcp-Session-Id": sessionId }),
+  });
+  assert.equal(stream.status, 200);
+  await stream.text();
+
+  const sessionHeaders = headers(url, validToken, { "MCP-Protocol-Version": "2025-11-25", "Mcp-Session-Id": sessionId });
+  const rejected = await fetch(`${url}/mcp`, {
+    method: "POST",
+    headers: sessionHeaders,
+    body: JSON.stringify(initialize(2)),
+  });
+  assert.equal(rejected.status, 400);
+
+  await new Promise((resolveSleep) => setTimeout(resolveSleep, 350));
+  const afterClose = await fetch(`${url}/mcp`, {
+    method: "POST",
+    headers: sessionHeaders,
+    body: JSON.stringify({ jsonrpc: "2.0", id: 3, method: "tools/list", params: {} }),
+  });
+  assert.equal(afterClose.status, 404);
+});
