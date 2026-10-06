@@ -92,15 +92,17 @@ keeper_emit_outcome() {
   keeper_print_outcome "$outcome" "$value"
 }
 
-# Progress markers for the MCP adapter, which kills a write that overruns its
-# subprocess cap. They say which steps had already landed, so a cut-off insert
-# whose note is on disk is reported as such instead of as an ambiguous timeout
-# a caller retries or rewrites by hand (#170). Opt-in (KEEPER_PROGRESS=1, which
-# only the adapter sets) and JSON format only, on stderr, so no other caller's
-# output changes.
+# Progress markers: which insert steps have landed, for a caller that may kill
+# the keeper mid-write (the MCP adapter) to say what is left. Off unless
+# KEEPER_PROGRESS_TOKEN is set; JSON format only; one stderr line per step,
+# tagged with the caller's per-run token so no other stderr text (a file name
+# in a diagnostic, say) can pass for one. The line format is a protocol:
+# tests/keeper-progress.sh is its contract, and the adapter's parser
+# (keeperProgress in packages/mcp-server/src/stdio.mjs) must match it.
 keeper_progress() {
-  [ "${KEEPER_PROGRESS:-0}" = 1 ] && [ "$KEEPER_FORMAT" = json ] || return 0
-  printf 'keeper-progress: %s\n' "$*" >&2
+  [ "$KEEPER_FORMAT" = json ] || return 0
+  case "${KEEPER_PROGRESS_TOKEN:-}" in ''|*[!A-Za-z0-9]*) return 0 ;; esac
+  printf 'keeper-progress %s: %s\n' "$KEEPER_PROGRESS_TOKEN" "$*" >&2
 }
 
 keeper_die() {
@@ -628,7 +630,7 @@ _cmd_insert_locked() {
     wrote_note=1
   fi
 
-  keeper_progress "note-written pending=index${sldate:+,daily-link}"
+  keeper_progress "note-written pending=index${sldate:+,daily-link}${KEEPER_IDEMPOTENCY_KEY:+,idempotency}"
   if [ "$wrote_note" = 1 ]; then
     keeper_fault after_note \
       || { keeper_partial_locked "$target was written but INDEX and daily recovery remain"; return 2; }
@@ -657,6 +659,7 @@ _cmd_insert_locked() {
 
   keeper_idempotency_commit "$vault_abs" "$payload_hash" \
     || { keeper_partial_locked "$target was written but idempotency recovery remains"; return 2; }
+  [ -z "$KEEPER_IDEMPOTENCY_KEY" ] || keeper_progress idempotency-written
   KEEPER_RECOVERY_REQUIRED=false
   KEEPER_RECOVERY_ACTION=""
   keeper_emit_outcome committed "$full"

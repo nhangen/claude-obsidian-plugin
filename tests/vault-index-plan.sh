@@ -83,8 +83,8 @@ touch -t 197001010000 "$COLD/x.md"
 CPLAN="$(vault_index_plan "$COLD" "$CIDX")"
 plan_has "CHANGED"$'\t'"x.md" "$CPLAN"   # cold-start: hash-checked despite old mtime
 
-# A folder path holding a backslash (#170): `awk -v` once expanded it, so the
-# plan carried absolute paths, and nothing it named existed under the folder.
+# Invariant: a backslash in the folder path is data, never an escape; the plan
+# stays folder-relative.
 BF="$TMP/Back\\tslash"; mkdir -p "$BF/sub"
 BIDX="$BF/INDEX.md"; printf -- '- [[kept]]\n' > "$BIDX"
 printf 'kept\n' > "$BF/kept.md"; printf 'new\n' > "$BF/sub/new.md"

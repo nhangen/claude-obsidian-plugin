@@ -3,7 +3,10 @@
 import { createHash, createHmac, randomUUID, timingSafeEqual } from "node:crypto";
 import { createServer as createHttpServer } from "node:http";
 import { WebStandardStreamableHTTPServerTransport, validateHostHeader } from "@modelcontextprotocol/server";
-import { closeActiveChildren, createServer, subprocessTimeouts } from "./stdio.mjs";
+import { integerSetting } from "./settings.mjs";
+import {
+  childTerminationGraceMs, closeActiveChildren, createServer, subprocessTimeoutSettings, subprocessTimeouts,
+} from "./stdio.mjs";
 
 const protocolVersions = ["2025-11-25"];
 const sessions = new Map();
@@ -17,17 +20,6 @@ class HttpBoundaryError extends Error {
     this.status = status;
     this.code = code;
   }
-}
-
-function integerSetting(name, fallback, minimum, maximum) {
-  const raw = process.env[name];
-  if (raw === undefined || raw === "") return fallback;
-  if (!/^\d+$/.test(raw)) throw new Error(`${name} must be an integer`);
-  const value = Number(raw);
-  if (!Number.isSafeInteger(value) || value < minimum || value > maximum) {
-    throw new Error(`${name} is outside its allowed range`);
-  }
-  return value;
 }
 
 function listSetting(name, fallback) {
@@ -649,10 +641,14 @@ async function handleRequest(req, res, configuration) {
 }
 
 const configuration = loadHttpConfiguration();
-// A keeper save that outlives the HTTP request is aborted with it, and the
-// client never sees which steps landed. Say so at startup (#170).
-if (subprocessTimeouts.keeperSave >= configuration.requestTimeoutMs) {
-  process.stderr.write(`mcp-http-warning MCP_KEEPER_SAVE_TIMEOUT_MS (${subprocessTimeouts.keeperSave}) is not below MCP_HTTP_REQUEST_TIMEOUT_MS (${configuration.requestTimeoutMs}); a slow keeper save will be cancelled by the HTTP request timeout\n`);
+// A subprocess that outlives its HTTP request (cap plus the SIGTERM->SIGKILL
+// grace) is cancelled with it, and the client never sees which steps landed.
+// This only warns: tests and short-lived deployments legitimately run small
+// request timeouts against the default caps.
+for (const [key, setting] of Object.entries(subprocessTimeoutSettings)) {
+  if (subprocessTimeouts[key] + childTerminationGraceMs >= configuration.requestTimeoutMs) {
+    process.stderr.write(`mcp-http-warning ${setting} (${subprocessTimeouts[key]}) plus the ${childTerminationGraceMs} ms termination grace is not below MCP_HTTP_REQUEST_TIMEOUT_MS (${configuration.requestTimeoutMs}); a slow call will be cancelled by the HTTP request timeout\n`);
+  }
 }
 const httpServer = createHttpServer((req, res) => {
   void handleRequest(req, res, configuration);

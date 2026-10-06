@@ -5,8 +5,18 @@ import { once } from "node:events";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { test } from "node:test";
+import { writeOutput } from "../src/stdio.mjs";
 
 const packageRoot = resolve(dirname(new URL(import.meta.url).pathname), "..");
+
+// Every write outcome the adapter returns must satisfy its own output schema,
+// refinements included, so contract drift fails here first.
+function assertWriteContract(response, label) {
+  const outcome = response.result?.structuredContent;
+  if (!outcome) return;
+  const result = writeOutput.safeParse(outcome);
+  assert.ok(result.success, `${label}: ${JSON.stringify(result.error?.issues)} ${JSON.stringify(outcome)}`);
+}
 
 function collect(child) {
   let buffer = "";
@@ -44,6 +54,7 @@ test("built stdio fails closed on invalid or contradictory keeper results", asyn
   await mkdir(join(vault, "Daily"), { recursive: true });
   await copyFile(join(packageRoot, "dist", "stdio.mjs"), join(install, "dist", "stdio.mjs"));
   await copyFile(join(packageRoot, "dist", "version.mjs"), join(install, "dist", "version.mjs"));
+  await copyFile(join(packageRoot, "dist", "settings.mjs"), join(install, "dist", "settings.mjs"));
   await copyFile(join(packageRoot, "dist", "helpers", "lib", "resolve-config.sh"), join(helperRoot, "lib", "resolve-config.sh"));
   await symlink(join(packageRoot, "node_modules"), join(install, "node_modules"), "dir");
   await writeFile(config, `---\nvault_path: ${vault}\ndaily_path: Daily/\n---\n`);
@@ -117,6 +128,7 @@ exit 9
       },
     })}\n`);
     const response = await next(id);
+    assertWriteContract(response, idempotencyKey);
     assert.equal(response.result.isError, true, idempotencyKey);
     const result = JSON.parse(response.result.content[0].text);
     assert.equal(result.code, "KEEPER_PROTOCOL_ERROR", idempotencyKey);
@@ -134,6 +146,7 @@ exit 9
     },
   })}\n`);
   const keylessPartial = await next(14);
+  assertWriteContract(keylessPartial, "keyless partial");
   const keylessPartialResult = JSON.parse(keylessPartial.result.content[0].text);
   assert.equal(keylessPartial.result.isError, true);
   assert.equal(keylessPartialResult.code, "PARTIAL");

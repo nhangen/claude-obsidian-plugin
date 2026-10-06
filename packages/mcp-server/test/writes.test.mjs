@@ -6,6 +6,7 @@ import { spawn } from "node:child_process";
 import { once } from "node:events";
 import { test } from "node:test";
 import { createHmac } from "node:crypto";
+import { writeOutput } from "../src/stdio.mjs";
 
 const packageRoot = resolve(dirname(new URL(import.meta.url).pathname), "..");
 const stdioEntrypoint = join(packageRoot, "src", "stdio.mjs");
@@ -24,6 +25,18 @@ function jwtToken({ scope = "vault:read repo:read", exp = Math.floor(Date.now() 
   const payload = base64url(JSON.stringify({ aud, exp, iss, scope }));
   const signature = createHmac("sha256", secret).update(`${header}.${payload}`).digest("base64url");
   return `${header}.${payload}.${signature}`;
+}
+
+const writeTools = new Set(["obsidian_keeper_save", "obsidian_daily_append"]);
+
+// Every write outcome the adapter returns must satisfy its own output schema,
+// refinements included, so contract drift fails the test that produced it.
+function assertWriteContract(message, response) {
+  if (message.method !== "tools/call" || !writeTools.has(message.params?.name)) return;
+  const outcome = response.result?.structuredContent;
+  if (!outcome) return;
+  const result = writeOutput.safeParse(outcome);
+  assert.ok(result.success, `write outcome breaks its contract: ${JSON.stringify(result.error?.issues)} ${JSON.stringify(outcome)}`);
 }
 
 function startStdioServer(configPath, extraEnv = {}) {
@@ -76,7 +89,10 @@ function startStdioServer(configPath, extraEnv = {}) {
       for (;;) {
         if (childError) throw childError;
         const response = messages.find((candidate) => candidate.id === id);
-        if (response) return response;
+        if (response) {
+          assertWriteContract(message, response);
+          return response;
+        }
         await Promise.race([
           new Promise((resolveWait) => {
             messageWaiter = resolveWait;
@@ -655,6 +671,9 @@ test("stdio recovers an insert when the keeper dies after writing the note", asy
   assert.equal(crashedOutcome.status, "partial");
   assert.equal(crashedOutcome.recovery.required, true);
   assert.equal(crashedOutcome.retryable, true);
+  // The keeper died after the note: its progress markers still name what is left.
+  assert.match(crashedOutcome.warnings.join(" "), /exited without a result after the note was written to Inbox\/Crash Recovery\.md; unfinished: INDEX and idempotency record/);
+  assert.match(crashedOutcome.recovery.action, /^do not rewrite the note; retry with the same idempotency_key to finish INDEX/);
   assert.match(await readFile(join(vaultPath, "Inbox", "Crash Recovery.md"), "utf8"), /Written before keeper death/);
 
   crashServer.child.stdin.end();
@@ -939,15 +958,18 @@ async function hungKeeperSave(t, { fault, title, idempotencyKey }) {
   return { fixture, response, outcome: JSON.parse(response.result.content[0].text) };
 }
 
-test("stdio keeper save that times out after the note is written names the unfinished INDEX step and is not retryable", async (t) => {
+test("stdio keeper save that times out after the note is written names the unfinished steps and the cap to raise", async (t) => {
   const { fixture, response, outcome } = await hungKeeperSave(t, { fault: "after_note", title: "Slow Index", idempotencyKey: "slow-index-1" });
   assert.equal(outcome.code, "SUBPROCESS_TIMEOUT");
   assert.equal(outcome.status, "partial");
   assert.equal(outcome.error_code, "SUBPROCESS_TIMEOUT");
-  assert.equal(outcome.retryable, false);
+  // Keyed: the same key recovers the written note, so the outcome stays
+  // retryable, but only after the cap is raised.
+  assert.equal(outcome.retryable, true);
   assert.equal(outcome.recovery.required, true);
-  assert.match(outcome.recovery.action, /do not rewrite the note; finish INDEX,/);
-  assert.match(outcome.warnings.join(" "), /keeper write timed out after the note was written to Inbox\/Slow Index\.md; unfinished: INDEX$/);
+  assert.equal(outcome.recovery.action, "do not rewrite the note; raise MCP_KEEPER_SAVE_TIMEOUT_MS, then retry with the same idempotency_key to finish INDEX and idempotency record (retry with the same idempotency_key)");
+  assert.ok(outcome.warnings.includes("keeper write timed out after the note was written to Inbox/Slow Index.md; unfinished: INDEX and idempotency record (retry with the same idempotency_key)"), outcome.warnings.join(" | "));
+  assert.ok(outcome.warnings.includes("raise MCP_KEEPER_SAVE_TIMEOUT_MS before retrying; the same cap would stop the retry at the same step"));
   assert.doesNotMatch(outcome.warnings.join(" "), /Session Link/);
   assert.deepEqual(outcome.affected_paths, ["Inbox/Slow Index.md", "Inbox/INDEX.md"]);
   assert.deepEqual(response.result.structuredContent, Object.fromEntries(Object.entries(outcome).filter(([key]) => !["code", "detail"].includes(key))));
@@ -982,18 +1004,27 @@ test("stdio keyless keeper save that times out after the note is written fails w
   assert.equal(outcome.status, "failed");
   assert.equal(outcome.retryable, false);
   assert.equal(outcome.recovery.required, true);
-  assert.match(outcome.recovery.action, /do not rewrite the note; finish INDEX for Inbox\/Slow Keyless\.md manually/);
-  assert.match(outcome.warnings.join(" "), /unfinished: INDEX/);
+  assert.equal(outcome.recovery.action, "do not rewrite the note; finish INDEX for Inbox/Slow Keyless.md manually");
+  // Keyless: the idempotency record is a no-op, so it is not a pending step.
+  assert.ok(outcome.warnings.includes("keeper write timed out after the note was written to Inbox/Slow Keyless.md; unfinished: INDEX"), outcome.warnings.join(" | "));
   assert.match(outcome.warnings.join(" "), /no idempotency key/);
+});
+
+test("stdio keyless keeper save stopped after INDEX says nothing known is unfinished", async (t) => {
+  const { outcome } = await hungKeeperSave(t, { fault: "after_index", title: "Slow Keyless Index" });
+  assert.equal(outcome.status, "failed");
+  assert.equal(outcome.retryable, false);
+  assert.equal(outcome.recovery.action, "do not rewrite the note; nothing known unfinished; verify Inbox/Slow Keyless Index.md and INDEX");
+  assert.ok(outcome.warnings.includes("keeper write timed out after the note was written to Inbox/Slow Keyless Index.md; nothing known unfinished"), outcome.warnings.join(" | "));
 });
 
 test("stdio keeper save that times out after INDEX names the idempotency record as unfinished", async (t) => {
   const { fixture, outcome } = await hungKeeperSave(t, { fault: "after_index", title: "Slow Record", idempotencyKey: "slow-record-1" });
   assert.equal(outcome.code, "SUBPROCESS_TIMEOUT");
   assert.equal(outcome.status, "partial");
-  assert.equal(outcome.retryable, false);
-  assert.match(outcome.warnings.join(" "), /written to Inbox\/Slow Record\.md; unfinished: idempotency record$/);
-  assert.match(outcome.recovery.action, /finish idempotency record/);
+  assert.equal(outcome.retryable, true);
+  assert.ok(outcome.warnings.includes("keeper write timed out after the note was written to Inbox/Slow Record.md; unfinished: idempotency record (retry with the same idempotency_key)"), outcome.warnings.join(" | "));
+  assert.equal(outcome.recovery.action, "do not rewrite the note; raise MCP_KEEPER_SAVE_TIMEOUT_MS, then retry with the same idempotency_key to finish idempotency record (retry with the same idempotency_key)");
   assert.match(await readFile(join(fixture.vaultPath, "Inbox", "INDEX.md"), "utf8"), /\[\[(?:Inbox\/)?Slow Record\]\]/);
 });
 
@@ -1061,19 +1092,31 @@ test("MCP_DAILY_APPEND_TIMEOUT_MS caps daily appends independently of keeper sav
   assert.equal(saved.result.structuredContent.status, "committed");
 });
 
-test("HTTP warns at startup when the keeper save cap is not below the request timeout", async (t) => {
+test("HTTP warns at startup when any subprocess cap is not below the request timeout", async (t) => {
   const { root, configPath } = await createFixtureVault();
   t.after(() => rm(root, { recursive: true, force: true }));
+  // Every cap is checked, not only the keeper save.
+  {
+    const server = startHttpServer(configPath, { MCP_HTTP_REQUEST_TIMEOUT_MS: "8000" });
+    await server.ready;
+    assert.match(server.stderr(), /mcp-http-warning MCP_KEEPER_SAVE_TIMEOUT_MS \(25000\)/);
+    assert.match(server.stderr(), /mcp-http-warning MCP_DAILY_APPEND_TIMEOUT_MS \(10000\)/);
+    assert.doesNotMatch(server.stderr(), /mcp-http-warning MCP_COMMIT_META_TIMEOUT_MS/);
+    server.child.kill("SIGTERM");
+    await once(server.child, "close").catch(() => {});
+  }
   for (const [env, warned] of [
     [{ MCP_HTTP_REQUEST_TIMEOUT_MS: "1000" }, true],
-    [{ MCP_HTTP_REQUEST_TIMEOUT_MS: "30000", MCP_KEEPER_SAVE_TIMEOUT_MS: "30000" }, true],
+    // The termination grace counts: 29600 ms + 500 ms reaches a 30000 ms request.
+    [{ MCP_HTTP_REQUEST_TIMEOUT_MS: "30000", MCP_KEEPER_SAVE_TIMEOUT_MS: "29600" }, true],
+    [{ MCP_HTTP_REQUEST_TIMEOUT_MS: "30000", MCP_KEEPER_SAVE_TIMEOUT_MS: "29400" }, false],
     [{}, false],
   ]) {
     const server = startHttpServer(configPath, env);
     await server.ready;
-    const warning = /mcp-http-warning MCP_KEEPER_SAVE_TIMEOUT_MS \(\d+\) is not below MCP_HTTP_REQUEST_TIMEOUT_MS/;
+    const warning = /mcp-http-warning MCP_KEEPER_SAVE_TIMEOUT_MS \(\d+\) plus the 500 ms termination grace is not below MCP_HTTP_REQUEST_TIMEOUT_MS/;
     if (warned) assert.match(server.stderr(), warning, JSON.stringify(env));
-    else assert.doesNotMatch(server.stderr(), warning);
+    else assert.doesNotMatch(server.stderr(), /mcp-http-warning/);
     server.child.kill("SIGTERM");
     await once(server.child, "close").catch(() => {});
   }

@@ -9,6 +9,7 @@ import { delimiter, dirname, extname, isAbsolute, join, relative, resolve } from
 import { McpServer, ResourceTemplate } from "@modelcontextprotocol/server";
 import { serveStdio } from "@modelcontextprotocol/server/stdio";
 import { z } from "zod";
+import { integerSetting } from "./settings.mjs";
 import { packageVersion } from "./version.mjs";
 
 const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -50,27 +51,22 @@ const maxScanEntries = 10_000;
 const maxScanBytes = 64 * 1024 * 1024;
 const searchConcurrency = 16;
 
-function timeoutSetting(name, fallback) {
-  const raw = process.env[name];
-  if (raw === undefined || raw === "") return fallback;
-  if (!/^\d+$/.test(raw)) throw new Error(`${name} must be an integer`);
-  const value = Number(raw);
-  if (!Number.isSafeInteger(value) || value < 100 || value > 600_000) {
-    throw new Error(`${name} is outside its allowed range`);
-  }
-  return value;
-}
-
-// Subprocess caps per call type. A keeper save writes the note and then
-// reconciles the folder INDEX, which on a large vault on a slow mount takes
-// several seconds; a shared 5 s cap cut every such save off after the note had
-// landed (#170). Keep the save cap below MCP_HTTP_REQUEST_TIMEOUT_MS (30 s by
-// default) so the HTTP transport still receives the structured outcome.
-export const subprocessTimeouts = Object.freeze({
-  commitMeta: timeoutSetting("MCP_COMMIT_META_TIMEOUT_MS", 5_000),
-  keeperSave: timeoutSetting("MCP_KEEPER_SAVE_TIMEOUT_MS", 25_000),
-  dailyAppend: timeoutSetting("MCP_DAILY_APPEND_TIMEOUT_MS", 10_000),
+// Subprocess caps per call type, in milliseconds. A keeper save writes the note
+// and then reconciles the folder INDEX, so it gets the most room. Over HTTP,
+// keep every cap (plus childTerminationGraceMs) below MCP_HTTP_REQUEST_TIMEOUT_MS
+// so the structured outcome still reaches the client; http.mjs warns otherwise.
+export const subprocessTimeoutSettings = Object.freeze({
+  commitMeta: "MCP_COMMIT_META_TIMEOUT_MS",
+  keeperSave: "MCP_KEEPER_SAVE_TIMEOUT_MS",
+  dailyAppend: "MCP_DAILY_APPEND_TIMEOUT_MS",
 });
+export const subprocessTimeouts = Object.freeze({
+  commitMeta: integerSetting(subprocessTimeoutSettings.commitMeta, 5_000, 100, 600_000),
+  keeperSave: integerSetting(subprocessTimeoutSettings.keeperSave, 25_000, 100, 600_000),
+  dailyAppend: integerSetting(subprocessTimeoutSettings.dailyAppend, 10_000, 100, 600_000),
+});
+// How long terminateChild waits between SIGTERM, SIGKILL and giving up.
+export const childTerminationGraceMs = 500;
 const protocolVersions = ["2026-07-28", "2025-11-25"];
 const activeChildren = new Set();
 const stdioScopesByProfile = Object.freeze({
@@ -269,8 +265,8 @@ async function terminateChild(child) {
       } catch {
         child.kill("SIGKILL");
       }
-      setTimeout(finish, 250);
-    }, 250);
+      setTimeout(finish, childTerminationGraceMs / 2);
+    }, childTerminationGraceMs / 2);
   });
 }
 
@@ -401,19 +397,23 @@ function normalizedKeeperSaveTarget(title, folderHint) {
   return { cleanTitle, targetFolder, targetPath, affectedPaths: [targetPath, `${targetFolder}/INDEX.md`] };
 }
 
+// A partial outcome without an idempotency key cannot be retried safely, so it
+// is reported as failed with a manual recovery action.
+function downgradeKeyless(outcome, errorCode, action = "verify affected_paths manually before any retry") {
+  return {
+    ...outcome,
+    status: "failed",
+    warnings: [...outcome.warnings, "partial write has no idempotency key; verify affected_paths before manual recovery"],
+    recovery: { required: true, action },
+    error_code: outcome.error_code || errorCode,
+    retryable: false,
+  };
+}
+
 function failedWriteOutcome(fallback, errorCode, detail, parsed, recoverable = false, ambiguous = false) {
   if (parsed && ["partial", "conflict", "failed"].includes(parsed.status)) {
     const warnings = [...parsed.warnings, detail];
-    if (parsed.status === "partial" && !parsed.idempotency_key) {
-      return {
-        ...parsed,
-        status: "failed",
-        warnings: [...warnings, "partial write has no idempotency key; verify affected_paths before manual recovery"],
-        recovery: { required: true, action: "verify affected_paths manually before any retry" },
-        error_code: parsed.error_code || errorCode,
-        retryable: false,
-      };
-    }
+    if (parsed.status === "partial" && !parsed.idempotency_key) return downgradeKeyless({ ...parsed, warnings }, errorCode);
     return { ...parsed, warnings };
   }
   const outcomeIsAmbiguous = ambiguous
@@ -439,14 +439,7 @@ function failedWriteOutcome(fallback, errorCode, detail, parsed, recoverable = f
 
 function normalizeKeeperOutcome(outcome) {
   if (outcome.status !== "partial" || outcome.idempotency_key) return outcome;
-  return {
-    ...outcome,
-    status: "failed",
-    warnings: [...outcome.warnings, "partial write has no idempotency key; verify affected_paths before manual recovery"],
-    recovery: { required: true, action: "verify affected_paths manually before any retry" },
-    error_code: outcome.error_code || "PARTIAL",
-    retryable: false,
-  };
+  return downgradeKeyless(outcome, "PARTIAL");
 }
 
 function writeRequestFallback(toolName, args, configuration) {
@@ -511,81 +504,96 @@ function compatibleKeeperExit(code, outcome) {
     || (code === 3 && outcome.status === "conflict");
 }
 
-// Steps the keeper reports through `keeper-progress:` lines on stderr, named
-// the way a caller recognizes them. The adapter never passes
-// --session-link-date, so an MCP save only ever has INDEX pending; the daily
-// Session Link name covers keeper callers that do link a daily note.
-const keeperStepNames = Object.freeze({ index: "INDEX", "daily-link": "daily Session Link" });
-const keeperProgressLine = /^keeper-progress: /;
+// Progress markers: `keeper-progress <token>: <event>` lines on the keeper's
+// stderr (see keeper_progress in scripts/keeper). tests/keeper-progress.sh is
+// the protocol contract; this parser must accept exactly what it pins. Steps
+// are named the way a caller recognizes them; a step this adapter does not
+// know is reported by its raw name. The adapter never passes
+// --session-link-date, so a keeper save never has the daily link pending, and
+// the idempotency record is the implicit last step of every keyed insert.
+const keeperStepNames = Object.freeze({
+  index: "INDEX",
+  "daily-link": "daily Session Link",
+  idempotency: "idempotency record (retry with the same idempotency_key)",
+});
+const keeperProgressEvent = /^(note|index|daily-link|idempotency)-written(?: pending=([a-z,-]*))?$/;
 
-// Keeper stderr without the machine-readable progress markers.
-function keeperDiagnostics(stderrOutput) {
-  return stderrOutput.split(/\r?\n/).filter((line) => !keeperProgressLine.test(line)).join("\n").trim();
-}
-
-function keeperProgress(stderrOutput) {
+function keeperProgress(stderrOutput, token) {
+  const prefix = `keeper-progress ${token}: `;
   let noteWritten = false;
   let pending = [];
   const done = new Set();
   for (const line of stderrOutput.split(/\r?\n/)) {
-    const match = line.match(/^keeper-progress: (\S+)(?: pending=(\S*))?$/);
+    if (!line.startsWith(prefix)) continue;
+    const match = line.slice(prefix.length).match(keeperProgressEvent);
     if (!match) continue;
-    if (match[1] === "note-written") {
+    if (match[1] === "note") {
       noteWritten = true;
-      pending = (match[2] || "").split(",").filter((step) => Object.hasOwn(keeperStepNames, step));
-    } else if (match[1].endsWith("-written")) {
-      done.add(match[1].slice(0, -"-written".length));
+      pending = (match[2] || "").split(",").filter(Boolean);
+    } else {
+      done.add(match[1]);
     }
   }
-  return { noteWritten, unfinished: pending.filter((step) => !done.has(step)).map((step) => keeperStepNames[step]) };
+  return { noteWritten, unfinished: pending.filter((step) => !done.has(step)).map((step) => keeperStepNames[step] ?? step) };
 }
 
-// The keeper was stopped (cap, output limit, or cancellation) after the note
-// itself was committed. Retrying the call is not what the caller needs (the
-// same cap would cut the retry off at the same step) and rewriting the note by
-// hand duplicates it, so name what is left instead (#170).
+// Keeper stderr without progress markers.
+function keeperDiagnostics(stderrOutput) {
+  return stderrOutput.split(/\r?\n/).filter((line) => !line.startsWith("keeper-progress ")).join("\n").trim();
+}
+
 const keeperStopReasons = Object.freeze({
   SUBPROCESS_TIMEOUT: "timed out",
   SUBPROCESS_OUTPUT_LIMIT: "exceeded its output limit",
   CANCELLED: "was cancelled",
+  KEEPER_PROTOCOL_ERROR: "exited without a result",
 });
 
-function noteWrittenStopOutcome(fallback, errorCode, unfinished) {
-  const steps = unfinished.length > 0 ? unfinished.join(" and ") : "idempotency record";
+// The keeper stopped after the note itself was committed. Name what is left:
+// an automatic retry under the same cap would stop at the same step, and
+// rewriting the note by hand duplicates it. A keyed save is still safely
+// retryable with its key (the keeper recovers the written note); a keyless one
+// is not.
+function noteWrittenStopOutcome(fallback, errorCode, unfinished, capSetting) {
+  const steps = unfinished.join(" and ");
   const reason = keeperStopReasons[errorCode] || "stopped";
   const warnings = [
     ...fallback.warnings,
-    `keeper write ${reason} after the note was written to ${fallback.path}; unfinished: ${steps}`,
+    steps
+      ? `keeper write ${reason} after the note was written to ${fallback.path}; unfinished: ${steps}`
+      : `keeper write ${reason} after the note was written to ${fallback.path}; nothing known unfinished`,
   ];
-  if (!fallback.idempotency_key) {
-    return {
-      ...fallback,
-      status: "failed",
-      warnings: [...warnings, "partial write has no idempotency key; verify affected_paths before manual recovery"],
-      recovery: { required: true, action: `do not rewrite the note; finish ${steps} for ${fallback.path} manually` },
-      error_code: errorCode,
-      retryable: false,
-    };
+  if (errorCode === "SUBPROCESS_TIMEOUT") {
+    warnings.push(`raise ${capSetting} before retrying; the same cap would stop the retry at the same step`);
   }
+  if (!fallback.idempotency_key) {
+    const action = steps
+      ? `do not rewrite the note; finish ${steps} for ${fallback.path} manually`
+      : `do not rewrite the note; nothing known unfinished; verify ${fallback.path} and INDEX`;
+    return downgradeKeyless({ ...fallback, warnings }, errorCode, action);
+  }
+  const finishing = steps ? `to finish ${steps}` : "to confirm the write";
+  const action = errorCode === "SUBPROCESS_TIMEOUT"
+    ? `do not rewrite the note; raise ${capSetting}, then retry with the same idempotency_key ${finishing}`
+    : `do not rewrite the note; retry with the same idempotency_key ${finishing}`;
   return {
     ...fallback,
     status: "partial",
     warnings,
-    recovery: {
-      required: true,
-      action: `do not rewrite the note; finish ${steps}, or retry with the same idempotency_key once the keeper has more time`,
-    },
+    recovery: { required: true, action },
     error_code: errorCode,
-    retryable: false,
+    retryable: true,
   };
 }
 
-async function executeKeeperWrite(args, bodyContent, signal, fallback, timeoutMs) {
+async function executeKeeperWrite(args, bodyContent, signal, fallback, timeoutMs, capSetting) {
   throwIfAborted(signal);
   const fullArgs = [...args, "--format", "json"];
+  // A fresh token per run: only marker lines carrying it count as progress.
+  const progressToken = randomUUID().replace(/-/g, "");
   return await new Promise((resolveResult, reject) => {
       const child = spawn("bash", [keeperScript, ...fullArgs], {
-        env: { ...childEnvironment(), KEEPER_PROGRESS: "1" },
+        env: { ...childEnvironment(), KEEPER_PROGRESS_TOKEN: progressToken },
         detached: process.platform !== "win32",
         shell: false,
         stdio: ["pipe", "pipe", "pipe"],
@@ -658,9 +666,9 @@ async function executeKeeperWrite(args, bodyContent, signal, fallback, timeoutMs
             : errorCode === "SUBPROCESS_OUTPUT_LIMIT"
               ? "keeper exceeded output limit"
               : "keeper write timed out";
-          const progress = parsed ? undefined : keeperProgress(stderrOutput);
+          const progress = parsed ? undefined : keeperProgress(stderrOutput, progressToken);
           if (progress?.noteWritten) {
-            finish(reject, codedError(errorCode, detail, noteWrittenStopOutcome(fallback, errorCode, progress.unfinished)));
+            finish(reject, codedError(errorCode, detail, noteWrittenStopOutcome(fallback, errorCode, progress.unfinished, capSetting)));
             return;
           }
           const recoverable = Boolean(fallback.idempotency_key);
@@ -669,6 +677,14 @@ async function executeKeeperWrite(args, bodyContent, signal, fallback, timeoutMs
           return;
         }
         if (!parsed) {
+          // Killed from outside (or crashed) after the note was written: the
+          // markers still say what is left.
+          const progress = keeperProgress(stderrOutput, progressToken);
+          if (progress.noteWritten) {
+            const outcome = noteWrittenStopOutcome(fallback, "KEEPER_PROTOCOL_ERROR", progress.unfinished, capSetting);
+            finish(reject, codedError("KEEPER_PROTOCOL_ERROR", "keeper result was missing or invalid", outcome));
+            return;
+          }
           const recoverable = Boolean(fallback.idempotency_key);
           const outcome = failedWriteOutcome(fallback, "KEEPER_PROTOCOL_ERROR", "keeper result was missing or invalid", undefined, recoverable, true);
           finish(reject, codedError("KEEPER_PROTOCOL_ERROR", "keeper result was missing or invalid", outcome));
@@ -725,6 +741,7 @@ async function keeperSave({ title, body, folder_hint, type, links, idempotency_k
     signal,
     fallback,
     subprocessTimeouts.keeperSave,
+    subprocessTimeoutSettings.keeperSave,
   );
 }
 
@@ -736,7 +753,7 @@ async function dailyAppend({ content, section, date, skip_if_hash, idempotency_k
   const args = ["append", "--vault", vaultPath, "--target", targetPath, "--request-id", requestId, "--idempotency-key", idempotencyKey];
   if (section) args.push("--section", section);
   if (skip_if_hash) args.push("--skip-if-hash", skip_if_hash);
-  return executeKeeperWrite(args, content, signal, emptyWriteOutcome(requestId, idempotencyKey, targetPath, [targetPath]), subprocessTimeouts.dailyAppend);
+  return executeKeeperWrite(args, content, signal, emptyWriteOutcome(requestId, idempotencyKey, targetPath, [targetPath]), subprocessTimeouts.dailyAppend, subprocessTimeoutSettings.dailyAppend);
 }
 
 async function readBounded(path, signal, maxBytes = maxResourceBytes) {
@@ -878,7 +895,7 @@ const metadataOutput = z.strictObject({
   time: z.string(),
   subject: z.string(),
 });
-const writeOutput = z.strictObject({
+export const writeOutput = z.strictObject({
   status: z.enum(["committed", "skipped", "conflict", "partial", "failed"]),
   request_id: z.string().min(1).max(240),
   idempotency_key: z.string().max(240),

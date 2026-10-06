@@ -1,16 +1,20 @@
 #!/usr/bin/env bash
 # note-hash.sh — content hashing + portable stat helpers for the librarian.
 
-# A path holding a backslash (or newline) makes shasum/sha256sum escape the
-# name and prefix the line with "\"; strip that flag so the digest is the same
-# for every path.
+# The digest field of a shasum/sha256sum line. A path holding a backslash (or
+# newline) makes them escape the name and prefix the line with "\"; strip that
+# flag so the digest is the same for every path.
+sha256_digest_field() {
+  awk '{h = $1; sub(/^\\/, "", h); print h}'
+}
+
 sha256_of() {
   local out
   if command -v shasum >/dev/null 2>&1; then
-    out="$(shasum -a 256 "$1" 2>/dev/null | awk '{h = $1; sub(/^\\/, "", h); print h}')"
+    out="$(shasum -a 256 "$1" 2>/dev/null | sha256_digest_field)"
   fi
   if [ -z "${out:-}" ] && command -v sha256sum >/dev/null 2>&1; then
-    out="$(sha256sum "$1" 2>/dev/null | awk '{h = $1; sub(/^\\/, "", h); print h}')"
+    out="$(sha256sum "$1" 2>/dev/null | sha256_digest_field)"
   fi
   if [ -z "${out:-}" ]; then
     printf 'sha256_of: no sha256 tool (shasum/sha256sum) available\n' >&2
@@ -56,10 +60,10 @@ now_epoch() {
 keeper_sha256_text() {
   local out
   if command -v shasum >/dev/null 2>&1; then
-    out="$(printf '%s' "$1" | shasum -a 256 2>/dev/null | awk '{print $1}')"
+    out="$(printf '%s' "$1" | shasum -a 256 2>/dev/null | sha256_digest_field)"
   fi
   if [ -z "${out:-}" ] && command -v sha256sum >/dev/null 2>&1; then
-    out="$(printf '%s' "$1" | sha256sum 2>/dev/null | awk '{print $1}')"
+    out="$(printf '%s' "$1" | sha256sum 2>/dev/null | sha256_digest_field)"
   fi
   [ -n "${out:-}" ] || { printf 'keeper: no sha256 tool available for lock key\n' >&2; return 1; }
   printf '%s\n' "$out"
@@ -219,8 +223,8 @@ keeper_fault() {
   [ "${KEEPER_FAULT_INJECT:-}" = "$1" ] || return 0
   printf 'keeper: injected fault at %s\n' "$1" >&2
   if [ "${KEEPER_FAULT_MODE:-}" = hang ]; then
-    # Stand-in for a step that outlives the caller's subprocess cap (#170):
-    # block until the caller kills the process group.
+    # Stand-in for a step that outlives the caller's subprocess cap: block
+    # until the caller kills the process group.
     while :; do sleep 1; done
   fi
   if [ "${KEEPER_FAULT_MODE:-}" = crash ]; then

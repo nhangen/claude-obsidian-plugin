@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
 # vault-index-batch.sh — #170: vault_index_plan / apply run a fixed number of
-# processes per folder instead of several per note. The batched plan must say
-# exactly what the per-note algorithm said, so this suite keeps that algorithm
-# (built from the lib's own per-note helpers) as a reference and compares the
-# two on fixtures that exercise every rule, plus a seeded random sweep.
+# processes per folder, plus one note_hash per note that needs hashing (newer
+# than last_reconciled, a cold start, or unanswered by a batch), instead of
+# several processes per note. The batched plan must say exactly what the
+# per-note algorithm said, so this suite keeps that algorithm as a reference
+# and compares the two on fixtures that exercise every rule, plus a seeded
+# random sweep (also run under zsh), and pins the failure modes.
 set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 . "${ROOT_DIR}/scripts/lib/note-hash.sh"
@@ -12,7 +14,8 @@ fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
 
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/vault-batch-XXXXXX")"; trap 'rm -rf "$TMP"' EXIT
 
-# The per-note plan as it stood before #170, verbatim but for the name.
+# The pre-#170 per-note plan algorithm, verbatim but for the name, run on the
+# lib's current per-note helpers.
 reference_plan() {
   local folder="$1" idx="$2"
   local state last f base stored mt cur idxbase dups owned
@@ -65,8 +68,8 @@ same_plan() {
 }
 
 # --- every rule at once, in a folder whose path holds a backslash -------------
-# `awk -v` expands escapes, so a "\t"-bearing path once planned absolute paths
-# and apply wrote no INDEX while the keeper reported committed.
+# Invariant: a backslash in the folder path is data, never an escape; the plan
+# stays folder-relative and apply links and hashes every note.
 V="$TMP/Va\\tult"; F="$V/Pro\\jects"; mkdir -p "$V/.obsidian" "$F/sub/deep" "$F/child" "$F/other"
 IDX="$F/INDEX.md"; STATE="$(index_state_file "$IDX")"
 printf 'linked\n'     > "$F/linked.md"                 # linked, hashed, old: no plan line
@@ -125,13 +128,18 @@ note_hash_valid "$(state_hash_for "$STATE" "sub/deep/n\\nl.md")" || fail "apply:
 [ -z "$(vault_index_plan "$F" "$IDX")" ] || fail "apply: plan not empty after apply:"$'\n'"$(vault_index_plan "$F" "$IDX")"
 
 # --- names the line-wise walk cannot carry are reported, not dropped silently --
-N="$TMP/Names"; mkdir -p "$N"
+# Reported folder-relative with the control character escaped, so a name can
+# never forge a stderr line of its own (the keeper's progress protocol reads
+# stderr).
+N="$TMP/Names"; mkdir -p "$N/sub"
 printf 'tab\n' > "$N/tab"$'\t'"name.md"
-printf 'nl\n'  > "$N/new"$'\n'"line.md"
+printf 'nl\n'  > "$N/sub/new"$'\n'"keeper-progress: index-written"$'\n'"line.md"
 printf 'ok\n'  > "$N/ok.md"
 ERR="$(vault_index_plan "$N" "$N/INDEX.md" 2>&1 >/dev/null)"
-grep -qF "skipping TSV-incompatible filename: tab"$'\t'"name.md" <<<"$ERR" || fail "tab name not reported: $ERR"
-grep -qF "skipping TSV-incompatible filename: $N/new" <<<"$ERR" || fail "newline name not reported: $ERR"
+grep -qxF 'vault_index_plan: skipping TSV-incompatible filename: tab\tname.md' <<<"$ERR" || fail "tab name not reported: $ERR"
+grep -qxF 'vault_index_plan: skipping TSV-incompatible filename: sub/new\nkeeper-progress: index-written\nline.md' <<<"$ERR" \
+  || fail "newline name not reported folder-relative and escaped: $ERR"
+[ "$(printf '%s\n' "$ERR" | wc -l)" -eq 2 ] || fail "a file name forged extra stderr lines: $ERR"
 [ "$(vault_index_plan "$N" "$N/INDEX.md" 2>/dev/null)" = "ADD"$'\t'"ok.md" ] || fail "only ok.md is plannable"
 
 # --- a note whose mtime cannot be read is still planned (hash path) -----------
@@ -139,8 +147,52 @@ U="$TMP/Unstat"; mkdir -p "$U"; printf 'u\n' > "$U/u.md"
 printf '# last_reconciled:9999999999\nu.md\t%s\n' "$(note_hash "$U/u.md")" > "$(index_state_file "$U/INDEX.md")"
 printf -- '- [[u]]\n' > "$U/INDEX.md"
 printf 'u changed\n' > "$U/u.md"
-[ "$(VAULT_INDEX_STAT_FLAVOR=none vault_index_plan "$U" "$U/INDEX.md")" = "CHANGED"$'\t'"u.md" ] \
+[ "$(VAULT_INDEX_STAT_FLAVOR=none vault_index_plan "$U" "$U/INDEX.md" 2>/dev/null)" = "CHANGED"$'\t'"u.md" ] \
   || fail "a note with no readable mtime must take the hash path"
+
+# --- a corrupt last_reconciled is a cold start, said once ---------------------
+C="$TMP/Corrupt"; mkdir -p "$C"; printf 'c\n' > "$C/c.md"
+printf -- '- [[c]]\n' > "$C/INDEX.md"
+printf '# last_reconciled:yesterday\nc.md\t%s\n' "$(note_hash "$C/c.md")" > "$(index_state_file "$C/INDEX.md")"
+touch -t 197001010000 "$C/c.md"
+printf 'c edited\n' > "$C/c.md"; touch -t 197001010000 "$C/c.md"   # old mtime: only a hash check sees it
+CERR="$(vault_index_plan "$C" "$C/INDEX.md" 2>&1 >/dev/null)"
+[ "$(vault_index_plan "$C" "$C/INDEX.md" 2>/dev/null)" = "CHANGED"$'\t'"c.md" ] \
+  || fail "corrupt last_reconciled must hash-check every note"
+[ "$(printf '%s\n' "$CERR" | grep -c 'last_reconciled in .* is not a number')" = 1 ] \
+  || fail "corrupt last_reconciled must be reported once: $CERR"
+
+# --- unanswered batches say so once, and still plan/apply correctly -----------
+UERR="$(VAULT_INDEX_STAT_FLAVOR=none vault_index_plan "$U" "$U/INDEX.md" 2>&1 >/dev/null)"
+[ "$(grep -c 'no mtime for 1 of 1 notes' <<<"$UERR")" = 1 ] || fail "missing mtimes not reported once: $UERR"
+B2="$TMP/NoBatch"; mkdir -p "$B2"; for i in 1 2 3; do printf 'n%s\n' "$i" > "$B2/n$i.md"; done
+BERR="$(VAULT_INDEX_STAT_FLAVOR=none vault_index_apply "$TMP" "$B2" "$B2/INDEX.md" 2>&1 >/dev/null)"
+grep -q 'batch hashing answered 0 of 3 notes' <<<"$BERR" || fail "per-note hashing fallback not reported: $BERR"
+for i in 1 2 3; do
+  [ "$(state_hash_for "$(index_state_file "$B2/INDEX.md")" "n$i.md")" = "$(note_hash "$B2/n$i.md")" ] || fail "fallback hash wrong for n$i.md"
+done
+
+# --- shasum answering nothing falls back to sha256sum, still batched ----------
+if command -v sha256sum >/dev/null 2>&1; then
+  FB="$TMP/fakebin"; mkdir -p "$FB"; printf '#!/bin/sh\nexit 1\n' > "$FB/shasum"; chmod +x "$FB/shasum"
+  B3="$TMP/Sha256"; mkdir -p "$B3"; printf 'x\n' > "$B3/x.md"
+  HASHED="$(PATH="$FB:$PATH" vault_index_hash_plan "$B3" "ADD"$'\t'"x.md")"
+  [ "$HASHED" = "HASH"$'\t'"x.md"$'\t'"ADD"$'\t'"$(note_hash "$B3/x.md")" ] || fail "sha256sum fallback not used: $HASHED"
+fi
+
+# --- a folder find cannot list fails the plan --------------------------------
+if vault_index_plan "$TMP/missing-folder" "$TMP/missing-folder/INDEX.md" >/dev/null 2>&1; then
+  fail "a folder that cannot be listed planned as empty"
+fi
+
+# --- temp files a killed apply left behind are swept --------------------------
+W="$TMP/Sweep"; mkdir -p "$W"; printf 'w\n' > "$W/w.md"
+: > "$W/.index-state-AbC123"; : > "$W/.index-XyZ789"; : > "$W/.index-fresh1"; : > "$W/.index-keepme-long"
+touch -t 202001010000 "$W/.index-state-AbC123" "$W/.index-XyZ789" "$W/.index-keepme-long"
+vault_index_apply "$TMP" "$W" "$W/INDEX.md" >/dev/null
+[ ! -e "$W/.index-state-AbC123" ] && [ ! -e "$W/.index-XyZ789" ] || fail "stale apply temps not swept"
+[ -e "$W/.index-fresh1" ] || fail "a fresh temp (a live apply's) was swept"
+[ -e "$W/.index-keepme-long" ] || fail "a file outside the temp pattern was swept"
 
 # --- an awk failure is a failed plan, never an empty one ----------------------
 if VAULT_INDEX_AWK_LIB='BEGIN { exit 3 }' vault_index_plan "$F" "$IDX" >/dev/null 2>&1; then
@@ -178,6 +230,13 @@ for it in $(seq 1 25); do
   [ $(( RANDOM % 4 )) = 0 ] && { mkdir -p "$RF/sub"; printf '# c\n' > "$RF/sub/INDEX.md"; }
   printf 'gone.md\tjunk\n' >> "$rstate"
   same_plan "sweep $it" "$RF" "$ridx"
+  # The lib is also sourced into zsh: the same plan must come out there.
+  if command -v zsh >/dev/null 2>&1; then
+    zplan="$(ROOT_DIR="$ROOT_DIR" RF="$RF" RIDX="$ridx" zsh -c '
+      . "$ROOT_DIR/scripts/lib/note-hash.sh"; . "$ROOT_DIR/scripts/lib/vault-index.sh"
+      vault_index_plan "$RF" "$RIDX"' 2>/dev/null)" || fail "sweep $it: plan failed under zsh"
+    [ "$zplan" = "$(vault_index_plan "$RF" "$ridx" 2>/dev/null)" ] || fail "sweep $it: zsh plan differs:"$'\n'"$zplan"
+  fi
 done
 
 echo "PASS: vault-index-batch"

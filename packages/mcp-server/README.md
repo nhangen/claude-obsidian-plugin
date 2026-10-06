@@ -144,21 +144,25 @@ Each write runs the keeper under a per-call-type subprocess cap:
 also reconciles the folder INDEX, `MCP_DAILY_APPEND_TIMEOUT_MS` (default 10000)
 for `obsidian_daily_append`, and `MCP_COMMIT_META_TIMEOUT_MS` (default 5000)
 for `obsidian_commit_meta`. Values are milliseconds between 100 and 600000; an
-invalid value stops the server at startup. Keep the save cap below
-`MCP_HTTP_REQUEST_TIMEOUT_MS` on the HTTP transport: the HTTP server warns at
-startup (`mcp-http-warning`) when it is not, because a save that outlives the
-HTTP request is cancelled with it and the client never sees its outcome.
+invalid value stops the server at startup. On the HTTP transport keep every
+cap, plus the 500 ms the server allows a stopped subprocess to exit, below
+`MCP_HTTP_REQUEST_TIMEOUT_MS`, whose maximum is 300000: a call that outlives
+its HTTP request is cancelled with it and the client never sees the outcome.
+The HTTP server prints an `mcp-http-warning` line at startup for each cap that
+does not fit.
 
-When a keeper save is stopped after the note itself was written (its cap or
-output limit), the result carries that code (`SUBPROCESS_TIMEOUT`, for
-example) with `retryable: false`: `partial` with an idempotency key, `failed`
-without one. Its warnings and `recovery.action` name the unfinished step.
-`obsidian_keeper_save` does not link a daily note, so that step is `INDEX`, or
-the idempotency record when INDEX had already been written. Do not write the
-note again. Finish the named step, or retry with the same idempotency key
-after raising the cap. A request that is cancelled after the note was written
-is handled the same way inside the server, but MCP sends no response to a
-cancelled request.
+When a keeper save is stopped after the note itself was written (its cap, its
+output limit, or the keeper exiting without a result), the result carries that
+code (`SUBPROCESS_TIMEOUT`, for example) and its warnings and
+`recovery.action` name the unfinished steps. `obsidian_keeper_save` does not
+link a daily note, so those are `INDEX` and, for a keyed save, the idempotency
+record. Do not write the note again. If the save had an idempotency key, the
+result is `partial` with `retryable: true`: retry with that key, after raising
+`MCP_KEEPER_SAVE_TIMEOUT_MS` when the cap was the cause (the same cap would
+stop the retry at the same step). Without a key the result is `failed` with
+`retryable: false`; finish the named steps by hand. A request that is
+cancelled after the note was written gets the same outcome inside the server,
+but MCP sends no response to a cancelled request.
 
 The `ask_vault_librarian` prompt is a bounded read-only MCP workflow over the
 taxonomy, librarian, pending, and search-preview surfaces. It does not invoke

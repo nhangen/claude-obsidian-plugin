@@ -101,8 +101,8 @@ STORED_UNREAD="$(state_hash_for "$STATE3" "unreadable.md")"
 [ -z "$STORED_UNREAD" ] || note_hash_valid "$STORED_UNREAD" \
   || fail "unreadable file produced malformed state entry: $STORED_UNREAD"
 
-# Backslash in the folder path (#170): apply must link and hash the notes, not
-# report success over an INDEX it never wrote.
+# Invariant: with a backslash in the folder path, apply links and hashes every
+# note; it never reports success over an INDEX it did not write.
 TMP4="$(mktemp -d "${TMPDIR:-/tmp}/vault-apply-backslash-XXXXXX")"; trap 'rm -rf "$TMP4"' EXIT
 F4="$TMP4/Pro\\tjects"; mkdir -p "$F4"
 printf 'one\n' > "$F4/one.md"
@@ -111,22 +111,37 @@ ADDED4="$(vault_index_apply "$TMP4" "$F4" "$F4/INDEX.md")"
 grep -qxF -- '- [[one]]' "$F4/INDEX.md" || fail "backslash folder: INDEX link missing"$'\n'"$(cat "$F4/INDEX.md" 2>/dev/null)"
 note_hash_valid "$(state_hash_for "$(index_state_file "$F4/INDEX.md")" "one.md")" || fail "backslash folder: hash not stored validly"
 
-# --- zsh portability: vault_index_apply must not use a bash-only trap ---
-# A `trap ... RETURN` prints "undefined signal: RETURN" when the lib is sourced
-# into a zsh shell (the librarian/keeper runtime). Run the function under zsh
-# and assert its stderr is clean. Reverting the fix to the RETURN trap fails this.
+# --- zsh portability ---------------------------------------------------------
+# The lib is also sourced into zsh (the librarian/keeper runtime). There a
+# `trap ... RETURN` prints "undefined signal: RETURN", and a variable named
+# `path` (tied to PATH) makes every external command fail. Run plan and apply
+# natively under zsh and require a clean, complete result.
 if command -v zsh >/dev/null 2>&1; then
   ZT="$(mktemp -d "${TMPDIR:-/tmp}/vault-zsh-XXXXXX")"
-  ZF="$ZT/Z"; mkdir -p "$ZF"; printf '# Z Index\n' > "$ZF/INDEX.md"
-  printf 'zsh note\n' > "$ZF/z.md"
-  ZERR="$(ROOT_DIR="$ROOT_DIR" ZT="$ZT" ZF="$ZF" zsh -c '
-    . "$ROOT_DIR/scripts/lib/note-hash.sh"
-    . "$ROOT_DIR/scripts/lib/vault-index.sh"
-    vault_index_apply "$ZT" "$ZF" "$ZF/INDEX.md" >/dev/null
-  ' 2>&1 >/dev/null)" || true
-  case "$ZERR" in
-    *"undefined signal"*) fail "vault-index.sh uses a bash-only trap under zsh: $ZERR" ;;
-  esac
+  ZF="$ZT/Z"; mkdir -p "$ZF/sub"; printf '# Z Index\n' > "$ZF/INDEX.md"
+  printf 'zsh note\n' > "$ZF/z.md"; printf 'deep\n' > "$ZF/sub/deep.md"
+  # The zsh snippets passed to run_zsh are single-quoted on purpose: zsh,
+  # not this shell, expands them.
+  run_zsh() {
+    ROOT_DIR="$ROOT_DIR" ZT="$ZT" ZF="$ZF" zsh -c '
+      . "$ROOT_DIR/scripts/lib/note-hash.sh"
+      . "$ROOT_DIR/scripts/lib/vault-index.sh"
+      '"$1" 2>"$ZT/err"
+  }
+  # shellcheck disable=SC2016
+  ZPLAN="$(run_zsh 'vault_index_plan "$ZF" "$ZF/INDEX.md"')" || fail "plan failed under zsh: $(cat "$ZT/err")"
+  [ ! -s "$ZT/err" ] || fail "plan wrote stderr under zsh: $(cat "$ZT/err")"
+  [ "$ZPLAN" = "$(vault_index_plan "$ZF" "$ZF/INDEX.md")" ] || fail "plan differs under zsh:"$'\n'"$ZPLAN"
+  [ "$ZPLAN" = "ADD"$'\t'"sub/deep.md"$'\n'"ADD"$'\t'"z.md" ] || fail "unexpected zsh plan:"$'\n'"$ZPLAN"
+  # shellcheck disable=SC2016
+  ZADDED="$(run_zsh 'vault_index_apply "$ZT" "$ZF" "$ZF/INDEX.md"')" || fail "apply failed under zsh: $(cat "$ZT/err")"
+  [ ! -s "$ZT/err" ] || fail "apply wrote stderr under zsh: $(cat "$ZT/err")"
+  [ "$ZADDED" = "sub/deep.md"$'\n'"z.md" ] || fail "apply under zsh reported: $ZADDED"
+  grep -qxF -- '- [[z]]' "$ZF/INDEX.md" || fail "apply under zsh did not link z.md"$'\n'"$(cat "$ZF/INDEX.md")"
+  grep -qxF -- '- [[sub/deep]]' "$ZF/INDEX.md" || fail "apply under zsh did not link sub/deep.md"
+  note_hash_valid "$(state_hash_for "$(index_state_file "$ZF/INDEX.md")" "z.md")" || fail "apply under zsh stored no valid hash"
+  # shellcheck disable=SC2016
+  [ -z "$(run_zsh 'vault_index_plan "$ZF" "$ZF/INDEX.md"')" ] || fail "plan under zsh not empty after apply"
   rm -rf "$ZT"
 fi
 

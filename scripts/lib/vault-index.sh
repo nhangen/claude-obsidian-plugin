@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 # vault-index.sh — coverage + two-stage (mtime then hash) freshness for INDEX files.
 # Requires note-hash.sh to be sourced first.
+#
+# Also sourced into zsh, where `path`, `status`, `argv`, `pipestatus` and
+# friends are special parameters (`path` is tied to PATH): never use them as
+# variable names here.
 
 index_state_file() {
   local idx="$1" dir base
@@ -9,13 +13,16 @@ index_state_file() {
   printf '%s/.%s.state\n' "$dir" "$base"
 }
 
+# The helpers from here to vault_index_is_owned answer one note at a time.
+# vault_index_plan/apply answer the same questions in batch; these remain for
+# vault_index_coverage_check, the librarian, and the per-note test oracle in
+# tests/vault-index-batch.sh, which pins the batch to them.
 state_last_reconciled() {
   [ -f "$1" ] || return 0
   sed -n 's/^# last_reconciled://p' "$1" | head -1
 }
 
-# The key goes through ENVIRON: `awk -v` expands backslash escapes, so a note
-# named `a\nb.md` never matched its own entry.
+# The key goes through ENVIRON: `awk -v` expands backslash escapes.
 state_hash_for() {
   [ -f "$1" ] || return 0
   VI_KEY="$2" awk -F '\t' '$1 == ENVIRON["VI_KEY"] {print $2; exit}' "$1"
@@ -50,23 +57,10 @@ vault_index_has_link() {
 
 # Basenames held by more than one note in the folder — the set for which a bare
 # [[leaf]] link is ambiguous and must not be treated as a match.
-#
-# One awk pass rather than `-exec basename` per note: on a slow mount (9p) a
-# fork per note was most of an INDEX reconcile's wall time (#170).
 vault_index_dup_leaves() {
   find "$1" -type f -name '*.md' \
     | awk '{ sub(/.*\//, ""); if ($0 != ".md") sub(/\.md$/, ""); print }' \
     | LC_ALL=C sort | uniq -d
-}
-
-# Link target to write for a note: vault-root-relative, because Obsidian
-# resolves a slashed target against the vault root. A folder-relative
-# `sub/dir/note` would not resolve from an INDEX below the root, and a bare
-# basename is ambiguous the moment two subfolders share one. The vault root is
-# the nearest ancestor holding `.obsidian/`; with none (tests, a bare folder)
-# fall back to the folder-relative path, which is at least unambiguous.
-vault_link_target() {
-  printf '%s%s\n' "$(vault_link_prefix "$1")" "$2"
 }
 
 # Coverage assertion: state must never claim more notes than INDEX.md links.
@@ -117,22 +111,23 @@ EOF
   return 1
 }
 
-# --- Batched reconcile (#170) ------------------------------------------------
-# A reconcile used to fork per note: awk for the stored hash, greps for the
-# link check, two stat probes for the mtime, `basename` per file for the
-# duplicate leaves, and wc + sha + cd + dirname per added note. On a slow
-# mount (9p) those forks were the whole cost, so a keeper save outlived its
-# subprocess cap. Everything below runs a fixed number of processes per
-# folder, and answers the same questions with the same semantics as the
-# per-note helpers above (state_hash_for, vault_index_has_link,
-# vault_index_dup_leaves, vault_index_is_owned, vault_link_target, note_hash).
+# --- Batched reconcile -------------------------------------------------------
+# vault_index_plan and vault_index_apply run a fixed number of processes per
+# folder, plus one note_hash per note whose mtime is newer than
+# last_reconciled (every tracked note on a cold start, when there is none) or
+# that a batch could not answer. They answer the same questions, with the
+# same semantics, as the per-note helpers above.
 #
 # Paths never reach awk through `-v`, which expands backslash escapes: they go
 # through ENVIRON or as data lines.
 
+# Prefix of every "skipping" diagnostic for a name the TSV state cannot carry.
+VAULT_INDEX_SKIP_MSG='vault_index_plan: skipping TSV-incompatible filename: '
+
 # GNU stat spells its format `-c` (%Y mtime, %s size), BSD `-f` (%m, %z). A
 # GNU `stat -f` "succeeds" with filesystem data (see file_mtime), so probe the
-# GNU spelling and validate the answer. Cached in the calling shell.
+# GNU spelling and validate the answer. Cached in the current shell (a command
+# substitution re-probes).
 vault_index_stat_flavor_init() {
   local probe
   [ -z "${VAULT_INDEX_STAT_FLAVOR:-}" ] || return 0
@@ -143,34 +138,58 @@ vault_index_stat_flavor_init() {
   esac
 }
 
-# stdin: NUL-separated paths. stdout: "<mtime|size>\t<path>" per path stat
-# could read. A path it could not read is simply absent; every caller treats
-# an absent answer as "unknown" and takes the slow, per-note path for it.
-# Callers run vault_index_stat_flavor_init in their own shell first.
+# $1: mtime|size, $2: newline-separated paths. stdout: "<value>\t<path>" for
+# each path stat could read. A path it could not read is simply absent; every
+# caller treats an absent answer as "unknown" and takes the per-note path.
 vault_index_stat_batch() {
-  local kind="$1" tab=$'\t' fmt
-  case "${VAULT_INDEX_STAT_FLAVOR:-}" in
+  local kind="$1" list="$2" tab=$'\t' fmt
+  [ -n "$list" ] || return 0
+  vault_index_stat_flavor_init
+  case "$VAULT_INDEX_STAT_FLAVOR" in
     gnu)
       case "$kind" in mtime) fmt="%Y${tab}%n" ;; *) fmt="%s${tab}%n" ;; esac
-      xargs -0 stat -c "$fmt" -- 2>/dev/null || : ;;
+      printf '%s\n' "$list" | tr '\n' '\0' | xargs -0 stat -c "$fmt" -- 2>/dev/null || : ;;
     bsd)
       case "$kind" in mtime) fmt="%m${tab}%N" ;; *) fmt="%z${tab}%N" ;; esac
-      xargs -0 stat -f "$fmt" -- 2>/dev/null || : ;;
-    *) cat >/dev/null ;;   # no usable stat: every answer is "unknown"
+      printf '%s\n' "$list" | tr '\n' '\0' | xargs -0 stat -f "$fmt" -- 2>/dev/null || : ;;
+    *) : ;;   # no usable stat: every answer is "unknown"
   esac
 }
 
-# stdin: NUL-separated paths. stdout: sha256 tool lines ("<hex>  <path>", with
-# a leading "\" and escaped name when the name holds "\" or a newline). The
-# same tool preference as sha256_of. A file it could not read is absent.
+# $1: newline-separated paths. stdout: sha256 tool lines ("<hex>  <path>",
+# with a leading "\" and an escaped name when the name holds "\" or a
+# newline). Prefers shasum like sha256_of, and tries sha256sum when shasum is
+# missing or answers nothing; a file it cannot hash is absent and falls back
+# to note_hash.
 vault_index_sha_batch() {
+  local list="$1" out=""
+  [ -n "$list" ] || return 0
   if command -v shasum >/dev/null 2>&1; then
-    xargs -0 shasum -a 256 -- 2>/dev/null || :
-  elif command -v sha256sum >/dev/null 2>&1; then
-    xargs -0 sha256sum -- 2>/dev/null || :
-  else
-    cat >/dev/null
+    out="$(printf '%s\n' "$list" | tr '\n' '\0' | xargs -0 shasum -a 256 -- 2>/dev/null)" || :
   fi
+  if [ -z "$out" ] && command -v sha256sum >/dev/null 2>&1; then
+    out="$(printf '%s\n' "$list" | tr '\n' '\0' | xargs -0 sha256sum -- 2>/dev/null)" || :
+  fi
+  [ -z "$out" ] || printf '%s\n' "$out"
+}
+
+# Every *.md path under the folder, one per line. A name holding a newline
+# cannot be carried line-wise: it is reported (folder-relative, with the
+# newline escaped so it cannot forge a line of its own) instead of listed.
+# Fails when find does, so a partial listing never reads as a smaller folder.
+vault_index_find_notes() {
+  local folder="$1" nl=$'\n'
+  find "$folder" -type f -name '*.md' \( -name "*${nl}*" -exec sh -c '
+    printf "%s" "${2#"$1"/}" | awk -v msg="$0" '"'"'BEGIN { printf "%s", msg } NR > 1 { printf "\\n" } { printf "%s", $0 } END { print "" }'"'"' >&2
+  ' "$VAULT_INDEX_SKIP_MSG" "$folder" {} \; -o -print \)
+}
+
+# Remove reconcile temp files a killed apply left in the INDEX folder. Only
+# this lib's own names, and only when old enough that no live apply (they run
+# under the keeper lock) can still own them.
+vault_index_sweep_temps() {
+  find "$1" -maxdepth 1 -type f \( -name '.index-state-??????' -o -name '.index-??????' \) \
+    -mmin +60 -exec rm -f {} + 2>/dev/null || :
 }
 
 # Shared awk: link matching exactly as vault_index_has_link greps for it.
@@ -180,8 +199,9 @@ vault_index_sha_batch() {
 # fixed-string greps can find on that line. Only names in want[] matter, so
 # keep those and stop scanning past the longest one. Callers fill want[]
 # (stems and their leaves), maxlen, and dup[] (ambiguous leaves).
+# shellcheck disable=SC2016  # awk source: $0 and friends are awk's, not the shell's
 VAULT_INDEX_AWK_LIB='
-function leaf_of(path) { sub(/.*\//, "", path); return path }
+function leaf_of(p) { sub(/.*\//, "", p); return p }
 function stem_of(rel) { sub(/\.md$/, "", rel); return rel }
 function want_name(stem) {
   want[stem] = 1; want[leaf_of(stem)] = 1
@@ -224,69 +244,79 @@ function has_link(stem,   leaf) {
   if (leaf in dup) return 0          # ambiguous: path form required
   return (leaf in leaflinked)
 }
+# A state line split the way a tab-IFS `read -r key rest` splits it (the
+# per-note DROP loop and carry-forward both read state that way): leading
+# tabs dropped, key up to the next tab, rest without surrounding tabs.
+function read_state(line,   i) {
+  sub(/^\t+/, "", line)
+  i = index(line, "\t")
+  if (!i) { state_key = line; state_rest = ""; return }
+  state_key = substr(line, 1, i - 1); state_rest = substr(line, i + 1)
+  sub(/^\t+/, "", state_rest); sub(/\t+$/, "", state_rest)
+}
+# Keep in sync with note_hash_valid (note-hash.sh).
+function hash_valid(h) { return h ~ /^[0-9]+:[0-9a-f]+$/ && length(h) - index(h, ":") == 64 }
 '
 
-# Plan lines: DROP/ADD/CHANGED <TAB> folder-relative path.
-#
-# One find, one batched stat, one awk pass over the notes, the state sidecar,
-# and INDEX.md. Only notes whose mtime is newer than last_reconciled (or
-# whose mtime could not be read) are hashed, as before; that cost scales with
-# what changed, not the folder size. Returns non-zero when the plan could not
-# be computed, so a caller never mistakes a failed plan for an empty one.
+# Loader for the apply-side link passes. stdin: ambiguous leaves, an empty
+# line, then the added notes; then INDEX via `phase=idx`.
+# shellcheck disable=SC2016  # awk source
+VAULT_INDEX_AWK_ADDED='
+phase == "added" && !past_dups { if ($0 == "") past_dups = 1; else dup[$0] = 1; next }
+phase == "added" { if ($0 != "") { A[++na] = $0; want_name(stem_of($0)) } next }
+phase == "idx" { scan($0); last_line = $0; next }
+'
+
+# Plan lines: DROP/ADD/CHANGED <TAB> folder-relative path. Returns non-zero
+# when the plan could not be computed, so a caller never mistakes a failed
+# plan for an empty one.
 vault_index_plan() {
-  local folder="$1" idx="$2"
-  local state state_in idx_in idxbase notes mtimes raw action fn stored path tab=$'\t' nl=$'\n'
+  _vault_index_plan "$1" "$2" 0
+}
+
+# $3 = 1 also emits "DUP <TAB> leaf" for every ambiguous leaf, so apply needs
+# no second walk of the folder.
+_vault_index_plan() {
+  local folder="$1" idx="$2" emit_dups="$3"
+  local state state_in idx_in idxbase notes mtimes raw rec fn field3 field4 tab=$'\t'
   state="$(index_state_file "$idx")"
   idxbase="${idx##*/}"
   state_in=/dev/null; [ -f "$state" ] && state_in="$state"
   idx_in=/dev/null;   [ -f "$idx" ] && idx_in="$idx"
-  vault_index_stat_flavor_init
 
   # Recursive: a folder organized into subfolders must stay visible. A
   # single-level glob reported all 103 relocated notes as deleted and tracked
   # none of them, so the index machinery actively penalized an organized vault.
-  # A name holding a newline cannot be carried line-wise; say so rather than
-  # drop it silently (a tab is reported the same way below).
-  notes="$(find "$folder" -type f -name '*.md' \( -name "*${nl}*" -exec sh -c \
-    'printf "vault_index_plan: skipping TSV-incompatible filename: %s\n" "$1" >&2' sh {} \; -o -print \))" || :
-  mtimes=""
-  if [ -n "$notes" ]; then
-    mtimes="$(printf '%s\n' "$notes" | tr '\n' '\0' | vault_index_stat_batch mtime)"
-  fi
+  notes="$(vault_index_find_notes "$folder")" || {
+    printf 'vault_index_plan: could not list the notes under %s\n' "$folder" >&2
+    return 1
+  }
+  mtimes="$(vault_index_stat_batch mtime "$notes")"
 
   raw="$(
     { [ -z "$mtimes" ] || printf '%s\n' "$mtimes"; printf '\n'; [ -z "$notes" ] || printf '%s\n' "$notes" | LC_ALL=C sort; } \
-    | VI_FOLDER="$folder" VI_IDXBASE="$idxbase" awk "$VAULT_INDEX_AWK_LIB"'
-    # Same key a tab-IFS `read -r fn rest` yields: leading tabs dropped, first field.
-    function read_fn(line,   i) {
-      sub(/^\t+/, "", line)
-      i = index(line, "\t")
-      return i ? substr(line, 1, i - 1) : line
-    }
+    | VI_FOLDER="$folder" VI_IDXBASE="$idxbase" VI_STATE="$state" VI_SKIP="$VAULT_INDEX_SKIP_MSG" awk "$VAULT_INDEX_AWK_LIB"'
     function owned(rel,   i) {
       for (i = 1; i <= nowned; i++)
         if (substr(rel, 1, length(ownedp[i])) == ownedp[i]) return 1
       return 0
     }
-    function hash_valid(h,   i) {
-      i = index(h, ":")
-      return h ~ /^[0-9]+:[0-9a-f]+$/ && length(h) - i == 64
-    }
-    BEGIN { folder = ENVIRON["VI_FOLDER"]; idxbase = ENVIRON["VI_IDXBASE"]; prefix = folder "/"; maxlen = 0 }
+    BEGIN { prefix = ENVIRON["VI_FOLDER"] "/"; idxbase = ENVIRON["VI_IDXBASE"]; maxlen = 0 }
     # stdin: "<mtime>\t<path>" lines, an empty line, then the sorted note paths.
     phase == "notes" && !past_mtimes {
       if ($0 == "") { past_mtimes = 1; next }
-      i = index($0, "\t"); if (i) mtime[substr($0, i + 1)] = substr($0, 1, i - 1)
+      i = index($0, "\t")
+      if (i && substr($0, 1, i - 1) ~ /^[0-9]+$/) mtime[substr($0, i + 1)] = substr($0, 1, i - 1)
       next
     }
     phase == "notes" {
       if ($0 == "") next
-      path = $0
-      rel = (substr(path, 1, length(prefix)) == prefix) ? substr(path, length(prefix) + 1) : path
-      n++; P[n] = path; R[n] = rel
+      p = $0
+      rel = (substr(p, 1, length(prefix)) == prefix) ? substr(p, length(prefix) + 1) : p
+      n++; P[n] = p; R[n] = rel
       noteset[rel] = 1
       leaf = leaf_of(rel); if (leaf != ".md") sub(/\.md$/, "", leaf)
-      if (++leafcount[leaf] > 1) dup[leaf] = 1
+      if (++leafcount[leaf] == 2) { dup[leaf] = 1; D2[++ndup] = leaf }
       # A subdirectory holding its own INDEX.md owns its notes; a parent
       # indexing them too duplicates the child (vault_index_owned_subdirs).
       if (index(rel, "/") && leaf_of(rel) == "INDEX.md") ownedp[++nowned] = substr(rel, 1, length(rel) - 8)
@@ -295,43 +325,51 @@ vault_index_plan() {
     }
     phase == "state" {
       if (!have_last && substr($0, 1, 18) == "# last_reconciled:") { last = substr($0, 19); have_last = 1 }
+      # Stored hash as state_hash_for reads it: fields split on every tab,
+      # first matching line wins, comment lines included.
       split($0, f, "\t")
       if (!(f[1] in stored)) stored[f[1]] = f[2]
-      fn = read_fn($0)
-      if (fn != "" && substr(fn, 1, 1) != "#") D[++nd] = fn
+      read_state($0)
+      if (state_key != "" && substr(state_key, 1, 1) != "#") K[++nk] = state_key
       next
     }
     phase == "idx" { scan($0); next }
     END {
+      for (j = 1; j <= ndup; j++) printf "DUP\t%s\n", D2[j]
       # DROP: state entries whose note no longer exists at that key. A note
       # moved into a subfolder drops its stale basename key and is re-added
       # under its path key below; has_link matches the trailing segment, so
       # its existing INDEX link is not duplicated. A key not among the walked
       # notes may still be a regular file (a symlink, a non-.md name); the
       # caller settles that with `[ -f ]`, which forks nothing.
-      for (j = 1; j <= nd; j++) {
-        fn = D[j]
+      for (j = 1; j <= nk; j++) {
+        fn = K[j]
         if (fn in noteset) { if (owned(fn)) printf "DROP\t%s\n", fn }   # a child index now owns it
-        else printf "MAYBE_DROP\t%s\t%d\n", fn, owned(fn)
+        else printf "MAYBE_DROP\t%s\t%s\n", fn, (owned(fn) ? "owned" : "free")
       }
-      numeric_last = (last ~ /^-?[0-9]+$/)
+      # A last_reconciled that is not a number cannot rule a note out, so
+      # treat it as a cold start and check every note by hash.
+      if (last != "" && last !~ /^-?[0-9]+$/) {
+        printf "vault_index_plan: last_reconciled in %s is not a number; checking every note by hash\n", ENVIRON["VI_STATE"] > "/dev/stderr"
+        last = ""
+      }
       for (j = 1; j <= n; j++) {
         rel = R[j]
         # Skip filenames containing tabs - they corrupt TSV state.
-        if (index(rel, "\t")) {
-          printf "vault_index_plan: skipping TSV-incompatible filename: %s\n", rel > "/dev/stderr"
-          continue
-        }
+        if (index(rel, "\t")) { gsub(/\t/, "\\t", rel); print ENVIRON["VI_SKIP"] rel > "/dev/stderr"; continue }
         if (leaf_of(rel) == idxbase) continue
         if (owned(rel)) continue
+        considered++; if (!(P[j] in mtime)) unstated++
         h = (rel in stored) ? stored[rel] : ""
         if (h == "") { printf "ADD\t%s\n", rel; continue }                 # coverage gap - name-only, no content read
         if (!has_link(stem_of(rel))) { printf "ADD\t%s\n", rel; continue } # hashed but unlinked - state drifted ahead of INDEX
         if (!hash_valid(h)) { printf "CHANGED\t%s\n", rel; continue }      # malformed -> forced reconcile
         # cold start / mtime candidate / unreadable mtime -> confirm by hash
-        if (last == "" || !(P[j] in mtime) || (numeric_last && mtime[P[j]] + 0 > last + 0))
+        if (last == "" || !(P[j] in mtime) || mtime[P[j]] + 0 > last + 0)
           printf "CHECK\t%s\t%s\t%s\n", rel, h, P[j]
       }
+      if (unstated > 0 && unstated * 20 >= considered)
+        printf "vault_index_plan: no mtime for %d of %d notes; checking those by hash, one at a time\n", unstated, considered > "/dev/stderr"
     }
   ' phase=notes - phase=state "$state_in" phase=idx "$idx_in"
   )" || {
@@ -340,31 +378,34 @@ vault_index_plan() {
   }
 
   [ -n "$raw" ] || return 0
-  while IFS="$tab" read -r action fn stored path; do
-    case "$action" in
-      DROP|ADD|CHANGED) printf '%s\t%s\n' "$action" "$fn" ;;
+  # Records: DUP leaf | DROP/ADD/CHANGED fn | MAYBE_DROP fn owned|free |
+  # CHECK fn stored-hash note-path. Every column is non-empty, so a tab-IFS
+  # read never shifts one into the next.
+  while IFS="$tab" read -r rec fn field3 field4; do
+    case "$rec" in
+      DUP) [ "$emit_dups" != 1 ] || printf 'DUP\t%s\n' "$fn" ;;
+      DROP|ADD|CHANGED) printf '%s\t%s\n' "$rec" "$fn" ;;
       MAYBE_DROP)
-        if [ ! -f "$folder/$fn" ] || [ "$stored" = 1 ]; then printf 'DROP\t%s\n' "$fn"; fi ;;
+        if [ ! -f "$folder/$fn" ] || [ "$field3" = owned ]; then printf 'DROP\t%s\n' "$fn"; fi ;;
       CHECK)
-        [ -e "$path" ] || continue
-        if [ "$(note_hash "$path")" != "$stored" ]; then printf 'CHANGED\t%s\n' "$fn"; fi ;;
+        [ -e "$field4" ] || continue
+        if [ "$(note_hash "$field4")" != "$field3" ]; then printf 'CHANGED\t%s\n' "$fn"; fi ;;
     esac
   done <<<"$raw"
   return 0
 }
 
 # Hash every ADD/CHANGED note of a plan in two batched passes (one stat for
-# sizes, one sha256 run), producing exactly what note_hash would:
-#   OK <TAB> fn <TAB> size:sha <TAB> action     hashed in the batch
-#   MISS <TAB> fn <TAB> action                  not answered; hash it singly
+# sizes, one sha256 run), producing exactly what note_hash would. Records:
+#   HASH <TAB> fn <TAB> action <TAB> size:sha    answered by the batch
+#   MISS <TAB> fn <TAB> action                   not answered; hash it singly
 vault_index_hash_plan() {
-  local folder="$1" plan="$2" tab=$'\t' targets sizes shas
-  vault_index_stat_flavor_init
+  local folder="$1" plan="$2" targets sizes shas
   targets="$(printf '%s\n' "$plan" | VI_FOLDER="$folder" awk -F '\t' '
     $1 == "ADD" || $1 == "CHANGED" { printf "%s/%s\n", ENVIRON["VI_FOLDER"], $2 }')" || return 1
   [ -n "$targets" ] || return 0
-  sizes="$(printf '%s\n' "$targets" | tr '\n' '\0' | vault_index_stat_batch size)"
-  shas="$(printf '%s\n' "$targets" | tr '\n' '\0' | vault_index_sha_batch)"
+  sizes="$(vault_index_stat_batch size "$targets")"
+  shas="$(vault_index_sha_batch "$targets")"
   { [ -z "$sizes" ] || printf '%s\n' "$sizes"; printf '\n'
     [ -z "$shas" ] || printf '%s\n' "$shas"; printf '\n'
     printf '%s\n' "$plan"; } \
@@ -399,15 +440,24 @@ vault_index_hash_plan() {
       i = index($0, "\t"); if (!i) next
       action = substr($0, 1, i - 1); fn = substr($0, i + 1)
       if (action != "ADD" && action != "CHANGED") next
+      requested++
       p = prefix fn
-      if ((p in size) && (p in sha) && size[p] ~ /^[0-9]+$/) printf "OK\t%s\t%s:%s\t%s\n", fn, size[p], sha[p], action
-      else printf "MISS\t%s\t%s\n", fn, action
+      if ((p in size) && (p in sha) && size[p] ~ /^[0-9]+$/) printf "HASH\t%s\t%s\t%s:%s\n", fn, action, size[p], sha[p]
+      else { printf "MISS\t%s\t%s\n", fn, action; missed++ }
+    }
+    END {
+      if (missed > 0 && missed * 20 >= requested)
+        printf "vault_index_apply: batch hashing answered %d of %d notes; hashing the rest one at a time\n", requested - missed, requested > "/dev/stderr"
     }'
 }
 
-# Vault-root-relative prefix ("" or "a/b/") for links written from an INDEX in
-# this folder; see vault_link_target. Computed once per folder, and with
-# parameter expansion rather than a `dirname` fork per ancestor.
+# Vault-root-relative prefix ("" or "a/b/") for the links an INDEX in this
+# folder gets. Obsidian resolves a slashed target against the vault root, so a
+# folder-relative `sub/dir/note` would not resolve from an INDEX below the
+# root, and a bare basename is ambiguous the moment two subfolders share one.
+# The vault root is the nearest ancestor holding `.obsidian/`; with none
+# (tests, a bare folder) links stay folder-relative, which is at least
+# unambiguous.
 vault_link_prefix() {
   local folder="$1" abs dir
   abs="$(cd "$folder" 2>/dev/null && pwd -P)" || return 0
@@ -424,11 +474,18 @@ vault_link_prefix() {
 
 _vault_index_apply_locked() {
   local folder="$1" idx="$2"
-  local state plan hashed kind action fn h touched tmp tmp2 idx_tmp="" added=()
+  local state planned plan="" dups="" line rec fn action h hashed touched tmp tmp2 idx_tmp="" added=() nl=$'\n'
   state="$(index_state_file "$idx")"
-  # A failed plan must not read as "nothing to do": that reported a keeper
-  # save as committed while INDEX was never touched.
-  plan="$(vault_index_plan "$folder" "$idx")" || return 1
+  vault_index_sweep_temps "$(dirname "$idx")"
+  # A failed plan must not read as "nothing to do".
+  planned="$(_vault_index_plan "$folder" "$idx" 1)" || return 1
+  while IFS= read -r line; do
+    case "$line" in
+      '') ;;
+      DUP$'\t'*) dups="$dups${line#DUP$'\t'}$nl" ;;
+      *) plan="$plan$line$nl" ;;
+    esac
+  done <<<"$planned"
 
   # Extract exact filenames touched by the plan (2nd tab-field of each plan line).
   touched="$(printf '%s\n' "$plan" | cut -f2)"
@@ -441,18 +498,14 @@ _vault_index_apply_locked() {
   # point, so explicit cleanup before the function's output is equivalent and
   # portable across bash and zsh.
 
-  # Carry forward existing entries except those touched by the plan, in one
-  # awk pass. Fields are split the way a tab-IFS `read -r fn h` splits them.
+  # Carry forward existing entries except those touched by the plan.
   if [ -f "$state" ]; then
-    printf '%s\n' "$touched" | awk '
+    printf '%s\n' "$touched" | awk "$VAULT_INDEX_AWK_LIB"'
       phase == "touched" { t[$0] = 1; next }
       {
-        line = $0; sub(/^\t+/, "", line)
-        i = index(line, "\t")
-        if (i) { fn = substr(line, 1, i - 1); h = substr(line, i + 1); sub(/^\t+/, "", h); sub(/\t+$/, "", h) }
-        else { fn = line; h = "" }
-        if (fn == "" || substr(fn, 1, 1) == "#" || (fn in t)) next
-        printf "%s\t%s\n", fn, h
+        read_state($0)
+        if (state_key == "" || substr(state_key, 1, 1) == "#" || (state_key in t)) next
+        printf "%s\t%s\n", state_key, state_rest
       }
     ' phase=touched - phase=state "$state" > "$tmp" \
       || { rm -f "$tmp" "$tmp2"; return 1; }
@@ -460,12 +513,9 @@ _vault_index_apply_locked() {
   # Apply plan: ADD/CHANGED -> (re)write current hash; DROP -> omit.
   hashed="$(vault_index_hash_plan "$folder" "$plan")" || { rm -f "$tmp" "$tmp2"; return 1; }
   if [ -n "$hashed" ]; then
-    while IFS=$'\t' read -r kind fn h action; do
-      [ -n "$kind" ] || continue
-      if [ "$kind" = MISS ]; then
-        action="$h"
-        h="$(note_hash "$folder/$fn")"
-      fi
+    while IFS=$'\t' read -r rec fn action h; do
+      [ -n "$rec" ] || continue
+      [ "$rec" != MISS ] || h="$(note_hash "$folder/$fn")"
       if ! note_hash_valid "$h"; then
         printf 'vault_index_apply: skipping %s — invalid hash\n' "$fn" >&2
         continue
@@ -482,7 +532,7 @@ _vault_index_apply_locked() {
   # Leaving this to prose is what let state run 203 notes ahead of a 12-link
   # INDEX (#30): once state claims coverage, the note never replans as an ADD.
   # Append-only — never rewrite or reorder an existing INDEX.
-  local dups links link_prefix join_last missed
+  local links link_prefix join_last missed
   if (( ${#added[@]} )); then
     if [ -e "$idx" ] && [ ! -w "$idx" ]; then
       printf 'vault_index_apply: coverage defect in %s — INDEX is not writable\n' "$idx" >&2
@@ -497,21 +547,18 @@ _vault_index_apply_locked() {
       printf '# %s Index\n' "$(basename "$folder")" > "$idx_tmp" \
         || { rm -f "$tmp" "$tmp2" "$idx_tmp"; return 1; }
     fi
-    dups="$(vault_index_dup_leaves "$folder")"
     link_prefix="$(vault_link_prefix "$folder")"
-    # An INDEX without a final newline: the first appended link lands on its
-    # last line, and the link check must see that joined line as grep would.
+    # An INDEX without a final newline gets its first new link glued onto its
+    # last line. That is a known defect, kept for byte parity with the
+    # per-note append; the link check sees the glued line as grep would.
     join_last=0
     [ ! -s "$idx_tmp" ] || [ -z "$(tail -c 1 "$idx_tmp")" ] || join_last=1
-    # Links for every added note that INDEX does not already cover, checked
-    # in one pass; each written link counts for the notes after it, as the
-    # per-note `has_link` + append loop did.
+    # One awk pass decides the links (each written link counts for the notes
+    # after it, as the per-note has_link + append loop did); they are appended
+    # in one write.
     links="$(
-      { [ -z "$dups" ] || printf '%s\n' "$dups"; printf '\n'; printf '%s\n' "${added[@]}"; } \
-      | VI_PREFIX="$link_prefix" VI_JOIN="$join_last" awk "$VAULT_INDEX_AWK_LIB"'
-        phase == "added" && !past_dups { if ($0 == "") past_dups = 1; else dup[$0] = 1; next }
-        phase == "added" { if ($0 != "") { A[++na] = $0; want_name(stem_of($0)) } next }
-        phase == "idx" { scan($0); last_line = $0; next }
+      { printf '%s' "$dups"; printf '\n'; printf '%s\n' "${added[@]}"; } \
+      | VI_PREFIX="$link_prefix" VI_JOIN="$join_last" awk "$VAULT_INDEX_AWK_LIB$VAULT_INDEX_AWK_ADDED"'
         END {
           for (i = 1; i <= na; i++) {
             stem = stem_of(A[i])
@@ -537,11 +584,8 @@ _vault_index_apply_locked() {
     # so scope it to the set this run touched. vault_index_coverage_check is
     # the standalone full-folder assertion for a sweep.
     missed="$(
-      { [ -z "$dups" ] || printf '%s\n' "$dups"; printf '\n'; printf '%s\n' "${added[@]}"; } \
-      | awk "$VAULT_INDEX_AWK_LIB"'
-        phase == "added" && !past_dups { if ($0 == "") past_dups = 1; else dup[$0] = 1; next }
-        phase == "added" { if ($0 != "") { A[++na] = $0; want_name(stem_of($0)) } next }
-        phase == "idx" { scan($0); next }
+      { printf '%s' "$dups"; printf '\n'; printf '%s\n' "${added[@]}"; } \
+      | awk "$VAULT_INDEX_AWK_LIB$VAULT_INDEX_AWK_ADDED"'
         END { for (i = 1; i <= na; i++) if (!has_link(stem_of(A[i]))) m++; print m + 0 }
       ' phase=added - phase=idx "$idx_tmp"
     )" || missed=""
