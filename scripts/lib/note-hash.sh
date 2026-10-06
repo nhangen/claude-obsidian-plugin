@@ -1,13 +1,16 @@
 #!/usr/bin/env bash
 # note-hash.sh — content hashing + portable stat helpers for the librarian.
 
+# A path holding a backslash (or newline) makes shasum/sha256sum escape the
+# name and prefix the line with "\"; strip that flag so the digest is the same
+# for every path.
 sha256_of() {
   local out
   if command -v shasum >/dev/null 2>&1; then
-    out="$(shasum -a 256 "$1" 2>/dev/null | awk '{print $1}')"
+    out="$(shasum -a 256 "$1" 2>/dev/null | awk '{h = $1; sub(/^\\/, "", h); print h}')"
   fi
   if [ -z "${out:-}" ] && command -v sha256sum >/dev/null 2>&1; then
-    out="$(sha256sum "$1" 2>/dev/null | awk '{print $1}')"
+    out="$(sha256sum "$1" 2>/dev/null | awk '{h = $1; sub(/^\\/, "", h); print h}')"
   fi
   if [ -z "${out:-}" ]; then
     printf 'sha256_of: no sha256 tool (shasum/sha256sum) available\n' >&2

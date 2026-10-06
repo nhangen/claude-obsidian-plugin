@@ -95,10 +95,11 @@ keeper_emit_outcome() {
 # Progress markers for the MCP adapter, which kills a write that overruns its
 # subprocess cap. They say which steps had already landed, so a cut-off insert
 # whose note is on disk is reported as such instead of as an ambiguous timeout
-# a caller retries or rewrites by hand (#170). JSON format only, on stderr, so
-# text-mode output is unchanged.
+# a caller retries or rewrites by hand (#170). Opt-in (KEEPER_PROGRESS=1, which
+# only the adapter sets) and JSON format only, on stderr, so no other caller's
+# output changes.
 keeper_progress() {
-  [ "$KEEPER_FORMAT" = json ] || return 0
+  [ "${KEEPER_PROGRESS:-0}" = 1 ] && [ "$KEEPER_FORMAT" = json ] || return 0
   printf 'keeper-progress: %s\n' "$*" >&2
 }
 
@@ -587,7 +588,7 @@ keeper_daily_link_locked() {
   fi
   tmp="$(mktemp "$(dirname "$daily")/.keeper-daily-XXXXXX")" || return 1
   if grep -q '^## Session Links' "$daily"; then
-    awk -v link="$link" '{print} /^## Session Links/ && !d {print link; d=1}' "$daily" > "$tmp" \
+    KEEPER_LINK="$link" awk '{print} /^## Session Links/ && !d {print ENVIRON["KEEPER_LINK"]; d=1}' "$daily" > "$tmp" \
       || { rm -f "$tmp"; return 1; }
   else
     { cat "$daily"; printf '\n## Session Links\n%s\n' "$link"; } > "$tmp" \

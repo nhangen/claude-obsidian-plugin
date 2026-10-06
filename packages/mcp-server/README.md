@@ -145,12 +145,20 @@ also reconciles the folder INDEX, `MCP_DAILY_APPEND_TIMEOUT_MS` (default 10000)
 for `obsidian_daily_append`, and `MCP_COMMIT_META_TIMEOUT_MS` (default 5000)
 for `obsidian_commit_meta`. Values are milliseconds between 100 and 600000; an
 invalid value stops the server at startup. Keep the save cap below
-`MCP_HTTP_REQUEST_TIMEOUT_MS` on the HTTP transport. When a keeper save hits
-its cap after the note itself was written, the result is `SUBPROCESS_TIMEOUT`
-with `retryable: false`: `partial` with an idempotency key, `failed` without
-one. Its warnings and `recovery.action` name the unfinished step (`INDEX`, or
-the daily Session Link). Do not write the note again. Finish the named step,
-or retry with the same idempotency key after raising the cap.
+`MCP_HTTP_REQUEST_TIMEOUT_MS` on the HTTP transport: the HTTP server warns at
+startup (`mcp-http-warning`) when it is not, because a save that outlives the
+HTTP request is cancelled with it and the client never sees its outcome.
+
+When a keeper save is stopped after the note itself was written (its cap or
+output limit), the result carries that code (`SUBPROCESS_TIMEOUT`, for
+example) with `retryable: false`: `partial` with an idempotency key, `failed`
+without one. Its warnings and `recovery.action` name the unfinished step.
+`obsidian_keeper_save` does not link a daily note, so that step is `INDEX`, or
+the idempotency record when INDEX had already been written. Do not write the
+note again. Finish the named step, or retry with the same idempotency key
+after raising the cap. A request that is cancelled after the note was written
+is handled the same way inside the server, but MCP sends no response to a
+cancelled request.
 
 The `ask_vault_librarian` prompt is a bounded read-only MCP workflow over the
 taxonomy, librarian, pending, and search-preview surfaces. It does not invoke

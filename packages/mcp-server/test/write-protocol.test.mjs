@@ -47,7 +47,11 @@ test("built stdio fails closed on invalid or contradictory keeper results", asyn
   await copyFile(join(packageRoot, "dist", "helpers", "lib", "resolve-config.sh"), join(helperRoot, "lib", "resolve-config.sh"));
   await symlink(join(packageRoot, "node_modules"), join(install, "node_modules"), "dir");
   await writeFile(config, `---\nvault_path: ${vault}\ndaily_path: Daily/\n---\n`);
+  // Drain the request body first, as the real keeper does: a fake that exits
+  // without reading races the adapter's body write into EPIPE under load, and
+  // the case then fails as a pipe error instead of the outcome under test.
   await writeFile(join(helperRoot, "keeper"), `#!/usr/bin/env bash
+cat >/dev/null
 case "$*" in
   *empty-key*) exit 0 ;;
   *missing-output*) exit 0 ;;

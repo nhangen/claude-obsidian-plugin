@@ -66,7 +66,7 @@ function timeoutSetting(name, fallback) {
 // several seconds; a shared 5 s cap cut every such save off after the note had
 // landed (#170). Keep the save cap below MCP_HTTP_REQUEST_TIMEOUT_MS (30 s by
 // default) so the HTTP transport still receives the structured outcome.
-const subprocessTimeouts = Object.freeze({
+export const subprocessTimeouts = Object.freeze({
   commitMeta: timeoutSetting("MCP_COMMIT_META_TIMEOUT_MS", 5_000),
   keeperSave: timeoutSetting("MCP_KEEPER_SAVE_TIMEOUT_MS", 25_000),
   dailyAppend: timeoutSetting("MCP_DAILY_APPEND_TIMEOUT_MS", 10_000),
@@ -512,8 +512,16 @@ function compatibleKeeperExit(code, outcome) {
 }
 
 // Steps the keeper reports through `keeper-progress:` lines on stderr, named
-// the way a caller recognizes them.
+// the way a caller recognizes them. The adapter never passes
+// --session-link-date, so an MCP save only ever has INDEX pending; the daily
+// Session Link name covers keeper callers that do link a daily note.
 const keeperStepNames = Object.freeze({ index: "INDEX", "daily-link": "daily Session Link" });
+const keeperProgressLine = /^keeper-progress: /;
+
+// Keeper stderr without the machine-readable progress markers.
+function keeperDiagnostics(stderrOutput) {
+  return stderrOutput.split(/\r?\n/).filter((line) => !keeperProgressLine.test(line)).join("\n").trim();
+}
 
 function keeperProgress(stderrOutput) {
   let noteWritten = false;
@@ -532,15 +540,22 @@ function keeperProgress(stderrOutput) {
   return { noteWritten, unfinished: pending.filter((step) => !done.has(step)).map((step) => keeperStepNames[step]) };
 }
 
-// The keeper was cut off after the note itself was committed. Retrying the
-// call is not what the caller needs (the same cap would cut the retry off at
-// the same step) and rewriting the note by hand duplicates it, so name what is
-// left instead (#170).
-function noteWrittenTimeoutOutcome(fallback, errorCode, unfinished) {
+// The keeper was stopped (cap, output limit, or cancellation) after the note
+// itself was committed. Retrying the call is not what the caller needs (the
+// same cap would cut the retry off at the same step) and rewriting the note by
+// hand duplicates it, so name what is left instead (#170).
+const keeperStopReasons = Object.freeze({
+  SUBPROCESS_TIMEOUT: "timed out",
+  SUBPROCESS_OUTPUT_LIMIT: "exceeded its output limit",
+  CANCELLED: "was cancelled",
+});
+
+function noteWrittenStopOutcome(fallback, errorCode, unfinished) {
   const steps = unfinished.length > 0 ? unfinished.join(" and ") : "idempotency record";
+  const reason = keeperStopReasons[errorCode] || "stopped";
   const warnings = [
     ...fallback.warnings,
-    `keeper write timed out after the note was written to ${fallback.path}; unfinished: ${steps}`,
+    `keeper write ${reason} after the note was written to ${fallback.path}; unfinished: ${steps}`,
   ];
   if (!fallback.idempotency_key) {
     return {
@@ -570,7 +585,7 @@ async function executeKeeperWrite(args, bodyContent, signal, fallback, timeoutMs
   const fullArgs = [...args, "--format", "json"];
   return await new Promise((resolveResult, reject) => {
       const child = spawn("bash", [keeperScript, ...fullArgs], {
-        env: childEnvironment(),
+        env: { ...childEnvironment(), KEEPER_PROGRESS: "1" },
         detached: process.platform !== "win32",
         shell: false,
         stdio: ["pipe", "pipe", "pipe"],
@@ -643,9 +658,9 @@ async function executeKeeperWrite(args, bodyContent, signal, fallback, timeoutMs
             : errorCode === "SUBPROCESS_OUTPUT_LIMIT"
               ? "keeper exceeded output limit"
               : "keeper write timed out";
-          const progress = errorCode === "SUBPROCESS_TIMEOUT" && !parsed ? keeperProgress(stderrOutput) : undefined;
+          const progress = parsed ? undefined : keeperProgress(stderrOutput);
           if (progress?.noteWritten) {
-            finish(reject, codedError(errorCode, detail, noteWrittenTimeoutOutcome(fallback, errorCode, progress.unfinished)));
+            finish(reject, codedError(errorCode, detail, noteWrittenStopOutcome(fallback, errorCode, progress.unfinished)));
             return;
           }
           const recoverable = Boolean(fallback.idempotency_key);
@@ -683,7 +698,7 @@ async function executeKeeperWrite(args, bodyContent, signal, fallback, timeoutMs
           finish(resolveResult, parsed);
           return;
         }
-        finish(reject, codedError(parsed.error_code || "WRITE_FAILED", stderrOutput.trim() || parsed.status, parsed));
+        finish(reject, codedError(parsed.error_code || "WRITE_FAILED", keeperDiagnostics(stderrOutput) || parsed.status, parsed));
       });
     });
 }

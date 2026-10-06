@@ -101,6 +101,16 @@ STORED_UNREAD="$(state_hash_for "$STATE3" "unreadable.md")"
 [ -z "$STORED_UNREAD" ] || note_hash_valid "$STORED_UNREAD" \
   || fail "unreadable file produced malformed state entry: $STORED_UNREAD"
 
+# Backslash in the folder path (#170): apply must link and hash the notes, not
+# report success over an INDEX it never wrote.
+TMP4="$(mktemp -d "${TMPDIR:-/tmp}/vault-apply-backslash-XXXXXX")"; trap 'rm -rf "$TMP4"' EXIT
+F4="$TMP4/Pro\\tjects"; mkdir -p "$F4"
+printf 'one\n' > "$F4/one.md"
+ADDED4="$(vault_index_apply "$TMP4" "$F4" "$F4/INDEX.md")"
+[ "$ADDED4" = "one.md" ] || fail "backslash folder: expected one.md added, got: $ADDED4"
+grep -qxF -- '- [[one]]' "$F4/INDEX.md" || fail "backslash folder: INDEX link missing"$'\n'"$(cat "$F4/INDEX.md" 2>/dev/null)"
+note_hash_valid "$(state_hash_for "$(index_state_file "$F4/INDEX.md")" "one.md")" || fail "backslash folder: hash not stored validly"
+
 # --- zsh portability: vault_index_apply must not use a bash-only trap ---
 # A `trap ... RETURN` prints "undefined signal: RETURN" when the lib is sourced
 # into a zsh shell (the librarian/keeper runtime). Run the function under zsh

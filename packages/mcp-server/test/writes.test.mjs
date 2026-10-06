@@ -71,7 +71,7 @@ function startStdioServer(configPath, extraEnv = {}) {
   return {
     child,
     stderr: () => stderr,
-    async request(message, id) {
+    async request(message, id, waitMs = 8000) {
       child.stdin.write(`${JSON.stringify(message)}\n`);
       for (;;) {
         if (childError) throw childError;
@@ -82,7 +82,7 @@ function startStdioServer(configPath, extraEnv = {}) {
             messageWaiter = resolveWait;
           }),
           new Promise((_, reject) => {
-            setTimeout(() => reject(new Error(`timed out waiting for MCP response ${id}`)), 8000);
+            setTimeout(() => reject(new Error(`timed out waiting for MCP response ${id}`)), waitMs);
           }),
         ]);
       }
@@ -93,11 +93,12 @@ function startStdioServer(configPath, extraEnv = {}) {
   };
 }
 
-function startHttpServer(configPath) {
+function startHttpServer(configPath, extraEnv = {}) {
   const child = spawn(process.execPath, [httpEntrypoint], {
     cwd: tmpdir(),
     env: {
       ...process.env,
+      ...extraEnv,
       OBSIDIAN_LOCAL_MD: configPath,
       MCP_HTTP_BIND: "127.0.0.1",
       MCP_HTTP_PORT: "0",
@@ -128,7 +129,7 @@ function startHttpServer(configPath) {
     if (code !== 0) readyReject(new Error(`HTTP server exited with ${code}: ${stderr}`));
   });
 
-  return { child, ready };
+  return { child, ready, stderr: () => stderr };
 }
 
 async function createFixtureVault(dailyPath = "Daily") {
@@ -911,91 +912,170 @@ test("stdio timeout and cancellation never report false write success and keep s
   assert.equal(timeoutRetryAgain.result.structuredContent.status, "committed");
 });
 
-test("stdio keeper save that times out after the note is written names the unfinished INDEX step and is not retryable", async (t) => {
-  const { root, vaultPath, configPath } = await createFixtureVault();
-  const servers = [];
-  const start = (env) => {
-    const server = startStdioServer(configPath, env);
-    servers.push(server);
-    return server;
-  };
+// A keeper hung inside its lock leaves that vault's lock to the stale reaper
+// (two seconds), so each hung-keeper case gets a vault of its own, and the
+// caps leave room for a loaded machine to reach the step under test.
+async function hungKeeperSave(t, { fault, title, idempotencyKey }) {
+  const fixture = await createFixtureVault();
+  const server = startStdioServer(fixture.configPath, { KEEPER_FAULT_INJECT: fault, KEEPER_FAULT_MODE: "hang", MCP_KEEPER_SAVE_TIMEOUT_MS: "4000" });
   t.after(async () => {
-    for (const server of servers) {
-      if (!server.child.killed) server.child.stdin.end();
-      await once(server.child, "close").catch(() => {});
-    }
-    await rm(root, { recursive: true, force: true });
+    if (!server.child.killed) server.child.stdin.end();
+    await once(server.child, "close").catch(() => {});
+    await rm(fixture.root, { recursive: true, force: true });
   });
-  const initialize = async (server) => {
-    await server.request({
-      jsonrpc: "2.0", id: 1, method: "initialize",
-      params: { protocolVersion: "2025-11-25", capabilities: {}, clientInfo: { name: "test", version: "1.0" } },
-    }, 1);
-    server.notification({ jsonrpc: "2.0", method: "notifications/initialized" });
-  };
-
-  // The INDEX step outlives the cap: the keeper hangs right after the note lands.
-  const slow = start({ KEEPER_FAULT_INJECT: "after_note", KEEPER_FAULT_MODE: "hang", MCP_KEEPER_SAVE_TIMEOUT_MS: "1000" });
-  await initialize(slow);
-  const timedOut = await slow.request({
+  await server.request({
+    jsonrpc: "2.0", id: 1, method: "initialize",
+    params: { protocolVersion: "2025-11-25", capabilities: {}, clientInfo: { name: "test", version: "1.0" } },
+  }, 1);
+  server.notification({ jsonrpc: "2.0", method: "notifications/initialized" });
+  const response = await server.request({
     jsonrpc: "2.0", id: 2, method: "tools/call",
     params: {
       name: "obsidian_keeper_save",
-      arguments: { title: "Slow Index", body: "Slow index body", resolved: true, folder_hint: "Inbox", idempotency_key: "slow-index-1", request_id: "slow-index-request" },
+      arguments: { title, body: `${title} body`, resolved: true, folder_hint: "Inbox", request_id: `${title.replace(/ /g, "-")}-request`, ...(idempotencyKey ? { idempotency_key: idempotencyKey } : {}) },
     },
-  }, 2);
-  assert.equal(timedOut.result.isError, true);
-  const outcome = JSON.parse(timedOut.result.content[0].text);
+  }, 2, 30_000);
+  assert.equal(response.result.isError, true);
+  return { fixture, response, outcome: JSON.parse(response.result.content[0].text) };
+}
+
+test("stdio keeper save that times out after the note is written names the unfinished INDEX step and is not retryable", async (t) => {
+  const { fixture, response, outcome } = await hungKeeperSave(t, { fault: "after_note", title: "Slow Index", idempotencyKey: "slow-index-1" });
   assert.equal(outcome.code, "SUBPROCESS_TIMEOUT");
   assert.equal(outcome.status, "partial");
   assert.equal(outcome.error_code, "SUBPROCESS_TIMEOUT");
   assert.equal(outcome.retryable, false);
   assert.equal(outcome.recovery.required, true);
-  assert.match(outcome.recovery.action, /do not rewrite the note; finish INDEX/);
-  assert.match(outcome.warnings.join(" "), /note was written to Inbox\/Slow Index\.md; unfinished: INDEX$/);
+  assert.match(outcome.recovery.action, /do not rewrite the note; finish INDEX,/);
+  assert.match(outcome.warnings.join(" "), /keeper write timed out after the note was written to Inbox\/Slow Index\.md; unfinished: INDEX$/);
+  assert.doesNotMatch(outcome.warnings.join(" "), /Session Link/);
   assert.deepEqual(outcome.affected_paths, ["Inbox/Slow Index.md", "Inbox/INDEX.md"]);
-  assert.deepEqual(timedOut.result.structuredContent, Object.fromEntries(Object.entries(outcome).filter(([key]) => !["code", "detail"].includes(key))));
-  assert.match(await readFile(join(vaultPath, "Inbox", "Slow Index.md"), "utf8"), /Slow index body/);
-
-  const keyless = await slow.request({
-    jsonrpc: "2.0", id: 3, method: "tools/call",
-    params: {
-      name: "obsidian_keeper_save",
-      arguments: { title: "Slow Keyless", body: "Slow keyless body", resolved: true, folder_hint: "Inbox", request_id: "slow-keyless" },
-    },
-  }, 3);
-  const keylessOutcome = JSON.parse(keyless.result.content[0].text);
-  assert.equal(keylessOutcome.code, "SUBPROCESS_TIMEOUT");
-  assert.equal(keylessOutcome.status, "failed");
-  assert.equal(keylessOutcome.retryable, false);
-  assert.equal(keylessOutcome.recovery.required, true);
-  assert.match(keylessOutcome.recovery.action, /do not rewrite the note; finish INDEX/);
-  assert.match(keylessOutcome.warnings.join(" "), /unfinished: INDEX/);
+  assert.deepEqual(response.result.structuredContent, Object.fromEntries(Object.entries(outcome).filter(([key]) => !["code", "detail"].includes(key))));
+  assert.match(await readFile(join(fixture.vaultPath, "Inbox", "Slow Index.md"), "utf8"), /Slow Index body/);
 
   // With the cap lifted, the same key finishes the INDEX step without a second note.
-  const healthy = start({ MCP_KEEPER_SAVE_TIMEOUT_MS: "8000" });
-  await initialize(healthy);
+  const healthy = startStdioServer(fixture.configPath, { MCP_KEEPER_SAVE_TIMEOUT_MS: "25000" });
+  t.after(async () => {
+    if (!healthy.child.killed) healthy.child.stdin.end();
+    await once(healthy.child, "close").catch(() => {});
+  });
+  await healthy.request({
+    jsonrpc: "2.0", id: 1, method: "initialize",
+    params: { protocolVersion: "2025-11-25", capabilities: {}, clientInfo: { name: "test", version: "1.0" } },
+  }, 1);
+  healthy.notification({ jsonrpc: "2.0", method: "notifications/initialized" });
   const finished = await healthy.request({
-    jsonrpc: "2.0", id: 4, method: "tools/call",
+    jsonrpc: "2.0", id: 2, method: "tools/call",
     params: {
       name: "obsidian_keeper_save",
-      arguments: { title: "Slow Index", body: "Slow index body", resolved: true, folder_hint: "Inbox", idempotency_key: "slow-index-1", request_id: "slow-index-retry" },
+      arguments: { title: "Slow Index", body: "Slow Index body", resolved: true, folder_hint: "Inbox", idempotency_key: "slow-index-1", request_id: "slow-index-retry" },
     },
-  }, 4);
-  assert.equal(finished.result.isError, false);
+  }, 2, 30_000);
+  assert.equal(finished.result.isError, false, finished.result.content[0].text);
   assert.equal(finished.result.structuredContent.status, "committed");
-  assert.match(await readFile(join(vaultPath, "Inbox", "INDEX.md"), "utf8"), /\[\[(?:Inbox\/)?Slow Index\]\]/);
+  assert.match(await readFile(join(fixture.vaultPath, "Inbox", "INDEX.md"), "utf8"), /\[\[(?:Inbox\/)?Slow Index\]\]/);
 });
 
-test("stdio rejects an out-of-range subprocess timeout setting", async () => {
+test("stdio keyless keeper save that times out after the note is written fails without advertising a retry", async (t) => {
+  const { outcome } = await hungKeeperSave(t, { fault: "after_note", title: "Slow Keyless" });
+  assert.equal(outcome.code, "SUBPROCESS_TIMEOUT");
+  assert.equal(outcome.status, "failed");
+  assert.equal(outcome.retryable, false);
+  assert.equal(outcome.recovery.required, true);
+  assert.match(outcome.recovery.action, /do not rewrite the note; finish INDEX for Inbox\/Slow Keyless\.md manually/);
+  assert.match(outcome.warnings.join(" "), /unfinished: INDEX/);
+  assert.match(outcome.warnings.join(" "), /no idempotency key/);
+});
+
+test("stdio keeper save that times out after INDEX names the idempotency record as unfinished", async (t) => {
+  const { fixture, outcome } = await hungKeeperSave(t, { fault: "after_index", title: "Slow Record", idempotencyKey: "slow-record-1" });
+  assert.equal(outcome.code, "SUBPROCESS_TIMEOUT");
+  assert.equal(outcome.status, "partial");
+  assert.equal(outcome.retryable, false);
+  assert.match(outcome.warnings.join(" "), /written to Inbox\/Slow Record\.md; unfinished: idempotency record$/);
+  assert.match(outcome.recovery.action, /finish idempotency record/);
+  assert.match(await readFile(join(fixture.vaultPath, "Inbox", "INDEX.md"), "utf8"), /\[\[(?:Inbox\/)?Slow Record\]\]/);
+});
+
+test("stdio rejects malformed and out-of-range subprocess timeout settings", async () => {
   const { root, configPath } = await createFixtureVault();
   try {
-    const server = startStdioServer(configPath, { MCP_KEEPER_SAVE_TIMEOUT_MS: "5s" });
-    const [code] = await once(server.child, "close");
-    assert.notEqual(code, 0);
-    assert.match(server.stderr(), /MCP_KEEPER_SAVE_TIMEOUT_MS must be an integer/);
+    for (const name of ["MCP_KEEPER_SAVE_TIMEOUT_MS", "MCP_DAILY_APPEND_TIMEOUT_MS", "MCP_COMMIT_META_TIMEOUT_MS"]) {
+      for (const [value, message] of [["5s", "must be an integer"], ["-1", "must be an integer"], ["99", "is outside its allowed range"], ["600001", "is outside its allowed range"]]) {
+        const server = startStdioServer(configPath, { [name]: value });
+        const [code] = await once(server.child, "close");
+        assert.notEqual(code, 0, `${name}=${value}`);
+        assert.match(server.stderr(), new RegExp(`${name} ${message}`), `${name}=${value}`);
+      }
+      for (const value of ["100", "600000"]) {
+        const server = startStdioServer(configPath, { [name]: value });
+        const response = await server.request({
+          jsonrpc: "2.0", id: 1, method: "initialize",
+          params: { protocolVersion: "2025-11-25", capabilities: {}, clientInfo: { name: "test", version: "1.0" } },
+        }, 1);
+        assert.ok(response.result, `${name}=${value}`);
+        server.child.stdin.end();
+        await once(server.child, "close");
+      }
+    }
   } finally {
     await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("MCP_DAILY_APPEND_TIMEOUT_MS caps daily appends independently of keeper saves", async (t) => {
+  const { root, vaultPath, configPath } = await createFixtureVault();
+  const server = startStdioServer(configPath, { MCP_DAILY_APPEND_TIMEOUT_MS: "500", MCP_KEEPER_SAVE_TIMEOUT_MS: "25000" });
+  let holder;
+  t.after(async () => {
+    if (holder?.child.exitCode === null) holder.child.kill("SIGKILL");
+    if (!server.child.killed) server.child.stdin.end();
+    await once(server.child, "close").catch(() => {});
+    await rm(root, { recursive: true, force: true });
+  });
+  await server.request({
+    jsonrpc: "2.0", id: 1, method: "initialize",
+    params: { protocolVersion: "2025-11-25", capabilities: {}, clientInfo: { name: "test", version: "1.0" } },
+  }, 1);
+  server.notification({ jsonrpc: "2.0", method: "notifications/initialized" });
+
+  holder = await holdKeeperLock(vaultPath, root, "daily-cap");
+  const started = Date.now();
+  const daily = await server.request({
+    jsonrpc: "2.0", id: 2, method: "tools/call",
+    params: { name: "obsidian_daily_append", arguments: { content: "Capped", date: "2026-09-24", idempotency_key: "daily-cap-1", request_id: "daily-cap" } },
+  }, 2);
+  assert.equal(JSON.parse(daily.result.content[0].text).code, "SUBPROCESS_TIMEOUT");
+  assert.ok(Date.now() - started < 5_000, `daily append took ${Date.now() - started} ms`);
+
+  // The keeper-save cap is separate: a save started under the same held lock
+  // waits it out and commits once the lock is released.
+  const save = server.request({
+    jsonrpc: "2.0", id: 3, method: "tools/call",
+    params: { name: "obsidian_keeper_save", arguments: { title: "Waited", body: "Waited body", resolved: true, folder_hint: "Inbox", idempotency_key: "waited-1", request_id: "waited" } },
+  }, 3, 30_000);
+  await new Promise((resolveWait) => setTimeout(resolveWait, 1_000));
+  await holder.release();
+  const saved = await save;
+  assert.equal(saved.result.isError, false, saved.result.content[0].text);
+  assert.equal(saved.result.structuredContent.status, "committed");
+});
+
+test("HTTP warns at startup when the keeper save cap is not below the request timeout", async (t) => {
+  const { root, configPath } = await createFixtureVault();
+  t.after(() => rm(root, { recursive: true, force: true }));
+  for (const [env, warned] of [
+    [{ MCP_HTTP_REQUEST_TIMEOUT_MS: "1000" }, true],
+    [{ MCP_HTTP_REQUEST_TIMEOUT_MS: "30000", MCP_KEEPER_SAVE_TIMEOUT_MS: "30000" }, true],
+    [{}, false],
+  ]) {
+    const server = startHttpServer(configPath, env);
+    await server.ready;
+    const warning = /mcp-http-warning MCP_KEEPER_SAVE_TIMEOUT_MS \(\d+\) is not below MCP_HTTP_REQUEST_TIMEOUT_MS/;
+    if (warned) assert.match(server.stderr(), warning, JSON.stringify(env));
+    else assert.doesNotMatch(server.stderr(), warning);
+    server.child.kill("SIGTERM");
+    await once(server.child, "close").catch(() => {});
   }
 });
 

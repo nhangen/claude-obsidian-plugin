@@ -3,7 +3,7 @@
 import { createHash, createHmac, randomUUID, timingSafeEqual } from "node:crypto";
 import { createServer as createHttpServer } from "node:http";
 import { WebStandardStreamableHTTPServerTransport, validateHostHeader } from "@modelcontextprotocol/server";
-import { closeActiveChildren, createServer } from "./stdio.mjs";
+import { closeActiveChildren, createServer, subprocessTimeouts } from "./stdio.mjs";
 
 const protocolVersions = ["2025-11-25"];
 const sessions = new Map();
@@ -649,6 +649,11 @@ async function handleRequest(req, res, configuration) {
 }
 
 const configuration = loadHttpConfiguration();
+// A keeper save that outlives the HTTP request is aborted with it, and the
+// client never sees which steps landed. Say so at startup (#170).
+if (subprocessTimeouts.keeperSave >= configuration.requestTimeoutMs) {
+  process.stderr.write(`mcp-http-warning MCP_KEEPER_SAVE_TIMEOUT_MS (${subprocessTimeouts.keeperSave}) is not below MCP_HTTP_REQUEST_TIMEOUT_MS (${configuration.requestTimeoutMs}); a slow keeper save will be cancelled by the HTTP request timeout\n`);
+}
 const httpServer = createHttpServer((req, res) => {
   void handleRequest(req, res, configuration);
 });
