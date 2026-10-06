@@ -518,7 +518,7 @@ const keeperStepNames = Object.freeze({
 });
 const keeperProgressEvent = /^(note|index|daily-link|idempotency)-written(?: pending=([a-z,-]*))?$/;
 
-function keeperProgress(stderrOutput, token) {
+export function keeperProgress(stderrOutput, token) {
   const prefix = `keeper-progress ${token}: `;
   let noteWritten = false;
   let pending = [];
@@ -537,8 +537,8 @@ function keeperProgress(stderrOutput, token) {
   return { noteWritten, unfinished: pending.filter((step) => !done.has(step)).map((step) => keeperStepNames[step] ?? step) };
 }
 
-// Keeper stderr without progress markers.
-function keeperDiagnostics(stderrOutput) {
+// Keeper stderr without progress markers (exported for tests).
+export function keeperDiagnostics(stderrOutput) {
   return stderrOutput.split(/\r?\n/).filter((line) => !line.startsWith("keeper-progress ")).join("\n").trim();
 }
 
@@ -554,7 +554,7 @@ const keeperStopReasons = Object.freeze({
 // rewriting the note by hand duplicates it. A keyed save is still safely
 // retryable with its key (the keeper recovers the written note); a keyless one
 // is not.
-function noteWrittenStopOutcome(fallback, errorCode, unfinished, capSetting) {
+export function noteWrittenStopOutcome(fallback, errorCode, unfinished, capSetting) {
   const steps = unfinished.join(" and ");
   const reason = keeperStopReasons[errorCode] || "stopped";
   const warnings = [
@@ -719,7 +719,9 @@ async function executeKeeperWrite(args, bodyContent, signal, fallback, timeoutMs
     });
 }
 
-async function keeperSave({ title, body, folder_hint, type, links, idempotency_key, request_id }, vaultPath, signal) {
+// Exported for tests: the error detail it rejects with is not part of the MCP
+// result, so only an in-process call can check it.
+export async function keeperSave({ title, body, folder_hint, type, links, idempotency_key, request_id }, vaultPath, signal) {
   const target = normalizedKeeperSaveTarget(title, folder_hint);
   if (!target) throw codedError("PATH_INVALID", "keeper save target is invalid");
   const { cleanTitle, targetFolder, targetPath, affectedPaths } = target;

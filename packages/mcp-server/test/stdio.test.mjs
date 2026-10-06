@@ -453,7 +453,7 @@ test("cancellation stops active child work and shutdown reaps it", async (t) => 
   await pendingHandled;
 });
 
-test("MCP_COMMIT_META_TIMEOUT_MS caps commit metadata independently of the keeper caps", async (t) => {
+test("MCP_COMMIT_META_TIMEOUT_MS caps commit metadata independently of the keeper caps", { timeout: 30_000 }, async (t) => {
   const fixture = await mkdtemp(join(tmpdir(), "mcp-meta-timeout-"));
   const vault = join(fixture, "vault");
   const config = join(fixture, "obsidian.local.md");
@@ -467,7 +467,10 @@ test("MCP_COMMIT_META_TIMEOUT_MS caps commit metadata independently of the keepe
   const server = startServer(config, {
     PATH: `${bin}:${process.env.PATH}`,
     MCP_COMMIT_META_TIMEOUT_MS: "300",
+    // Both keeper caps are far out of reach: only the commit-metadata cap can
+    // end the call before the fake git's 4 s sleep does.
     MCP_KEEPER_SAVE_TIMEOUT_MS: "60000",
+    MCP_DAILY_APPEND_TIMEOUT_MS: "60000",
   });
   t.after(async () => {
     if (!server.child.killed) server.child.kill("SIGKILL");
@@ -487,7 +490,7 @@ test("MCP_COMMIT_META_TIMEOUT_MS caps commit metadata independently of the keepe
   }, 2);
   assert.equal(response.result.isError, true);
   assert.equal(JSON.parse(response.result.content[0].text).code, "SUBPROCESS_TIMEOUT");
-  // Well short of the fake git's 4 s sleep: the 300 ms cap, not the keeper cap, applied.
+  // Well short of the fake git's 4 s sleep: the 300 ms cap, not a keeper cap, applied.
   assert.ok(Date.now() - started < 3_500, `commit metadata took ${Date.now() - started} ms`);
 });
 

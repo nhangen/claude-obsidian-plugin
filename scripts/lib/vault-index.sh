@@ -198,7 +198,8 @@ vault_index_sweep_temps() {
 # ends right before "]]", "|", or "#" is exactly the set of strings those
 # fixed-string greps can find on that line. Only names in want[] matter, so
 # keep those and stop scanning past the longest one. Callers fill want[]
-# (stems and their leaves), maxlen, and dup[] (ambiguous leaves).
+# (stems and their leaves), maxlen, dup[] (ambiguous leaves) and ndup (their
+# count).
 # shellcheck disable=SC2016  # awk source: $0 and friends are awk's, not the shell's
 VAULT_INDEX_AWK_LIB='
 function leaf_of(p) { sub(/.*\//, "", p); return p }
@@ -220,7 +221,7 @@ function scan(line,   n, i, c, nb, ns, ne, j, k, s, e, key) {
     s = B[j]
     for (k = 1; k <= ne; k++) {
       e = E[k]
-      if (e <= s) continue
+      if (e < s) continue                # e == s: the empty name (a note named ".md")
       if (e - s > maxlen) break
       key = substr(line, s, e - s)
       if (key in want) { linked[key] = 1; leaflinked[key] = 1 }
@@ -230,7 +231,7 @@ function scan(line,   n, i, c, nb, ns, ne, j, k, s, e, key) {
     s = S[j]
     for (k = 1; k <= ne; k++) {
       e = E[k]
-      if (e <= s) continue
+      if (e < s) continue                # e == s: the empty name (a note named ".md")
       if (e - s > maxlen) break
       key = substr(line, s, e - s)
       if (key in want) linked[key] = 1
@@ -242,6 +243,11 @@ function has_link(stem,   leaf) {
   leaf = leaf_of(stem)
   if (leaf == stem) return 0
   if (leaf in dup) return 0          # ambiguous: path form required
+  # The empty leaf (a note named ".md" in a subfolder) is "ambiguous" when the
+  # folder has no duplicate leaves at all: the per-note check greps the leaf
+  # against the dup list with -x, and an empty list still holds one empty
+  # line. Kept for parity with vault_index_has_link.
+  if (leaf == "" && ndup == 0) return 0
   return (leaf in leaflinked)
 }
 # A state line split the way a tab-IFS `read -r key rest` splits it (the
@@ -262,7 +268,7 @@ function hash_valid(h) { return h ~ /^[0-9]+:[0-9a-f]+$/ && length(h) - index(h,
 # line, then the added notes; then INDEX via `phase=idx`.
 # shellcheck disable=SC2016  # awk source
 VAULT_INDEX_AWK_ADDED='
-phase == "added" && !past_dups { if ($0 == "") past_dups = 1; else dup[$0] = 1; next }
+phase == "added" && !past_dups { if ($0 == "") past_dups = 1; else { dup[$0] = 1; ndup++ } next }
 phase == "added" { if ($0 != "") { A[++na] = $0; want_name(stem_of($0)) } next }
 phase == "idx" { scan($0); last_line = $0; next }
 '
