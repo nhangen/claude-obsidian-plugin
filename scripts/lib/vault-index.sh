@@ -48,8 +48,13 @@ vault_index_has_link() {
 
 # Basenames held by more than one note in the folder — the set for which a bare
 # [[leaf]] link is ambiguous and must not be treated as a match.
+#
+# One awk pass rather than `-exec basename` per note: on a slow mount (9p) a
+# fork per note was most of an INDEX reconcile's wall time (#170).
 vault_index_dup_leaves() {
-  find "$1" -type f -name '*.md' -exec basename {} .md \; | LC_ALL=C sort | uniq -d
+  find "$1" -type f -name '*.md' \
+    | awk '{ sub(/.*\//, ""); if ($0 != ".md") sub(/\.md$/, ""); print }' \
+    | LC_ALL=C sort | uniq -d
 }
 
 # Link target to write for a note: vault-root-relative, because Obsidian
@@ -120,67 +125,163 @@ EOF
   return 1
 }
 
+# Every note under the folder with its mtime, one "<mtime>\t<path>" line each,
+# from a single find and batched stat calls. A `file_mtime` probe per note cost
+# two forks per note, which on a slow mount (9p) dominated an INDEX reconcile
+# (#170). GNU stat spells mtime `-c %Y`, BSD `-f %m` (see file_mtime); probe
+# the flavor once. Names holding a newline cannot be carried line-wise and are
+# left out, as the line-wise walk always skipped them.
+vault_index_stat_notes() {
+  local folder="$1" tab=$'\t' nl=$'\n' probe
+  probe="$(stat -c %Y "$folder" 2>/dev/null)" || probe=""
+  case "$probe" in
+    ''|*[!0-9]*)
+      find "$folder" -type f -name '*.md' ! -name "*${nl}*" -exec stat -f "%m${tab}%N" {} + || : ;;
+    *)
+      find "$folder" -type f -name '*.md' ! -name "*${nl}*" -exec stat -c "%Y${tab}%n" {} + || : ;;
+  esac
+}
+
+# Plan lines: DROP/ADD/CHANGED <TAB> folder-relative path.
+#
+# Forks are O(1) per folder, not per note (#170): one find, batched stat, one
+# awk pass over the note list, the state sidecar, and INDEX.md. The awk pass
+# answers the same questions the per-note helpers do — state_hash_for,
+# vault_index_has_link, vault_index_dup_leaves, vault_index_is_owned — with the
+# same semantics. Only notes whose mtime is newer than last_reconciled are
+# hashed, as before; that cost scales with what changed, not the folder size.
 vault_index_plan() {
   local folder="$1" idx="$2"
-  local state last f base stored mt cur idxbase dups owned
+  local state state_in idx_in idxbase action fn stored path tab=$'\t'
   state="$(index_state_file "$idx")"
-  last="$(state_last_reconciled "$state")"
-  idxbase="$(basename "$idx")"
-  dups="$(vault_index_dup_leaves "$folder")"
-  owned="$(vault_index_owned_subdirs "$folder")"
+  idxbase="${idx##*/}"
+  state_in=/dev/null; [ -f "$state" ] && state_in="$state"
+  idx_in=/dev/null;   [ -f "$idx" ] && idx_in="$idx"
 
-  # DROP: state entries whose note no longer exists at that key. A note moved
-  # into a subfolder drops its stale basename key and is re-added under its
-  # path key by the walk below; because has_link matches the trailing segment,
-  # its existing INDEX link is not duplicated. Net effect of organizing a
-  # folder is a re-key, not a loss of coverage.
-  if [ -f "$state" ]; then
-    while IFS=$'\t' read -r fn _h; do
-      [ -z "$fn" ] && continue
-      case "$fn" in \#*) continue ;; esac
-      if [ ! -f "$folder/$fn" ]; then
-        printf 'DROP\t%s\n' "$fn"
-      elif vault_index_is_owned "$fn" "$owned"; then
-        printf 'DROP\t%s\n' "$fn"   # a child index now owns it; hand it over
-      fi
-    done < "$state"
-  fi
-
-  # Recursive: a folder organized into subfolders must stay visible. A
-  # single-level glob reported all 103 relocated notes as deleted and tracked
-  # none of them, so the index machinery actively penalized an organized vault.
-  while IFS= read -r f; do
-    [ -e "$f" ] || continue
-    base="${f#"$folder"/}"           # folder-relative path, so subfolders are visible
-    # Skip filenames containing tabs or newlines — they corrupt TSV state.
-    case "$base" in
-      *$'\t'*|*$'\n'*)
-        printf 'vault_index_plan: skipping TSV-incompatible filename: %s\n' "$base" >&2
-        continue ;;
-    esac
-    [ "${base##*/}" = "$idxbase" ] && continue
-    vault_index_is_owned "$base" "$owned" && continue
-    stored="$(state_hash_for "$state" "$base")"
-    if [ -z "$stored" ]; then
-      printf 'ADD\t%s\n' "$base"          # coverage gap — name-only, no content read
-      continue
-    fi
-    if ! vault_index_has_link "$idx" "${base%.md}" "$dups"; then
-      printf 'ADD\t%s\n' "$base"          # hashed but unlinked — state drifted ahead of INDEX
-      continue
-    fi
-    if ! note_hash_valid "$stored"; then
-      printf 'CHANGED\t%s\n' "$base"       # malformed -> forced reconcile
-      continue
-    fi
-    mt="$(file_mtime "$f")"
-    if [ -z "$last" ] || [ -z "$mt" ] || [ "$mt" -gt "$last" ]; then   # cold start / mtime candidate / unreadable->hash path
-      cur="$(note_hash "$f")"
-      [ "$cur" != "$stored" ] && printf 'CHANGED\t%s\n' "$base"   # confirmed by hash
-    fi
-  done <<EOF
-$(find "$folder" -type f -name '*.md' | LC_ALL=C sort)
-EOF
+  vault_index_stat_notes "$folder" | LC_ALL=C sort -t "$tab" -k2 | awk -v folder="$folder" -v idxbase="$idxbase" '
+    # Same key a tab-IFS `read -r fn rest` yields: leading tabs dropped, first field.
+    function read_fn(line,   i) {
+      sub(/^\t+/, "", line)
+      i = index(line, "\t")
+      return i ? substr(line, 1, i - 1) : line
+    }
+    function owned(rel,   i) {
+      for (i = 1; i <= nowned; i++)
+        if (substr(rel, 1, length(ownedp[i])) == ownedp[i]) return 1
+      return 0
+    }
+    function leaf_of(path) { sub(/.*\//, "", path); return path }
+    # Every substring of an INDEX line that starts after "[[" or "/" and ends
+    # before "]]", "|", or "#" is exactly the set of strings the fixed-string
+    # greps in vault_index_has_link would find there. Only note names matter,
+    # so keep those and stop scanning past the longest one.
+    function scan(line,   n, i, c, nb, ns, ne, j, k, s, e, key) {
+      n = length(line); nb = 0; ns = 0; ne = 0
+      for (i = 1; i <= n; i++) {
+        c = substr(line, i, 1)
+        if (c == "[" && substr(line, i + 1, 1) == "[") B[++nb] = i + 2
+        else if (c == "/") S[++ns] = i + 1
+        if (c == "]" && substr(line, i + 1, 1) == "]") E[++ne] = i
+        else if (c == "|" || c == "#") E[++ne] = i
+      }
+      for (j = 1; j <= nb; j++) {
+        s = B[j]
+        for (k = 1; k <= ne; k++) {
+          e = E[k]
+          if (e <= s) continue
+          if (e - s > maxlen) break
+          key = substr(line, s, e - s)
+          if (key in want) { linked[key] = 1; leaflinked[key] = 1 }
+        }
+      }
+      for (j = 1; j <= ns; j++) {
+        s = S[j]
+        for (k = 1; k <= ne; k++) {
+          e = E[k]
+          if (e <= s) continue
+          if (e - s > maxlen) break
+          key = substr(line, s, e - s)
+          if (key in want) linked[key] = 1
+        }
+      }
+    }
+    function has_link(stem,   leaf) {
+      if (stem in linked) return 1
+      leaf = leaf_of(stem)
+      if (leaf == stem) return 0
+      if (leafcount[leaf] > 1) return 0       # ambiguous: path form required
+      return (leaf in leaflinked)
+    }
+    function hash_valid(h,   i) {
+      i = index(h, ":")
+      return h ~ /^[0-9]+:[0-9a-f]+$/ && length(h) - i == 64
+    }
+    BEGIN { prefix = folder "/"; maxlen = 0 }
+    phase == "notes" {
+      i = index($0, "\t"); if (!i) next
+      path = substr($0, i + 1)
+      rel = (substr(path, 1, length(prefix)) == prefix) ? substr(path, length(prefix) + 1) : path
+      n++; P[n] = path; R[n] = rel; M[n] = substr($0, 1, i - 1)
+      noteset[rel] = 1
+      leaf = leaf_of(rel); if (leaf != ".md") sub(/\.md$/, "", leaf)
+      leafcount[leaf]++
+      if (index(rel, "/") && leaf_of(rel) == "INDEX.md") ownedp[++nowned] = substr(rel, 1, length(rel) - 8)
+      stem = rel; sub(/\.md$/, "", stem)
+      want[stem] = 1; want[leaf_of(stem)] = 1
+      if (length(stem) > maxlen) maxlen = length(stem)
+      next
+    }
+    phase == "state" {
+      if (!have_last && substr($0, 1, 18) == "# last_reconciled:") { last = substr($0, 19); have_last = 1 }
+      split($0, f, "\t")
+      if (!(f[1] in stored)) stored[f[1]] = f[2]
+      fn = read_fn($0)
+      if (fn != "" && substr(fn, 1, 1) != "#") D[++nd] = fn
+      next
+    }
+    phase == "idx" { scan($0); next }
+    END {
+      # DROP: state entries whose note no longer exists at that key. A note
+      # moved into a subfolder drops its stale basename key and is re-added
+      # under its path key below; has_link matches the trailing segment, so
+      # its existing INDEX link is not duplicated. A key not among the walked
+      # notes may still be a regular file (a symlink, a non-.md name); the
+      # caller settles that with `[ -f ]`, which forks nothing.
+      for (j = 1; j <= nd; j++) {
+        fn = D[j]
+        if (fn in noteset) { if (owned(fn)) printf "DROP\t%s\n", fn }   # a child index now owns it
+        else printf "MAYBE_DROP\t%s\t%d\n", fn, owned(fn)
+      }
+      numeric_last = (last ~ /^-?[0-9]+$/)
+      for (j = 1; j <= n; j++) {
+        rel = R[j]
+        # Skip filenames containing tabs - they corrupt TSV state.
+        if (index(rel, "\t")) {
+          printf "vault_index_plan: skipping TSV-incompatible filename: %s\n", rel > "/dev/stderr"
+          continue
+        }
+        if (leaf_of(rel) == idxbase) continue
+        if (owned(rel)) continue
+        h = (rel in stored) ? stored[rel] : ""
+        if (h == "") { printf "ADD\t%s\n", rel; continue }          # coverage gap - name-only, no content read
+        stem = rel; sub(/\.md$/, "", stem)
+        if (!has_link(stem)) { printf "ADD\t%s\n", rel; continue }  # hashed but unlinked - state drifted ahead of INDEX
+        if (!hash_valid(h)) { printf "CHANGED\t%s\n", rel; continue } # malformed -> forced reconcile
+        # cold start / mtime candidate -> confirm by hash in the caller
+        if (last == "" || (numeric_last && M[j] + 0 > last + 0)) printf "CHECK\t%s\t%s\t%s\n", rel, h, P[j]
+      }
+    }
+  ' phase=notes - phase=state "$state_in" phase=idx "$idx_in" \
+  | while IFS="$tab" read -r action fn stored path; do
+      case "$action" in
+        DROP|ADD|CHANGED) printf '%s\t%s\n' "$action" "$fn" ;;
+        MAYBE_DROP)
+          if [ ! -f "$folder/$fn" ] || [ "$stored" = 1 ]; then printf 'DROP\t%s\n' "$fn"; fi ;;
+        CHECK)
+          [ -e "$path" ] || continue
+          if [ "$(note_hash "$path")" != "$stored" ]; then printf 'CHANGED\t%s\n' "$fn"; fi ;;
+      esac
+    done
 }
 
 _vault_index_apply_locked() {
@@ -200,14 +301,22 @@ _vault_index_apply_locked() {
   # point, so explicit cleanup before the function's output is equivalent and
   # portable across bash and zsh.
 
-  # Carry forward existing entries except those touched by the plan.
+  # Carry forward existing entries except those touched by the plan. One awk
+  # pass: a `grep` per state line was a fork per tracked note (#170). Fields
+  # are split the way a tab-IFS `read -r fn h` splits them.
   if [ -f "$state" ]; then
-    while IFS=$'\t' read -r fn h; do
-      case "$fn" in ''|\#*) continue ;; esac
-      if [ -z "$touched" ] || ! grep -qxF -- "$fn" <<<"$touched"; then
-        printf '%s\t%s\n' "$fn" "$h" >> "$tmp"
-      fi
-    done < "$state"
+    printf '%s\n' "$touched" | awk '
+      phase == "touched" { t[$0] = 1; next }
+      {
+        line = $0; sub(/^\t+/, "", line)
+        i = index(line, "\t")
+        if (i) { fn = substr(line, 1, i - 1); h = substr(line, i + 1); sub(/^\t+/, "", h); sub(/\t+$/, "", h) }
+        else { fn = line; h = "" }
+        if (fn == "" || substr(fn, 1, 1) == "#" || (fn in t)) next
+        printf "%s\t%s\n", fn, h
+      }
+    ' phase=touched - phase=state "$state" > "$tmp" \
+      || { rm -f "$tmp" "$tmp2"; return 1; }
   fi
   # Apply plan: ADD/CHANGED -> (re)write current hash; DROP -> omit.
   while IFS=$'\t' read -r action fn; do

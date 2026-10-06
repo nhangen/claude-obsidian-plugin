@@ -215,6 +215,11 @@ keeper_with_lock() {
 keeper_fault() {
   [ "${KEEPER_FAULT_INJECT:-}" = "$1" ] || return 0
   printf 'keeper: injected fault at %s\n' "$1" >&2
+  if [ "${KEEPER_FAULT_MODE:-}" = hang ]; then
+    # Stand-in for a step that outlives the caller's subprocess cap (#170):
+    # block until the caller kills the process group.
+    while :; do sleep 1; done
+  fi
   if [ "${KEEPER_FAULT_MODE:-}" = crash ]; then
     KEEPER_CRASH_AFTER_LOCK=1
   fi

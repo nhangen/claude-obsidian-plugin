@@ -92,6 +92,16 @@ keeper_emit_outcome() {
   keeper_print_outcome "$outcome" "$value"
 }
 
+# Progress markers for the MCP adapter, which kills a write that overruns its
+# subprocess cap. They say which steps had already landed, so a cut-off insert
+# whose note is on disk is reported as such instead of as an ambiguous timeout
+# a caller retries or rewrites by hand (#170). JSON format only, on stderr, so
+# text-mode output is unchanged.
+keeper_progress() {
+  [ "$KEEPER_FORMAT" = json ] || return 0
+  printf 'keeper-progress: %s\n' "$*" >&2
+}
+
 keeper_die() {
   printf 'keeper: %s\n' "$*" >&2
   [ -n "$KEEPER_ERROR_CODE" ] || KEEPER_ERROR_CODE=WRITE_FAILED
@@ -617,6 +627,7 @@ _cmd_insert_locked() {
     wrote_note=1
   fi
 
+  keeper_progress "note-written pending=index${sldate:+,daily-link}"
   if [ "$wrote_note" = 1 ]; then
     keeper_fault after_note \
       || { keeper_partial_locked "$target was written but INDEX and daily recovery remain"; return 2; }
@@ -627,6 +638,7 @@ _cmd_insert_locked() {
     keeper_partial_locked "$target was written but INDEX reconciliation is incomplete"
     return 2
   fi
+  keeper_progress index-written
   keeper_fault after_index \
     || { keeper_partial_locked "$target and INDEX were written but daily recovery may remain"; return 2; }
 
@@ -637,6 +649,7 @@ _cmd_insert_locked() {
       keeper_partial_locked "$target and INDEX were written but the daily backlink failed"
       return 2
     fi
+    keeper_progress daily-link-written
     keeper_fault after_daily \
       || { keeper_partial_locked "$target, INDEX, and daily backlink were written; recovery must verify them"; return 2; }
   fi

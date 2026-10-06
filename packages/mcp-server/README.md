@@ -139,6 +139,19 @@ retryable. Their recovery action requires manual verification of
 If `recovery.required` remains true, follow its action before changing the key
 or editing affected files manually.
 
+Each write runs the keeper under a per-call-type subprocess cap:
+`MCP_KEEPER_SAVE_TIMEOUT_MS` (default 25000) for `obsidian_keeper_save`, which
+also reconciles the folder INDEX, `MCP_DAILY_APPEND_TIMEOUT_MS` (default 10000)
+for `obsidian_daily_append`, and `MCP_COMMIT_META_TIMEOUT_MS` (default 5000)
+for `obsidian_commit_meta`. Values are milliseconds between 100 and 600000; an
+invalid value stops the server at startup. Keep the save cap below
+`MCP_HTTP_REQUEST_TIMEOUT_MS` on the HTTP transport. When a keeper save hits
+its cap after the note itself was written, the result is `SUBPROCESS_TIMEOUT`
+with `retryable: false`: `partial` with an idempotency key, `failed` without
+one. Its warnings and `recovery.action` name the unfinished step (`INDEX`, or
+the daily Session Link). Do not write the note again. Finish the named step,
+or retry with the same idempotency key after raising the cap.
+
 The `ask_vault_librarian` prompt is a bounded read-only MCP workflow over the
 taxonomy, librarian, pending, and search-preview surfaces. It does not invoke
 the existing librarian agent, whose query path may refresh INDEX links. The
