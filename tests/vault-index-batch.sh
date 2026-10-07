@@ -9,6 +9,9 @@
 # (whose plans also run under zsh). It also pins the process-count property,
 # the BSD stat path, and the failure modes.
 set -euo pipefail
+# `touch -t 197001010000` is local time: east of UTC it is a negative epoch,
+# which file_mtime rejects, so the fixture's stamps are read as UTC.
+export TZ=UTC
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 . "${ROOT_DIR}/scripts/lib/note-hash.sh"
 . "${ROOT_DIR}/scripts/lib/vault-index.sh"
@@ -144,26 +147,60 @@ done
 # --- the BSD stat spelling (macOS) gives the same plan -------------------------
 # A shim that rejects GNU `-c` and answers `-f` with %m/%z/%N, the way BSD stat
 # does. The flavor probe must pick it, and the plan must make one batched call.
-REAL_STAT="$(command -v stat)"
+# The shim never runs the real stat: it answers from a table of every file in
+# the fixture, recorded here with file_mtime (which reads either stat flavor)
+# and wc -c. Delegating to GNU `stat -c` made this pass only where the real
+# stat is GNU, and fail on macOS (#172). A path missing from the table is
+# unanswered, as BSD stat leaves a file it cannot read.
+STAT_TABLE="$TMP/stat-table"
+find "$F" -type f -print | while IFS= read -r p; do
+  mt="$(file_mtime "$p")" || fail "setup: no mtime for $p"
+  printf '%s\t%s\t%s\n' "$p" "$mt" "$(wc -c < "$p" | tr -d ' ')"
+done > "$STAT_TABLE"
 BSD="$TMP/bsd-bin"; mkdir -p "$BSD"
-cat > "$BSD/stat" <<EOF
-#!/usr/bin/env bash
-printf '%s\n' "\$1" >> "\$STAT_SHIM_LOG"
-[ "\$1" = -f ] || exit 1
-fmt="\$2"; shift 2; [ "\${1-}" = -- ] && shift
-rc=0
-for f in "\$@"; do
-  m="\$("$REAL_STAT" -c %Y -- "\$f" 2>/dev/null)" && z="\$("$REAL_STAT" -c %s -- "\$f" 2>/dev/null)" || { rc=1; continue; }
-  out="\${fmt//%m/"\$m"}"; out="\${out//%z/"\$z"}"; out="\${out//%N/"\$f"}"
-  printf '%s\n' "\$out"
-done
-exit \$rc
-EOF
+# shellcheck disable=SC2016  # the shim expands its own variables
+printf '%s\n' '#!/bin/sh' \
+  'printf "%s\n" "$1" >> "$STAT_SHIM_LOG"' \
+  '[ "$1" = -f ] || { printf "stat: illegal option -- %s\n" "${1#-}" >&2; exit 1; }' \
+  'fmt="$2"; shift 2; [ "${1-}" != -- ] || shift' \
+  'SHIM_FMT="$fmt" exec awk -F "\t" '"'"'
+    function fill(fmt, m, z, n,   out, i, c) {
+      out = ""
+      for (i = 1; i <= length(fmt); i++) {
+        c = substr(fmt, i, 1)
+        if (c != "%" || i == length(fmt)) { out = out c; continue }
+        c = substr(fmt, ++i, 1)
+        if (c == "m") out = out m; else if (c == "z") out = out z
+        else if (c == "N") out = out n; else if (c == "%") out = out "%"; else out = out "%" c
+      }
+      return out
+    }
+    BEGIN { for (i = 2; i < ARGC; i++) want[i - 1] = ARGV[i]; nwant = ARGC - 2; ARGC = 2 }
+    { s = $(NF - 1); z = $NF; p = substr($0, 1, length($0) - length(s) - length(z) - 2)
+      mtime[p] = s; size[p] = z }
+    END {
+      rc = 0
+      for (i = 1; i <= nwant; i++) {
+        p = want[i]
+        if (p in mtime) print fill(ENVIRON["SHIM_FMT"], mtime[p], size[p], p)
+        else { printf "stat: %s: stat: No such file or directory\n", p > "/dev/stderr"; rc = 1 }
+      }
+      exit rc
+    }'"'"' "$STAT_SHIM_TABLE" "$@"' > "$BSD/stat"
 chmod +x "$BSD/stat"
-BSDPLAN="$(unset VAULT_INDEX_STAT_FLAVOR; STAT_SHIM_LOG="$TMP/stat.log" PATH="$BSD:$PATH" vault_index_plan "$F" "$IDX")"
-[ "$BSDPLAN" = "$PLAN" ] || fail "BSD stat: plan differs:"$'\n'"$BSDPLAN"
+bsd_run() {  # bsd_run <log> <cmd...>: run with the shim as the only stat, flavor unset
+  ( unset VAULT_INDEX_STAT_FLAVOR; STAT_SHIM_LOG="$1" STAT_SHIM_TABLE="$STAT_TABLE" PATH="$BSD:$PATH" "${@:2}" )
+}
+BSDPLAN="$(bsd_run "$TMP/stat.log" vault_index_plan "$F" "$IDX" 2>"$TMP/bsd.err")" || fail "BSD stat: plan failed: $(cat "$TMP/bsd.err")"
+[ "$BSDPLAN" = "$PLAN" ] || fail "BSD stat: plan differs:"$'\n'"$BSDPLAN"$'\n'"$(cat "$TMP/bsd.err")"
+[ ! -s "$TMP/bsd.err" ] || fail "BSD stat: the shim left notes unanswered: $(cat "$TMP/bsd.err")"
 [ "$(grep -cx -- '-f' "$TMP/stat.log")" = 1 ] || fail "BSD stat: expected one batched -f call, log:"$'\n'"$(cat "$TMP/stat.log")"
 grep -qx -- '-c' "$TMP/stat.log" || fail "BSD stat: the GNU spelling was never probed"
+# Sizes (%z) for the hash batch: the same records as with the real stat.
+BSDHASH="$(bsd_run "$TMP/stat-size.log" vault_index_hash_plan "$F" "$PLAN" 2>"$TMP/bsd.err")" || fail "BSD stat: hash plan failed: $(cat "$TMP/bsd.err")"
+[ "$BSDHASH" = "$(vault_index_hash_plan "$F" "$PLAN")" ] || fail "BSD stat: hash plan differs:"$'\n'"$BSDHASH"
+! grep -q '^MISS' <<<"$BSDHASH" || fail "BSD stat: sizes left unanswered:"$'\n'"$BSDHASH"
+[ "$(grep -cx -- '-f' "$TMP/stat-size.log")" = 1 ] || fail "BSD stat: expected one batched size call, log:"$'\n'"$(cat "$TMP/stat-size.log")"
 
 # apply over the same folder: links land vault-relative, hashes are valid.
 ADDED="$(vault_index_apply "$V" "$F" "$IDX")"
