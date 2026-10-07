@@ -236,6 +236,19 @@ test("stdio server exposes read-only tools with clean MCP framing", async (t) =>
   assert.equal(search.result?.structuredContent?.matches[0]?.path, "mcp-note.md");
   assert.match(search.result?.content?.[0]?.text ?? "", /mcp-note\.md/);
 
+  const tokenSearch = await server.request(
+    {
+      jsonrpc: "2.0",
+      id: 71,
+      method: "tools/call",
+      params: { name: "obsidian_find_notes", arguments: { query: "mcp searchable fixture" } },
+    },
+    71,
+  );
+  assert.equal(tokenSearch.result?.isError, false);
+  assert.equal(tokenSearch.result?.structuredContent?.matches[0]?.path, "mcp-note.md");
+  assert.match(tokenSearch.result?.structuredContent?.matches[0]?.preview ?? "", /fixture is searchable/);
+
   const metadata = await server.request(
     {
       jsonrpc: "2.0",

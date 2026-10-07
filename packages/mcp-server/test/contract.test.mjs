@@ -76,7 +76,7 @@ test("pins tool surface including write tools", () => {
     idempotentHint: false,
     openWorldHint: false,
   });
-  assert.deepEqual(contract.tools.obsidian_keeper_save.inputSchema.required, ["title", "body", "resolved", "folder_hint"]);
+  assert.deepEqual(contract.tools.obsidian_keeper_save.inputSchema.required, ["body", "resolved"]);
   assert.deepEqual(contract.tools.obsidian_keeper_save.inputSchema.properties.resolved, { type: "boolean", const: true });
   assert.ok(!contract.tools.obsidian_keeper_save.inputSchema.required.includes("idempotency_key"));
   assert.ok(!contract.tools.obsidian_daily_append.inputSchema.required.includes("idempotency_key"));

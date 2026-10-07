@@ -424,6 +424,148 @@ test("stdio keeper save does not require daily_path", async (t) => {
   assert.match(savedNote, /Independent keeper save/);
 });
 
+test("stdio keeper save supports target_path and session_link_date", async (t) => {
+  const { root, vaultPath, configPath } = await createFixtureVault();
+  const server = startStdioServer(configPath);
+
+  t.after(async () => {
+    if (!server.child.killed) server.child.stdin.end();
+    await once(server.child, "close").catch(() => {});
+    await rm(root, { recursive: true, force: true });
+  });
+
+  await server.request({
+    jsonrpc: "2.0", id: 1, method: "initialize",
+    params: { protocolVersion: "2025-11-25", capabilities: {}, clientInfo: { name: "test", version: "1.0" } },
+  }, 1);
+  server.notification({ jsonrpc: "2.0", method: "notifications/initialized" });
+
+  const response = await server.request({
+    jsonrpc: "2.0", id: 2, method: "tools/call",
+    params: {
+      name: "obsidian_keeper_save",
+      arguments: {
+        target_path: "Projects/Development/my-tool/Notes.md",
+        body: "# Tool Notes\nImportant content here.\n",
+        resolved: true,
+        session_link_date: "2026-10-07",
+        idempotency_key: "save-with-target-path-1",
+      },
+    },
+  }, 2);
+
+  assert.equal(response.result.isError, false);
+  assert.equal(response.result.structuredContent.status, "committed");
+  assert.equal(response.result.structuredContent.path, "Projects/Development/my-tool/Notes.md");
+  assert.deepEqual(response.result.structuredContent.affected_paths, [
+    "Projects/Development/my-tool/Notes.md",
+    "Projects/Development/my-tool/INDEX.md",
+    "Daily/2026-10-07.md",
+  ]);
+
+  const note = await readFile(join(vaultPath, "Projects", "Development", "my-tool", "Notes.md"), "utf8");
+  assert.match(note, /Important content here/);
+  const daily = await readFile(join(vaultPath, "Daily", "2026-10-07.md"), "utf8");
+  assert.match(daily, /\[\[Projects\/Development\/my-tool\/Notes\]\]/);
+});
+
+test("stdio keeper save supports append mode with section and skip_if_hash", async (t) => {
+  const { root, vaultPath, configPath } = await createFixtureVault();
+  const server = startStdioServer(configPath);
+
+  t.after(async () => {
+    if (!server.child.killed) server.child.stdin.end();
+    await once(server.child, "close").catch(() => {});
+    await rm(root, { recursive: true, force: true });
+  });
+
+  await server.request({
+    jsonrpc: "2.0", id: 1, method: "initialize",
+    params: { protocolVersion: "2025-11-25", capabilities: {}, clientInfo: { name: "test", version: "1.0" } },
+  }, 1);
+  server.notification({ jsonrpc: "2.0", method: "notifications/initialized" });
+
+  const sha = "a1b2c3d4e5f67890";
+  const first = await server.request({
+    jsonrpc: "2.0", id: 2, method: "tools/call",
+    params: {
+      name: "obsidian_keeper_save",
+      arguments: {
+        target_path: "Projects/Development/nhangen/my-repo/2026-10-07.md",
+        body: "- commit message details",
+        resolved: true,
+        mode: "append",
+        section: `### ${sha} — feat: new feature`,
+        skip_if_hash: sha,
+        idempotency_key: `keeper-append-${sha}`,
+      },
+    },
+  }, 2);
+
+  assert.equal(first.result.isError, false);
+  assert.equal(first.result.structuredContent.status, "committed");
+  assert.equal(first.result.structuredContent.path, "Projects/Development/nhangen/my-repo/2026-10-07.md");
+  assert.deepEqual(first.result.structuredContent.affected_paths, ["Projects/Development/nhangen/my-repo/2026-10-07.md"]);
+
+  // Second write with same skip_if_hash should be skipped
+  const second = await server.request({
+    jsonrpc: "2.0", id: 3, method: "tools/call",
+    params: {
+      name: "obsidian_keeper_save",
+      arguments: {
+        target_path: "Projects/Development/nhangen/my-repo/2026-10-07.md",
+        body: "- duplicate commit message details",
+        resolved: true,
+        mode: "append",
+        section: `### ${sha} — feat: new feature`,
+        skip_if_hash: sha,
+        idempotency_key: `keeper-append-${sha}-retry`,
+      },
+    },
+  }, 3);
+
+  assert.equal(second.result.isError, false);
+  assert.equal(second.result.structuredContent.status, "skipped");
+});
+
+test("stdio daily append supports target_path override without daily_path", async (t) => {
+  const { root, vaultPath, configPath } = await createFixtureVault();
+  const config = await readFile(configPath, "utf8");
+  await writeFile(configPath, config.replace(/^daily_path:.*\n/m, ""), "utf8");
+  const server = startStdioServer(configPath);
+
+  t.after(async () => {
+    if (!server.child.killed) server.child.stdin.end();
+    await once(server.child, "close").catch(() => {});
+    await rm(root, { recursive: true, force: true });
+  });
+
+  await server.request({
+    jsonrpc: "2.0", id: 1, method: "initialize",
+    params: { protocolVersion: "2025-11-25", capabilities: {}, clientInfo: { name: "test", version: "1.0" } },
+  }, 1);
+  server.notification({ jsonrpc: "2.0", method: "notifications/initialized" });
+
+  const response = await server.request({
+    jsonrpc: "2.0", id: 2, method: "tools/call",
+    params: {
+      name: "obsidian_daily_append",
+      arguments: {
+        target_path: "Custom/Target/Append.md",
+        content: "Appended to explicit target path",
+        section: "## Custom Section",
+        idempotency_key: "daily-append-target-path-1",
+      },
+    },
+  }, 2);
+
+  assert.equal(response.result.isError, false);
+  assert.equal(response.result.structuredContent.status, "committed");
+  assert.equal(response.result.structuredContent.path, "Custom/Target/Append.md");
+  const note = await readFile(join(vaultPath, "Custom", "Target", "Append.md"), "utf8");
+  assert.match(note, /Appended to explicit target path/);
+});
+
 test("stdio server executes obsidian_daily_append with skip_if_hash idempotency", async (t) => {
   const { root, vaultPath, configPath } = await createFixtureVault();
   const server = startStdioServer(configPath);

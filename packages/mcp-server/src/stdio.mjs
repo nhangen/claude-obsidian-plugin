@@ -200,16 +200,34 @@ async function collectMarkdownFiles(root, current = root, files = [], signal, st
   return files;
 }
 
-function preview(contents, query) {
+function preview(contents, query, tokens = []) {
   const lowered = query.toLowerCase();
   const lines = contents.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
-  const relevant = lines.find((line) => line.toLowerCase().includes(lowered));
-  return (relevant || lines[0] || "").slice(0, maxPreviewLength);
+  const exact = lines.find((line) => line.toLowerCase().includes(lowered));
+  if (exact) return exact.slice(0, maxPreviewLength);
+  if (tokens.length > 0) {
+    let bestLine = lines[0] || "";
+    let bestCount = 0;
+    for (const line of lines) {
+      const loweredLine = line.toLowerCase();
+      let count = 0;
+      for (const token of tokens) {
+        if (loweredLine.includes(token)) count += 1;
+      }
+      if (count > bestCount) {
+        bestCount = count;
+        bestLine = line;
+      }
+    }
+    return bestLine.slice(0, maxPreviewLength);
+  }
+  return (lines[0] || "").slice(0, maxPreviewLength);
 }
 
 async function findNotes({ query }, vaultPath, signal) {
   throwIfAborted(signal);
   const lowered = query.toLowerCase();
+  const tokens = lowered.trim().split(/\s+/).filter(Boolean);
   const files = await collectMarkdownFiles(vaultPath, vaultPath, [], signal);
   const matches = [];
   let nextIndex = 0;
@@ -222,22 +240,51 @@ async function findNotes({ query }, vaultPath, signal) {
       if (contents === null) continue;
       const loweredContents = contents.toLowerCase();
       const relativePath = relative(vaultPath, path).split("\\").join("/");
-      const filenameMatch = relativePath.toLowerCase().includes(lowered);
-      const contentMatch = loweredContents.includes(lowered);
-      const tagLine = contents.match(/^tags:.*$/im)?.[0] || "";
-      const tagMatch = tagLine.toLowerCase().includes(lowered);
-      if (!filenameMatch && !contentMatch && !tagMatch) continue;
-      const occurrences = loweredContents.split(lowered).length - 1;
+      const loweredPath = relativePath.toLowerCase();
+      const tagLine = contents.match(/^tags:.*$/im)?.[0]?.toLowerCase() || "";
+
+      let matchedTokens = 0;
+      let tokenFrequency = 0;
+      for (const token of tokens) {
+        const inPath = loweredPath.includes(token);
+        const inTag = tagLine.includes(token);
+        const inContent = loweredContents.includes(token);
+        if (inPath || inTag || inContent) {
+          matchedTokens += 1;
+          if (inContent) {
+            tokenFrequency += loweredContents.split(token).length - 1;
+          }
+        }
+      }
+
+      const allTokensMatch = tokens.length > 0 && matchedTokens === tokens.length;
+      const exactPath = loweredPath.includes(lowered);
+      const exactTag = tagLine.includes(lowered);
+      const exactContent = loweredContents.includes(lowered);
+      const exactOccurrences = exactContent ? loweredContents.split(lowered).length - 1 : 0;
+
+      if (matchedTokens === 0 && !exactPath && !exactTag && !exactContent) continue;
+
+      let score = matchedTokens * 100_000 + tokenFrequency * 10;
+      if (allTokensMatch) score += 10_000_000;
+      if (exactPath) score += 20_000_000;
+      if (exactTag) score += 5_000_000;
+      if (exactContent) score += 2_000_000 + exactOccurrences * 100;
+
       matches.push({
         path: relativePath,
-        preview: preview(contents, query),
-        score: (filenameMatch ? 1_000_000 : 0) + (tagMatch ? 10_000 : 0) + occurrences * 100,
+        allTokensMatch,
+        preview: preview(contents, query, tokens),
+        score,
       });
     }
   }
   await Promise.all(Array.from({ length: Math.min(searchConcurrency, files.length) }, () => searchWorker()));
-  matches.sort((left, right) => right.score - left.score);
-  return { matches: matches.slice(0, maxResults).map(({ path, preview: text }) => ({ path, preview: text })) };
+  const filtered = matches.some((m) => m.allTokensMatch)
+    ? matches.filter((m) => m.allTokensMatch)
+    : matches;
+  filtered.sort((left, right) => right.score - left.score);
+  return { matches: filtered.slice(0, maxResults).map(({ path, preview: text }) => ({ path, preview: text })) };
 }
 
 async function terminateChild(child) {
@@ -386,15 +433,44 @@ function emptyWriteOutcome(requestId, idempotencyKey, path, affectedPaths) {
   };
 }
 
-function normalizedKeeperSaveTarget(title, folderHint) {
-  const cleanTitle = typeof title === "string" ? title.trim().replace(/\.md$/i, "") : "";
-  const targetFolder = typeof folderHint === "string" ? folderHint.trim() : "";
-  const folderSegments = targetFolder.split("/");
-  if (!cleanTitle || /[\\/]/.test(cleanTitle) || !targetFolder || targetFolder.includes("\\")
-    || targetFolder.startsWith("/") || targetFolder.endsWith("/")
-    || folderSegments.some((segment) => !segment || segment === "." || segment === "..")) return null;
-  const targetPath = `${targetFolder}/${cleanTitle}.md`;
-  return { cleanTitle, targetFolder, targetPath, affectedPaths: [targetPath, `${targetFolder}/INDEX.md`] };
+function normalizedKeeperSaveTarget(title, folderHint, targetPathInput, sessionLinkDate, dailyPath = "Daily") {
+  let targetPath = "";
+  let cleanTitle = "";
+  let targetFolder = "";
+  let affectedPaths = [];
+
+  if (typeof targetPathInput === "string" && targetPathInput.trim()) {
+    const rawTarget = targetPathInput.trim().replace(/^\/+/, "");
+    const segments = rawTarget.split("/");
+    if (rawTarget.includes("\\") || rawTarget.startsWith("/") || rawTarget.endsWith("/")
+      || segments.some((segment) => !segment || segment === "." || segment === "..")) {
+      return null;
+    }
+    targetPath = rawTarget.endsWith(".md") ? rawTarget : `${rawTarget}.md`;
+    const lastSlash = targetPath.lastIndexOf("/");
+    targetFolder = lastSlash >= 0 ? targetPath.slice(0, lastSlash) : "";
+    cleanTitle = (typeof title === "string" && title.trim())
+      ? title.trim().replace(/\.md$/i, "")
+      : (lastSlash >= 0 ? targetPath.slice(lastSlash + 1) : targetPath).replace(/\.md$/i, "");
+  } else {
+    cleanTitle = typeof title === "string" ? title.trim().replace(/\.md$/i, "") : "";
+    targetFolder = typeof folderHint === "string" ? folderHint.trim() : "";
+    const folderSegments = targetFolder.split("/");
+    if (!cleanTitle || /[\\/]/.test(cleanTitle) || !targetFolder || targetFolder.includes("\\")
+      || targetFolder.startsWith("/") || targetFolder.endsWith("/")
+      || folderSegments.some((segment) => !segment || segment === "." || segment === "..")) return null;
+    targetPath = `${targetFolder}/${cleanTitle}.md`;
+  }
+
+  const indexFile = targetFolder ? `${targetFolder}/INDEX.md` : "INDEX.md";
+  affectedPaths = [targetPath, indexFile];
+
+  if (typeof sessionLinkDate === "string" && sessionLinkDate.trim()) {
+    const cleanDaily = (dailyPath || "Daily").replace(/\/+$/, "");
+    affectedPaths.push(`${cleanDaily}/${sessionLinkDate.trim()}.md`);
+  }
+
+  return { cleanTitle, targetFolder, targetPath, affectedPaths };
 }
 
 // A partial outcome without an idempotency key cannot be retried safely, so it
@@ -451,13 +527,30 @@ function writeRequestFallback(toolName, args, configuration) {
     ? values.idempotency_key
     : "";
   if (toolName === "obsidian_keeper_save") {
-    const target = normalizedKeeperSaveTarget(values.title, values.folder_hint);
+    if (values.mode === "append") {
+      let appendTarget = "";
+      if (typeof values.target_path === "string" && values.target_path.trim()) {
+        const raw = values.target_path.trim().replace(/^\/+/, "");
+        appendTarget = raw.endsWith(".md") ? raw : `${raw}.md`;
+      } else if (values.title && values.folder_hint) {
+        const t = normalizedKeeperSaveTarget(values.title, values.folder_hint);
+        appendTarget = t?.targetPath || "";
+      }
+      return emptyWriteOutcome(requestId, idempotencyKey, appendTarget, appendTarget ? [appendTarget] : []);
+    }
+    const target = normalizedKeeperSaveTarget(values.title, values.folder_hint, values.target_path, values.session_link_date, configuration.dailyPath);
     return emptyWriteOutcome(requestId, idempotencyKey, target?.targetPath || "", target?.affectedPaths || []);
   }
-  const date = typeof values.date === "string" && /^\d{4}-\d{2}-\d{2}$/.test(values.date)
-    ? values.date
-    : new Date().toISOString().slice(0, 10);
-  const path = configuration.dailyPath ? `${configuration.dailyPath}/${date}.md` : "";
+  let path = "";
+  if (typeof values.target_path === "string" && values.target_path.trim()) {
+    const raw = values.target_path.trim().replace(/^\/+/, "");
+    path = raw.endsWith(".md") ? raw : `${raw}.md`;
+  } else {
+    const date = typeof values.date === "string" && /^\d{4}-\d{2}-\d{2}$/.test(values.date)
+      ? values.date
+      : new Date().toISOString().slice(0, 10);
+    path = configuration.dailyPath ? `${configuration.dailyPath}/${date}.md` : "";
+  }
   return emptyWriteOutcome(requestId, idempotencyKey, path, path ? [path] : []);
 }
 
@@ -721,10 +814,46 @@ async function executeKeeperWrite(args, bodyContent, signal, fallback, timeoutMs
 
 // Exported for tests: the error detail it rejects with is not part of the MCP
 // result, so only an in-process call can check it.
-export async function keeperSave({ title, body, folder_hint, type, links, idempotency_key, request_id }, vaultPath, signal) {
-  const target = normalizedKeeperSaveTarget(title, folder_hint);
+export async function keeperSave({
+  title, body, folder_hint, type, links, idempotency_key, request_id,
+  target_path, mode = "insert", section, session_link_date, skip_if_hash,
+}, vaultPath, signal, dailyPath = "Daily") {
+  const effectiveMode = mode || "insert";
+  const requestId = request_id || randomUUID();
+  const idempotencyKey = idempotency_key || "";
+
+  if (effectiveMode === "append") {
+    let targetPath = "";
+    if (typeof target_path === "string" && target_path.trim()) {
+      const raw = target_path.trim().replace(/^\/+/, "");
+      if (raw.includes("\\") || raw.startsWith("/") || raw.endsWith("/")
+        || raw.split("/").some((segment) => !segment || segment === "." || segment === "..")) {
+        throw codedError("PATH_INVALID", "keeper save target is invalid");
+      }
+      targetPath = raw.endsWith(".md") ? raw : `${raw}.md`;
+    } else {
+      const target = normalizedKeeperSaveTarget(title, folder_hint);
+      if (!target) throw codedError("PATH_INVALID", "keeper save target is invalid");
+      targetPath = target.targetPath;
+    }
+
+    const fallback = emptyWriteOutcome(requestId, idempotencyKey, targetPath, [targetPath]);
+    const args = ["append", "--vault", vaultPath, "--target", targetPath, "--request-id", requestId, "--idempotency-key", idempotencyKey];
+    if (section) args.push("--section", section);
+    if (skip_if_hash) args.push("--skip-if-hash", skip_if_hash);
+    return executeKeeperWrite(
+      args,
+      body,
+      signal,
+      fallback,
+      subprocessTimeouts.keeperSave,
+      subprocessTimeoutSettings.keeperSave,
+    );
+  }
+
+  const target = normalizedKeeperSaveTarget(title, folder_hint, target_path, session_link_date, dailyPath);
   if (!target) throw codedError("PATH_INVALID", "keeper save target is invalid");
-  const { cleanTitle, targetFolder, targetPath, affectedPaths } = target;
+  const { cleanTitle, targetPath, affectedPaths } = target;
 
   let formattedBody = body;
   const headerLines = [];
@@ -734,11 +863,14 @@ export async function keeperSave({ title, body, folder_hint, type, links, idempo
     formattedBody = `---\n${headerLines.join("\n")}\n---\n\n${body}`;
   }
 
-  const requestId = request_id || randomUUID();
-  const idempotencyKey = idempotency_key || "";
   const fallback = emptyWriteOutcome(requestId, idempotencyKey, targetPath, affectedPaths);
+  const args = ["insert", "--vault", vaultPath, "--target", targetPath, "--title", cleanTitle, "--request-id", requestId, "--idempotency-key", idempotencyKey];
+  if (session_link_date) {
+    args.push("--session-link-date", session_link_date);
+    if (dailyPath) args.push("--daily-path", dailyPath.replace(/\/+$/, ""));
+  }
   return executeKeeperWrite(
-    ["insert", "--vault", vaultPath, "--target", targetPath, "--title", cleanTitle, "--request-id", requestId, "--idempotency-key", idempotencyKey],
+    args,
     formattedBody,
     signal,
     fallback,
@@ -747,9 +879,19 @@ export async function keeperSave({ title, body, folder_hint, type, links, idempo
   );
 }
 
-async function dailyAppend({ content, section, date, skip_if_hash, idempotency_key, request_id }, vaultPath, dailyPath, signal) {
-  const targetDate = date || new Date().toISOString().slice(0, 10);
-  const targetPath = `${dailyPath.replace(/\/+$/, "")}/${targetDate}.md`;
+async function dailyAppend({ content, section, date, skip_if_hash, idempotency_key, request_id, target_path }, vaultPath, dailyPath, signal) {
+  let targetPath = "";
+  if (typeof target_path === "string" && target_path.trim()) {
+    const raw = target_path.trim().replace(/^\/+/, "");
+    if (raw.includes("\\") || raw.startsWith("/") || raw.endsWith("/")
+      || raw.split("/").some((segment) => !segment || segment === "." || segment === "..")) {
+      throw codedError("PATH_INVALID", "daily append target is invalid");
+    }
+    targetPath = raw.endsWith(".md") ? raw : `${raw}.md`;
+  } else {
+    const targetDate = date || new Date().toISOString().slice(0, 10);
+    targetPath = `${dailyPath.replace(/\/+$/, "")}/${targetDate}.md`;
+  }
   const requestId = request_id || randomUUID();
   const idempotencyKey = idempotency_key || "";
   const args = ["append", "--vault", vaultPath, "--target", targetPath, "--request-id", requestId, "--idempotency-key", idempotencyKey];
@@ -938,17 +1080,47 @@ const metadataInput = z.strictObject({ repository: nonBlankText(maxRepositoryPat
 const safeText = (max) => z.string().max(max).regex(/^[^\u0000-\u001F\u007F]*$/);
 const noteTitle = z.string().trim().min(1).max(240).regex(/^[^\/\\\u0000-\u001F\u007F]*$/);
 const safeFolder = z.string().trim().min(1).max(1024).regex(/^(?!\.{1,2}(?:\/|$))[^\\/\u0000-\u001F\u007F]+(?:\/(?!\.{1,2}(?:\/|$))[^\\/\u0000-\u001F\u007F]+)*$/);
+const safePath = z.string().trim().min(1).max(1024).regex(/^(?!\.{1,2}(?:\/|$))[^\\/\u0000-\u001F\u007F]+(?:\/(?!\.{1,2}(?:\/|$))[^\\/\u0000-\u001F\u007F]+)*$/);
 const keeperSaveInput = z.strictObject({
-  title: safeText(240).trim().min(1).refine((value) => Boolean(normalizedKeeperSaveTarget(value, "Inbox")), "title must be a note name without path separators"),
+  title: safeText(240).trim().optional(),
   body: z.string().min(1).max(65536),
   resolved: z.literal(true),
-  folder_hint: safeText(1024).trim().min(1),
+  folder_hint: safeText(1024).trim().optional(),
+  target_path: safeText(1024).trim().optional(),
+  mode: z.enum(["insert", "append"]).optional(),
+  section: safeText(240).optional(),
+  session_link_date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+  skip_if_hash: z.string().min(7).max(64).regex(/^[0-9a-fA-F]+$/).optional(),
+  type: safeText(100).optional(),
+  links: z.array(safeText(2048)).max(20).optional(),
+  idempotency_key: z.string().min(1).max(240).regex(/^[A-Za-z0-9._:-]+$/).optional(),
+  request_id: z.string().min(1).max(240).regex(/^[A-Za-z0-9._:-]+$/).optional(),
+}).superRefine((data, ctx) => {
+  const hasTarget = Boolean(data.target_path && data.target_path.length > 0);
+  const hasFolder = Boolean(data.folder_hint && data.folder_hint.length > 0);
+  const hasTitle = Boolean(data.title && data.title.length > 0);
+  if (!hasTarget && (!hasFolder || (!hasTitle && data.mode !== "append"))) {
+    ctx.addIssue({
+      code: "custom",
+      message: "either target_path or folder_hint (and title) must be provided",
+    });
+  }
+});
+const keeperSaveAdvertisedInput = z.strictObject({
+  title: noteTitle.optional(),
+  body: z.string().min(1).max(65536),
+  resolved: z.literal(true),
+  folder_hint: safeFolder.optional(),
+  target_path: safePath.optional(),
+  mode: z.enum(["insert", "append"]).optional(),
+  section: safeText(240).optional(),
+  session_link_date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+  skip_if_hash: z.string().min(7).max(64).regex(/^[0-9a-fA-F]+$/).optional(),
   type: safeText(100).optional(),
   links: z.array(safeText(2048)).max(20).optional(),
   idempotency_key: z.string().min(1).max(240).regex(/^[A-Za-z0-9._:-]+$/).optional(),
   request_id: z.string().min(1).max(240).regex(/^[A-Za-z0-9._:-]+$/).optional(),
 });
-const keeperSaveAdvertisedInput = keeperSaveInput.extend({ title: noteTitle, folder_hint: safeFolder });
 
 const dailyAppendInput = z.strictObject({
   content: z.string().min(1).max(65536),
@@ -957,6 +1129,7 @@ const dailyAppendInput = z.strictObject({
   skip_if_hash: z.string().min(7).max(64).regex(/^[0-9a-fA-F]+$/).optional(),
   idempotency_key: z.string().min(1).max(240).regex(/^[A-Za-z0-9._:-]+$/).optional(),
   request_id: z.string().min(1).max(240).regex(/^[A-Za-z0-9._:-]+$/).optional(),
+  target_path: safePath.optional(),
 });
 
 const readToolAnnotations = {
@@ -1047,7 +1220,7 @@ export function createServer({ supportedProtocolVersions = protocolVersions, sco
       try {
         const input = parseToolInput(keeperSaveInput, args);
         if (requireWriteIdempotency && !input.idempotency_key) throw codedError("INVALID_INPUT", "idempotency_key is required for remote writes");
-        return successResult(await keeperSave({ ...input, request_id: input.request_id || fallback.request_id }, configuration.vaultPath, ctx.mcpReq.signal));
+        return successResult(await keeperSave({ ...input, request_id: input.request_id || fallback.request_id }, configuration.vaultPath, ctx.mcpReq.signal, configuration.dailyPath));
       } catch (error) {
         return writeErrorResult(error, fallback);
       }
@@ -1065,8 +1238,10 @@ export function createServer({ supportedProtocolVersions = protocolVersions, sco
     async (args, ctx) => {
       const fallback = writeRequestFallback("obsidian_daily_append", args, configuration);
       try {
-        requireDailyWriteConfiguration(configuration);
         const input = parseToolInput(dailyAppendInput, args);
+        if (!input.target_path) {
+          requireDailyWriteConfiguration(configuration);
+        }
         if (requireWriteIdempotency && !input.idempotency_key) throw codedError("INVALID_INPUT", "idempotency_key is required for remote writes");
         return successResult(await dailyAppend({ ...input, request_id: input.request_id || fallback.request_id }, configuration.vaultPath, configuration.dailyPath, ctx.mcpReq.signal));
       } catch (error) {
