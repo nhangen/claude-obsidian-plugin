@@ -9,8 +9,9 @@
 # (whose plans also run under zsh). It also pins the process-count property,
 # the BSD stat path, and the failure modes.
 set -euo pipefail
-# `touch -t 197001010000` is local time: east of UTC it is a negative epoch,
-# which file_mtime rejects, so the fixture's stamps are read as UTC.
+# touch -t reads its stamp as local time, so east of UTC 197001010000 is a
+# negative epoch, which file_mtime rejects. The zone is pinned so every
+# touch -t stamp in this file is UTC.
 export TZ=UTC
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 . "${ROOT_DIR}/scripts/lib/note-hash.sh"
@@ -107,8 +108,8 @@ printf 'edited, more\n' >> "$F/edited.md"
 printf 'equal, more\n' >> "$F/equal.md"
 find "$F" -name '*.md' -exec touch -h -t 197001010000 {} +
 touch -t 203001010000 "$F/edited.md" "$F/bumped.md"
-EQUAL_MTIME="$(file_mtime "$F/equal.md")"
-TZ=UTC touch -t 197001010016.40 "$F/equal.md"          # epoch 1000 exactly
+EQUAL_MTIME="$(file_mtime "$F/equal.md")" || fail "setup: no mtime for equal.md"
+touch -t 197001010016.40 "$F/equal.md"                 # epoch 1000 exactly (TZ=UTC)
 [ "$(file_mtime "$F/equal.md")" = 1000 ] || fail "setup: equal.md mtime is $(file_mtime "$F/equal.md"), not 1000 ($EQUAL_MTIME before)"
 
 same_as_legacy "rules" "$V" "Pro\\jects"
@@ -147,16 +148,29 @@ done
 # --- the BSD stat spelling (macOS) gives the same plan -------------------------
 # A shim that rejects GNU `-c` and answers `-f` with %m/%z/%N, the way BSD stat
 # does. The flavor probe must pick it, and the plan must make one batched call.
-# The shim never runs the real stat: it answers from a table of every file in
-# the fixture, recorded here with file_mtime (which reads either stat flavor)
-# and wc -c. Delegating to GNU `stat -c` made this pass only where the real
-# stat is GNU, and fail on macOS (#172). A path missing from the table is
-# unanswered, as BSD stat leaves a file it cannot read.
+# The shim never runs the real stat: it answers from a table of every regular
+# file under the folder, recorded with file_mtime (which reads either stat
+# flavor) and wc -c. It must not depend on the host's stat flavor, so the test
+# means the same on Linux and macOS. It checks the BSD code path's plumbing
+# with recorded values, not real BSD stat output.
+#
+# A path missing from the table goes unanswered, as BSD stat leaves a file it
+# cannot read. The lib discards the shim's own "No such file" stderr
+# (vault_index_stat_batch runs `stat ... 2>/dev/null`), and the plan's "no
+# mtime for N of M" warning only fires past a 5% share. So the shim also
+# appends every path it answers to $STAT_SHIM_LOG.answered and every path it
+# cannot answer to $STAT_SHIM_LOG.miss: the tests below require no misses and
+# an answer for exactly the paths the lib needed.
+stat_table() {  # stat_table <dir>: "<path>\t<mtime>\t<size>" per regular file
+  find "$1" -type f -print | while IFS= read -r p; do
+    mt="$(file_mtime "$p")" || fail "setup: no mtime for $p"
+    sz="$(wc -c < "$p" | tr -d ' ')"
+    case "$sz" in ''|*[!0-9]*) fail "setup: no size for $p: '$sz'" ;; esac
+    printf '%s\t%s\t%s\n' "$p" "$mt" "$sz"
+  done
+}
 STAT_TABLE="$TMP/stat-table"
-find "$F" -type f -print | while IFS= read -r p; do
-  mt="$(file_mtime "$p")" || fail "setup: no mtime for $p"
-  printf '%s\t%s\t%s\n' "$p" "$mt" "$(wc -c < "$p" | tr -d ' ')"
-done > "$STAT_TABLE"
+stat_table "$F" > "$STAT_TABLE" || fail "setup: could not build the stat table for $F"
 BSD="$TMP/bsd-bin"; mkdir -p "$BSD"
 # shellcheck disable=SC2016  # the shim expands its own variables
 printf '%s\n' '#!/bin/sh' \
@@ -179,27 +193,44 @@ printf '%s\n' '#!/bin/sh' \
     { s = $(NF - 1); z = $NF; p = substr($0, 1, length($0) - length(s) - length(z) - 2)
       mtime[p] = s; size[p] = z }
     END {
-      rc = 0
+      rc = 0; ans = ENVIRON["STAT_SHIM_LOG"] ".answered"; miss = ENVIRON["STAT_SHIM_LOG"] ".miss"
       for (i = 1; i <= nwant; i++) {
         p = want[i]
-        if (p in mtime) print fill(ENVIRON["SHIM_FMT"], mtime[p], size[p], p)
-        else { printf "stat: %s: stat: No such file or directory\n", p > "/dev/stderr"; rc = 1 }
+        if (p in mtime) { print fill(ENVIRON["SHIM_FMT"], mtime[p], size[p], p); print p >> ans }
+        else { print p >> miss; printf "stat: %s: stat: No such file or directory\n", p > "/dev/stderr"; rc = 1 }
       }
       exit rc
     }'"'"' "$STAT_SHIM_TABLE" "$@"' > "$BSD/stat"
 chmod +x "$BSD/stat"
-bsd_run() {  # bsd_run <log> <cmd...>: run with the shim as the only stat, flavor unset
-  ( unset VAULT_INDEX_STAT_FLAVOR; STAT_SHIM_LOG="$1" STAT_SHIM_TABLE="$STAT_TABLE" PATH="$BSD:$PATH" "${@:2}" )
+# bsd_run <table> <log> <cmd...>: run with the shim first on PATH (the real
+# stat is still behind it) and VAULT_INDEX_STAT_FLAVOR unset.
+bsd_run() {
+  : > "$2"; : > "$2.answered"; : > "$2.miss"
+  ( unset VAULT_INDEX_STAT_FLAVOR; STAT_SHIM_TABLE="$1" STAT_SHIM_LOG="$2" PATH="$BSD:$PATH" "${@:3}" )
 }
-BSDPLAN="$(bsd_run "$TMP/stat.log" vault_index_plan "$F" "$IDX" 2>"$TMP/bsd.err")" || fail "BSD stat: plan failed: $(cat "$TMP/bsd.err")"
+# shim_answered_exactly <log> <want>: no misses, and the answered paths are
+# exactly the newline-separated paths in <want>.
+shim_answered_exactly() {
+  [ ! -s "$1.miss" ] || fail "BSD stat: the shim could not answer:"$'\n'"$(cat "$1.miss")"
+  [ "$(LC_ALL=C sort "$1.answered")" = "$(printf '%s\n' "$2" | LC_ALL=C sort)" ] \
+    || fail "BSD stat: answered paths differ from the notes needed:"$'\n'"want:"$'\n'"$2"$'\n'"got:"$'\n'"$(cat "$1.answered")"
+}
+BSDPLAN="$(bsd_run "$STAT_TABLE" "$TMP/stat.log" vault_index_plan "$F" "$IDX" 2>"$TMP/bsd.err")" || fail "BSD stat: plan failed: $(cat "$TMP/bsd.err")"
 [ "$BSDPLAN" = "$PLAN" ] || fail "BSD stat: plan differs:"$'\n'"$BSDPLAN"$'\n'"$(cat "$TMP/bsd.err")"
-[ ! -s "$TMP/bsd.err" ] || fail "BSD stat: the shim left notes unanswered: $(cat "$TMP/bsd.err")"
+[ ! -s "$TMP/bsd.err" ] || fail "BSD stat: plan wrote stderr (notes unanswered?): $(cat "$TMP/bsd.err")"
+shim_answered_exactly "$TMP/stat.log" "$(find "$F" -type f -name '*.md')"
 [ "$(grep -cx -- '-f' "$TMP/stat.log")" = 1 ] || fail "BSD stat: expected one batched -f call, log:"$'\n'"$(cat "$TMP/stat.log")"
 grep -qx -- '-c' "$TMP/stat.log" || fail "BSD stat: the GNU spelling was never probed"
-# Sizes (%z) for the hash batch: the same records as with the real stat.
-BSDHASH="$(bsd_run "$TMP/stat-size.log" vault_index_hash_plan "$F" "$PLAN" 2>"$TMP/bsd.err")" || fail "BSD stat: hash plan failed: $(cat "$TMP/bsd.err")"
+# Sizes (%z) for the hash batch: the same records as with the real stat, one
+# HASH per ADD/CHANGED note, so both sides can never be equal by being empty.
+TARGETS="$(F="$F" awk -F '\t' '$1 == "ADD" || $1 == "CHANGED" { print ENVIRON["F"] "/" $2 }' <<<"$PLAN")"
+[ -n "$TARGETS" ] || fail "setup: the rules plan has no ADD/CHANGED notes to hash"
+BSDHASH="$(bsd_run "$STAT_TABLE" "$TMP/stat-size.log" vault_index_hash_plan "$F" "$PLAN" 2>"$TMP/bsd.err")" || fail "BSD stat: hash plan failed: $(cat "$TMP/bsd.err")"
 [ "$BSDHASH" = "$(vault_index_hash_plan "$F" "$PLAN")" ] || fail "BSD stat: hash plan differs:"$'\n'"$BSDHASH"
-! grep -q '^MISS' <<<"$BSDHASH" || fail "BSD stat: sizes left unanswered:"$'\n'"$BSDHASH"
+! grep -q '^MISS' <<<"$BSDHASH" || fail "BSD stat: hash plan has MISS records:"$'\n'"$BSDHASH"
+[ "$(grep -c '^HASH' <<<"$BSDHASH")" = "$(printf '%s\n' "$TARGETS" | wc -l | tr -d ' ')" ] \
+  || fail "BSD stat: expected one HASH per ADD/CHANGED note:"$'\n'"$BSDHASH"
+shim_answered_exactly "$TMP/stat-size.log" "$TARGETS"
 [ "$(grep -cx -- '-f' "$TMP/stat-size.log")" = 1 ] || fail "BSD stat: expected one batched size call, log:"$'\n'"$(cat "$TMP/stat-size.log")"
 
 # apply over the same folder: links land vault-relative, hashes are valid.
@@ -238,15 +269,28 @@ for tool in stat shasum sha256sum wc basename dirname awk find; do
   printf '#!/bin/sh\nprintf "%%s\\n" "%s" >> "$COUNT_LOG"\nexec "%s" "$@"\n' "$tool" "$real" > "$CNT/$tool"
   chmod +x "$CNT/$tool"
 done
-calls_for() {  # calls_for <notes>: tool call counts for one cold apply
-  local d="$TMP/count-$1"; mkdir -p "$d"
+# With "bsd", the BSD stat shim stands in front of the counted tools and logs
+# its own calls (-c probes, -f batches) into the same count.
+calls_for() {  # calls_for <notes> [bsd]: tool call counts for one cold apply
+  local d="$TMP/count-${2:-gnu}-$1"; mkdir -p "$d"
   for i in $(seq 1 "$1"); do printf 'c %s\n' "$i" > "$d/c$i.md"; done
   : > "$TMP/count.log"
-  COUNT_LOG="$TMP/count.log" PATH="$CNT:$PATH" vault_index_apply "$TMP" "$d" "$d/INDEX.md" >/dev/null
+  if [ "${2-}" = bsd ]; then
+    stat_table "$d" > "$d.table" || fail "setup: could not build the stat table for $d"
+    COUNT_LOG="$TMP/count.log" PATH="$CNT:$PATH" bsd_run "$d.table" "$TMP/count-shim.log" \
+      vault_index_apply "$TMP" "$d" "$d/INDEX.md" >/dev/null
+    [ ! -s "$TMP/count-shim.log.miss" ] || fail "BSD stat: the shim could not answer:"$'\n'"$(cat "$TMP/count-shim.log.miss")"
+    sed 's/^/stat /' "$TMP/count-shim.log" >> "$TMP/count.log"
+  else
+    COUNT_LOG="$TMP/count.log" PATH="$CNT:$PATH" vault_index_apply "$TMP" "$d" "$d/INDEX.md" >/dev/null
+  fi
   LC_ALL=C sort "$TMP/count.log" | uniq -c
 }
-SMALL="$(calls_for 10)"; LARGE="$(calls_for 200)"
-[ "$SMALL" = "$LARGE" ] || fail "process count grows with the folder:"$'\n'"10 notes:"$'\n'"$SMALL"$'\n'"200 notes:"$'\n'"$LARGE"
+for flavor in gnu bsd; do
+  SMALL="$(calls_for 10 "$flavor")"; LARGE="$(calls_for 200 "$flavor")"
+  [ "$SMALL" = "$LARGE" ] || fail "$flavor stat: process count grows with the folder:"$'\n'"10 notes:"$'\n'"$SMALL"$'\n'"200 notes:"$'\n'"$LARGE"
+  [ -n "$SMALL" ] || fail "$flavor stat: no tool calls counted"
+done
 
 # --- names the line-wise walk cannot carry are reported, not dropped silently --
 # Reported folder-relative with the control character escaped, so a name can

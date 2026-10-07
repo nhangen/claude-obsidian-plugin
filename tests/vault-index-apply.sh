@@ -1,5 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
+# touch -t reads its stamp as local time, so east of UTC 197001010000 is a
+# negative epoch, which file_mtime rejects, and an "old" note would silently
+# take the hash path. The zone is pinned so every touch -t stamp in this file
+# is UTC (and 197001010000 is epoch 0, older than any last_reconciled here).
+export TZ=UTC
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 . "${ROOT_DIR}/scripts/lib/note-hash.sh"
 . "${ROOT_DIR}/scripts/lib/vault-index.sh"
