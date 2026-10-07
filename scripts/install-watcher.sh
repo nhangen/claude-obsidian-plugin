@@ -39,6 +39,10 @@ _own_program() {
   [ "${prog##*/}" = "$_TICK_BASENAME" ]
 }
 
+# A crontab line is ours if the program it runs ends in our tick basename.
+# This recognizes our rendered sub-hourly (*/N), rendered hourly (0 */H), and
+# hand-edited hourly (0 * * * *) schedules, while refusing delegator wrappers
+# (such as ~/.claude/hooks/obsidian-vaultkeeper-tick.sh) or foreign scripts (#44, #144).
 _own_cron_line() {
   case "$1" in
     *"/$_TICK_BASENAME"*) return 0 ;;
@@ -74,8 +78,39 @@ EOF
 
 render_cron() {
   local tick="$1" interval="$2" minutes
-  minutes=$(( interval / 60 )); [ "$minutes" -lt 1 ] && minutes=1
-  printf '*/%s * * * * /bin/bash "%s" >/dev/null 2>&1 # %s\n' "$minutes" "$tick" "$LABEL"
+  case "$interval" in
+    ''|*[!0-9]*)
+      echo "install-watcher: interval must be a positive integer in seconds: [$interval]" >&2
+      return 1
+      ;;
+  esac
+  if [ "$interval" -le 0 ]; then
+    echo "install-watcher: interval must be positive: [$interval]" >&2
+    return 1
+  fi
+  if [ $(( interval % 60 )) -ne 0 ]; then
+    echo "install-watcher: interval ($interval s) is not a whole minute; cron cannot express it" >&2
+    return 1
+  fi
+  minutes=$(( interval / 60 ))
+  if [ "$minutes" -lt 60 ]; then
+    if [ $(( 60 % minutes )) -ne 0 ]; then
+      echo "install-watcher: interval of $minutes minutes does not divide an hour evenly; cron cannot express it" >&2
+      return 1
+    fi
+    printf '*/%s * * * * /bin/bash "%s" >/dev/null 2>&1 # %s\n' "$minutes" "$tick" "$LABEL"
+  else
+    if [ $(( minutes % 60 )) -ne 0 ]; then
+      echo "install-watcher: interval of $minutes minutes is not a whole number of hours; cron cannot express it" >&2
+      return 1
+    fi
+    local hours=$(( minutes / 60 ))
+    if [ "$hours" -gt 24 ] || [ $(( 24 % hours )) -ne 0 ]; then
+      echo "install-watcher: interval of $hours hours does not divide a 24-hour day evenly; cron cannot express it" >&2
+      return 1
+    fi
+    printf '0 */%s * * * /bin/bash "%s" >/dev/null 2>&1 # %s\n' "$hours" "$tick" "$LABEL"
+  fi
 }
 
 installed_program() {
@@ -85,9 +120,14 @@ installed_program() {
       prog="$(_program_of "$HOME/Library/LaunchAgents/${LABEL}.plist")"
       ;;
     *)
-      # The tick path is the double-quoted field of the rendered cron line.
-      prog="$(crontab -l 2>/dev/null | grep -F "# ${LABEL}" | head -1 \
-        | sed -n 's/.*"\([^"]*\)".*/\1/p')"
+      # The tick path is the double-quoted field of the rendered cron line,
+      # with unquoted fallback if hand-edited without quotes.
+      local line
+      line="$(crontab -l 2>/dev/null | grep -F "# ${LABEL}" | head -1)" || line=""
+      prog="$(sed -n 's/.*"\([^"]*\)".*/\1/p' <<<"$line")"
+      if [ -z "$prog" ] && [ -n "$line" ]; then
+        prog="$(sed -n 's/.*\/bin\/bash[[:space:]]\+\([^[:space:]]\+\).*/\1/p' <<<"$line")"
+      fi
       ;;
   esac
   [ -n "$prog" ] || return 1
@@ -122,7 +162,7 @@ install_watcher() {
         exit 1
       fi
       local line; line="$(render_cron "$tick" "$interval")"
-      ( crontab -l 2>/dev/null | grep -vF "# ${LABEL}"; printf '%s\n' "$line" ) | crontab -
+      ( { crontab -l 2>/dev/null || true; } | grep -vF "# ${LABEL}" || true; printf '%s\n' "$line" ) | crontab -
       echo "installed cron line for ${LABEL}" ;;
   esac
 }
