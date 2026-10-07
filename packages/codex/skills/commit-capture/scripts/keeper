@@ -92,6 +92,19 @@ keeper_emit_outcome() {
   keeper_print_outcome "$outcome" "$value"
 }
 
+# Progress markers: which insert steps have landed, for a caller that may kill
+# the keeper mid-write (the MCP adapter) to say what is left. Off unless
+# KEEPER_PROGRESS_TOKEN is set; JSON format only; one stderr line per step,
+# tagged with the caller's per-run token so no other stderr text (a file name
+# in a diagnostic, say) can pass for one. The line format is a protocol:
+# tests/keeper-progress.sh is its contract, and the adapter's parser
+# (keeperProgress in packages/mcp-server/src/stdio.mjs) must match it.
+keeper_progress() {
+  [ "$KEEPER_FORMAT" = json ] || return 0
+  case "${KEEPER_PROGRESS_TOKEN:-}" in ''|*[!A-Za-z0-9]*) return 0 ;; esac
+  printf 'keeper-progress %s: %s\n' "$KEEPER_PROGRESS_TOKEN" "$*" >&2
+}
+
 keeper_die() {
   printf 'keeper: %s\n' "$*" >&2
   [ -n "$KEEPER_ERROR_CODE" ] || KEEPER_ERROR_CODE=WRITE_FAILED
@@ -577,7 +590,7 @@ keeper_daily_link_locked() {
   fi
   tmp="$(mktemp "$(dirname "$daily")/.keeper-daily-XXXXXX")" || return 1
   if grep -q '^## Session Links' "$daily"; then
-    awk -v link="$link" '{print} /^## Session Links/ && !d {print link; d=1}' "$daily" > "$tmp" \
+    KEEPER_LINK="$link" awk '{print} /^## Session Links/ && !d {print ENVIRON["KEEPER_LINK"]; d=1}' "$daily" > "$tmp" \
       || { rm -f "$tmp"; return 1; }
   else
     { cat "$daily"; printf '\n## Session Links\n%s\n' "$link"; } > "$tmp" \
@@ -617,6 +630,7 @@ _cmd_insert_locked() {
     wrote_note=1
   fi
 
+  keeper_progress "note-written pending=index${sldate:+,daily-link}${KEEPER_IDEMPOTENCY_KEY:+,idempotency}"
   if [ "$wrote_note" = 1 ]; then
     keeper_fault after_note \
       || { keeper_partial_locked "$target was written but INDEX and daily recovery remain"; return 2; }
@@ -627,6 +641,7 @@ _cmd_insert_locked() {
     keeper_partial_locked "$target was written but INDEX reconciliation is incomplete"
     return 2
   fi
+  keeper_progress index-written
   keeper_fault after_index \
     || { keeper_partial_locked "$target and INDEX were written but daily recovery may remain"; return 2; }
 
@@ -637,12 +652,14 @@ _cmd_insert_locked() {
       keeper_partial_locked "$target and INDEX were written but the daily backlink failed"
       return 2
     fi
+    keeper_progress daily-link-written
     keeper_fault after_daily \
       || { keeper_partial_locked "$target, INDEX, and daily backlink were written; recovery must verify them"; return 2; }
   fi
 
   keeper_idempotency_commit "$vault_abs" "$payload_hash" \
     || { keeper_partial_locked "$target was written but idempotency recovery remains"; return 2; }
+  [ -z "$KEEPER_IDEMPOTENCY_KEY" ] || keeper_progress idempotency-written
   KEEPER_RECOVERY_REQUIRED=false
   KEEPER_RECOVERY_ACTION=""
   keeper_emit_outcome committed "$full"

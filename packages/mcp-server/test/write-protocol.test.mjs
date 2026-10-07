@@ -5,8 +5,18 @@ import { once } from "node:events";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { test } from "node:test";
+import { writeOutput } from "../src/stdio.mjs";
 
 const packageRoot = resolve(dirname(new URL(import.meta.url).pathname), "..");
+
+// Every write outcome the adapter returns must satisfy its own output schema,
+// refinements included, so contract drift fails here first.
+function assertWriteContract(response, label) {
+  const outcome = response.result?.structuredContent;
+  if (!outcome) return;
+  const result = writeOutput.safeParse(outcome);
+  assert.ok(result.success, `${label}: ${JSON.stringify(result.error?.issues)} ${JSON.stringify(outcome)}`);
+}
 
 function collect(child) {
   let buffer = "";
@@ -44,10 +54,15 @@ test("built stdio fails closed on invalid or contradictory keeper results", asyn
   await mkdir(join(vault, "Daily"), { recursive: true });
   await copyFile(join(packageRoot, "dist", "stdio.mjs"), join(install, "dist", "stdio.mjs"));
   await copyFile(join(packageRoot, "dist", "version.mjs"), join(install, "dist", "version.mjs"));
+  await copyFile(join(packageRoot, "dist", "settings.mjs"), join(install, "dist", "settings.mjs"));
   await copyFile(join(packageRoot, "dist", "helpers", "lib", "resolve-config.sh"), join(helperRoot, "lib", "resolve-config.sh"));
   await symlink(join(packageRoot, "node_modules"), join(install, "node_modules"), "dir");
   await writeFile(config, `---\nvault_path: ${vault}\ndaily_path: Daily/\n---\n`);
+  // Drain the request body first, as the real keeper does: a fake that exits
+  // without reading races the adapter's body write into EPIPE under load, and
+  // the case then fails as a pipe error instead of the outcome under test.
   await writeFile(join(helperRoot, "keeper"), `#!/usr/bin/env bash
+cat >/dev/null
 case "$*" in
   *empty-key*) exit 0 ;;
   *missing-output*) exit 0 ;;
@@ -113,6 +128,7 @@ exit 9
       },
     })}\n`);
     const response = await next(id);
+    assertWriteContract(response, idempotencyKey);
     assert.equal(response.result.isError, true, idempotencyKey);
     const result = JSON.parse(response.result.content[0].text);
     assert.equal(result.code, "KEEPER_PROTOCOL_ERROR", idempotencyKey);
@@ -130,6 +146,7 @@ exit 9
     },
   })}\n`);
   const keylessPartial = await next(14);
+  assertWriteContract(keylessPartial, "keyless partial");
   const keylessPartialResult = JSON.parse(keylessPartial.result.content[0].text);
   assert.equal(keylessPartial.result.isError, true);
   assert.equal(keylessPartialResult.code, "PARTIAL");
@@ -184,4 +201,88 @@ exit 9
   assert.equal(overflowResult.status, "partial");
   assert.equal(overflowResult.recovery.required, true);
   assert.equal(overflowResult.retryable, true);
+});
+
+// A keeper stopped after it wrote the note: what the adapter reports depends on
+// whether the keeper's own outcome reached stdout, and on why it was stopped.
+test("built stdio reports a keeper stopped after its note by what it printed", { timeout: 60_000 }, async (t) => {
+  const fixture = await mkdtemp(join(tmpdir(), "mcp-write-stop-"));
+  const install = join(fixture, "install");
+  const helperRoot = join(install, "dist", "helpers");
+  const vault = join(fixture, "vault");
+  const config = join(fixture, "obsidian.local.md");
+  await mkdir(join(helperRoot, "lib"), { recursive: true });
+  await mkdir(join(vault, "Inbox"), { recursive: true });
+  for (const file of ["stdio.mjs", "version.mjs", "settings.mjs"]) {
+    await copyFile(join(packageRoot, "dist", file), join(install, "dist", file));
+  }
+  await copyFile(join(packageRoot, "dist", "helpers", "lib", "resolve-config.sh"), join(helperRoot, "lib", "resolve-config.sh"));
+  await symlink(join(packageRoot, "node_modules"), join(install, "node_modules"), "dir");
+  await writeFile(config, `---\nvault_path: ${vault}\n---\n`);
+  // Each case marks the note written (with this run's token), then either
+  // prints its own outcome and hangs past the cap, or floods stdout and hangs.
+  await writeFile(join(helperRoot, "keeper"), `#!/usr/bin/env bash
+cat >/dev/null
+printf 'keeper-progress %s: note-written pending=index,idempotency\\n' "$KEEPER_PROGRESS_TOKEN" >&2
+case "$*" in
+  *outcome-hang-key*)
+    printf '{"status":"partial","request_id":"request-outcome-hang","idempotency_key":"outcome-hang-key","path":"Inbox/Outcome Hang.md","affected_paths":["Inbox/Outcome Hang.md","Inbox/INDEX.md"],"warnings":["keeper-reported partial"],"recovery":{"required":true,"action":"keeper-chosen recovery"},"error_code":"PARTIAL","retryable":true}\\n'
+    exec sleep 30 ;;
+  *limit-after-note-key*)
+    head -c 70000 /dev/zero | tr '\\0' x
+    exec sleep 30 ;;
+esac
+exit 9
+`);
+  await chmod(join(helperRoot, "keeper"), 0o755);
+
+  const child = spawn(process.execPath, [join(install, "dist", "stdio.mjs")], {
+    cwd: fixture,
+    env: { ...process.env, OBSIDIAN_LOCAL_MD: config, MCP_STDIO_PROFILE: "write", MCP_KEEPER_SAVE_TIMEOUT_MS: "800" },
+    stdio: ["pipe", "pipe", "pipe"],
+  });
+  const next = collect(child);
+  t.after(async () => {
+    if (child.exitCode === null && child.signalCode === null) {
+      const closed = once(child, "close").catch(() => {});
+      child.stdin.end();
+      const timer = setTimeout(() => child.kill("SIGKILL"), 5_000);
+      await closed;
+      clearTimeout(timer);
+    }
+    await rm(fixture, { recursive: true, force: true });
+  });
+  child.stdin.write(`${JSON.stringify({
+    jsonrpc: "2.0", id: 1, method: "initialize",
+    params: { protocolVersion: "2025-11-25", capabilities: {}, clientInfo: { name: "test", version: "1" } },
+  })}\n`);
+  await next(1);
+  child.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" })}\n`);
+  const save = async (id, title, key) => {
+    child.stdin.write(`${JSON.stringify({
+      jsonrpc: "2.0", id, method: "tools/call",
+      params: { name: "obsidian_keeper_save", arguments: { title, body: "Body", resolved: true, folder_hint: "Inbox", idempotency_key: key, request_id: `request-${key.replace("-key", "")}` } },
+    })}\n`);
+    const response = await next(id);
+    assertWriteContract(response, key);
+    assert.equal(response.result.isError, true, key);
+    return JSON.parse(response.result.content[0].text);
+  };
+
+  // The keeper's own outcome wins over the progress markers: it knows more.
+  const printed = await save(2, "Outcome Hang", "outcome-hang-key");
+  assert.equal(printed.code, "SUBPROCESS_TIMEOUT");
+  assert.equal(printed.status, "partial");
+  assert.equal(printed.recovery.action, "keeper-chosen recovery");
+  assert.deepEqual(printed.warnings, ["keeper-reported partial", "keeper write timed out"]);
+
+  // Over the output limit after the note: the stop is named as such, with no
+  // advice to raise the time cap.
+  const limited = await save(3, "Limit After Note", "limit-after-note-key");
+  assert.equal(limited.code, "SUBPROCESS_OUTPUT_LIMIT");
+  assert.equal(limited.status, "partial");
+  assert.equal(limited.retryable, true);
+  assert.equal(limited.recovery.action, "do not rewrite the note; retry with the same idempotency_key to finish INDEX and idempotency record (retry with the same idempotency_key)");
+  assert.ok(limited.warnings.includes("keeper write exceeded its output limit after the note was written to Inbox/Limit After Note.md; unfinished: INDEX and idempotency record (retry with the same idempotency_key)"), limited.warnings.join(" | "));
+  assert.doesNotMatch(JSON.stringify(limited), /MCP_KEEPER_SAVE_TIMEOUT_MS|raise/);
 });

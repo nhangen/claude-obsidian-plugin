@@ -83,4 +83,14 @@ touch -t 197001010000 "$COLD/x.md"
 CPLAN="$(vault_index_plan "$COLD" "$CIDX")"
 plan_has "CHANGED"$'\t'"x.md" "$CPLAN"   # cold-start: hash-checked despite old mtime
 
+# Invariant: a backslash in the folder path is data, never an escape; the plan
+# stays folder-relative.
+BF="$TMP/Back\\tslash"; mkdir -p "$BF/sub"
+BIDX="$BF/INDEX.md"; printf -- '- [[kept]]\n' > "$BIDX"
+printf 'kept\n' > "$BF/kept.md"; printf 'new\n' > "$BF/sub/new.md"
+{ printf '# last_reconciled:1000\n'; printf 'kept.md\t%s\n' "$(note_hash "$BF/kept.md")"; } > "$(index_state_file "$BIDX")"
+touch -t 197001010000 "$BF/kept.md"
+BPLAN="$(vault_index_plan "$BF" "$BIDX")"
+[ "$BPLAN" = "ADD"$'\t'"sub/new.md" ] || fail "backslash folder: expected only ADD sub/new.md, got:"$'\n'"$BPLAN"
+
 echo "PASS: vault-index-plan"

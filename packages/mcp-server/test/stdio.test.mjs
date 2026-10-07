@@ -434,7 +434,11 @@ test("cancellation stops active child work and shutdown reaps it", async (t) => 
   });
   await delay(100);
   assert.equal(server.messages.some((message) => message.id === 2), false);
-  for (let attempt = 0; attempt < 40; attempt += 1) {
+  // Termination is SIGTERM to the process group, then SIGKILL; on a loaded
+  // machine that can take well over a second, so poll to a deadline rather
+  // than a fixed number of short attempts.
+  const deadline = Date.now() + 10_000;
+  while (Date.now() < deadline) {
     try {
       process.kill(Number(pidText), 0);
     } catch {
@@ -447,6 +451,47 @@ test("cancellation stops active child work and shutdown reaps it", async (t) => 
   server.child.stdin.end();
   await once(server.child, "close");
   await pendingHandled;
+});
+
+test("MCP_COMMIT_META_TIMEOUT_MS caps commit metadata independently of the keeper caps", { timeout: 30_000 }, async (t) => {
+  const fixture = await mkdtemp(join(tmpdir(), "mcp-meta-timeout-"));
+  const vault = join(fixture, "vault");
+  const config = join(fixture, "obsidian.local.md");
+  const bin = join(fixture, "bin");
+  await mkdir(vault);
+  await mkdir(bin);
+  await writeFile(join(bin, "git"), "#!/bin/sh\nsleep 4\nexit 0\n");
+  await chmod(join(bin, "git"), 0o755);
+  await writeFile(config, `---\nvault_path: ${vault}\n---\n`);
+
+  const server = startServer(config, {
+    PATH: `${bin}:${process.env.PATH}`,
+    MCP_COMMIT_META_TIMEOUT_MS: "300",
+    // Both keeper caps are far out of reach: only the commit-metadata cap can
+    // end the call before the fake git's 4 s sleep does.
+    MCP_KEEPER_SAVE_TIMEOUT_MS: "60000",
+    MCP_DAILY_APPEND_TIMEOUT_MS: "60000",
+  });
+  t.after(async () => {
+    if (!server.child.killed) server.child.kill("SIGKILL");
+    await Promise.race([once(server.child, "close").catch(() => {}), delay(500)]);
+    await rm(fixture, { recursive: true, force: true });
+  });
+
+  await server.request({
+    jsonrpc: "2.0", id: 1, method: "initialize",
+    params: { protocolVersion: "2025-11-25", capabilities: {}, clientInfo: { name: "meta-timeout-test", version: "1.0.0" } },
+  }, 1);
+  server.notification({ jsonrpc: "2.0", method: "notifications/initialized" });
+  const started = Date.now();
+  const response = await server.request({
+    jsonrpc: "2.0", id: 2, method: "tools/call",
+    params: { name: "obsidian_commit_meta", arguments: { repository: repositoryRoot } },
+  }, 2);
+  assert.equal(response.result.isError, true);
+  assert.equal(JSON.parse(response.result.content[0].text).code, "SUBPROCESS_TIMEOUT");
+  // Well short of the fake git's 4 s sleep: the 300 ms cap, not a keeper cap, applied.
+  assert.ok(Date.now() - started < 3_500, `commit metadata took ${Date.now() - started} ms`);
 });
 
 test("modern discovery and SIGTERM shutdown are covered separately", async (t) => {

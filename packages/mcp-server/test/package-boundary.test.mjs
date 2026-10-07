@@ -752,6 +752,7 @@ test("source entrypoint uses canonical helpers before a build exists", async (t)
   await mkdir(vault);
   await copyFile(join(packageRoot, "src", "stdio.mjs"), join(sourceDirectory, "stdio.mjs"));
   await copyFile(join(packageRoot, "src", "version.mjs"), join(sourceDirectory, "version.mjs"));
+  await copyFile(join(packageRoot, "src", "settings.mjs"), join(sourceDirectory, "settings.mjs"));
   await copyFile(join(packageRoot, "package.json"), join(sourcePackage, "package.json"));
   await copyFile(join(repositoryRoot, "scripts", "lib", "resolve-config.sh"), join(scriptLibrary, "resolve-config.sh"));
   await copyFile(join(repositoryRoot, "scripts", "lib", "commit-capture-parse.sh"), join(scriptLibrary, "commit-capture-parse.sh"));
