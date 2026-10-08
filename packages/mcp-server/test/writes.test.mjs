@@ -549,7 +549,7 @@ test("stdio daily append takes an exact target_path with a hash gate, and keeper
   assert.match(await readFile(join(vaultPath, "Daily", "2026-10-08.md"), "utf8"), /Linked session/);
   assert.ok(saved.result.structuredContent.affected_paths.includes("Daily/2026-10-08.md"));
 
-  // The fallback outcome (used when the keeper never reports) also names the daily note.
+  // Input rejection reports through writeRequestFallback, which also names the daily note.
   const invalid = await call(8, "obsidian_keeper_save", {
     title: "Linked session", body: "", resolved: true, folder_hint: "Inbox", session_link_date: "2026-10-08",
   });
@@ -1073,7 +1073,7 @@ async function closeWithin(child, waitMs, label) {
 // A keeper hung inside its lock leaves that vault's lock to the stale reaper
 // (two seconds), so each hung-keeper case gets a vault of its own, and the
 // caps leave room for a loaded machine to reach the step under test.
-async function hungKeeperSave(t, { fault, title, idempotencyKey, env = {}, waitMs = 30_000 }) {
+async function hungKeeperSave(t, { fault, title, idempotencyKey, env = {}, waitMs = 30_000, extraArgs = {} }) {
   const fixture = await createFixtureVault();
   const server = startStdioServer(fixture.configPath, { KEEPER_FAULT_INJECT: fault, KEEPER_FAULT_MODE: "hang", MCP_KEEPER_SAVE_TIMEOUT_MS: "4000", ...env });
   t.after(async () => {
@@ -1090,13 +1090,20 @@ async function hungKeeperSave(t, { fault, title, idempotencyKey, env = {}, waitM
     jsonrpc: "2.0", id: 2, method: "tools/call",
     params: {
       name: "obsidian_keeper_save",
-      arguments: { title, body: `${title} body`, resolved: true, folder_hint: "Inbox", request_id: `${title.replace(/ /g, "-")}-request`, ...(idempotencyKey ? { idempotency_key: idempotencyKey } : {}) },
+      arguments: { title, body: `${title} body`, resolved: true, folder_hint: "Inbox", request_id: `${title.replace(/ /g, "-")}-request`, ...(idempotencyKey ? { idempotency_key: idempotencyKey } : {}), ...extraArgs },
     },
   }, 2, waitMs);
   const elapsed = Date.now() - started;
   assert.equal(response.result.isError, true);
   return { fixture, server, response, elapsed, outcome: JSON.parse(response.result.content[0].text) };
 }
+
+test("a timed-out keeper save with session_link_date still names the daily note in affected_paths (#162)", { timeout: 60_000 }, async (t) => {
+  const { outcome } = await hungKeeperSave(t, {
+    fault: "after_note", title: "Linked Hang", idempotencyKey: "linked-hang-1", extraArgs: { session_link_date: "2026-10-08" },
+  });
+  assert.ok(outcome.affected_paths.includes("Daily/2026-10-08.md"), JSON.stringify(outcome.affected_paths));
+});
 
 test("MCP_KEEPER_SAVE_TIMEOUT_MS is the cap a keeper save runs under", { timeout: 30_000 }, async (t) => {
   // The other two caps are far out of reach: a save that used either one
