@@ -114,12 +114,13 @@ error contract instead of leaking SDK validation text.
 
 `obsidian_keeper_save` accepts `title`, `body`, required `resolved: true` and
 `folder_hint`, plus optional `type`,
-and `links`, plus optional `idempotency_key` and `request_id`. `folder_hint` is
+`links`, and `session_link_date` (links the note from that day's daily note; needs a valid `daily_path`), plus optional `idempotency_key` and `request_id`. `folder_hint` is
 the caller-resolved vault-relative target folder; this MCP adapter does not run
 librarian routing or deduplication. Streamable HTTP
 writes require `idempotency_key`; local stdio calls retain keyless compatibility.
-`obsidian_daily_append` accepts `content`, optional `section`, `date`, and
-`skip_if_hash` (a 7-64 character hexadecimal commit hash), plus the same request fields. Daily writes use the configured
+`obsidian_daily_append` accepts `content`, optional `section`, `date` or
+`target_path` (an exact vault-relative `.md` path to append to instead of the daily note; mutually exclusive with `date`), and
+`skip_if_hash` (a 7-64 character hexadecimal commit hash that must appear in an existing section heading), plus the same request fields. Daily writes use the configured
 `daily_path`, and results report the vault-relative path actually written. MCP
 writes fail with `CONFIG_INVALID` when `daily_path` is absent or invalid; the
 adapter never silently substitutes `Daily/`.

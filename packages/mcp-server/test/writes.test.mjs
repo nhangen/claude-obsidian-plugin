@@ -504,6 +504,65 @@ test("stdio daily append uses configured daily_path and reports the written path
   await assert.rejects(readFile(join(vaultPath, "Daily", "2026-09-23.md"), "utf8"));
 });
 
+test("stdio daily append takes an exact target_path with a hash gate, and keeper save links the daily note (#162)", async (t) => {
+  const { root, vaultPath, configPath } = await createFixtureVault();
+  const server = startStdioServer(configPath);
+  t.after(async () => {
+    if (!server.child.killed) server.child.stdin.end();
+    await once(server.child, "close").catch(() => {});
+    await rm(root, { recursive: true, force: true });
+  });
+  await server.request({
+    jsonrpc: "2.0", id: 1, method: "initialize",
+    params: { protocolVersion: "2025-11-25", capabilities: {}, clientInfo: { name: "test", version: "1.0" } },
+  }, 1);
+  server.notification({ jsonrpc: "2.0", method: "notifications/initialized" });
+  const call = (id, name, args) => server.request({ jsonrpc: "2.0", id, method: "tools/call", params: { name, arguments: args } }, id);
+
+  const target = "Projects/Development/nhangen/demo/2026-10-08.md";
+  const first = await call(2, "obsidian_daily_append", { content: "- first commit", section: "abc1234 first commit", target_path: target, skip_if_hash: "abc1234" });
+  assert.equal(first.result.isError, false);
+  assert.equal(first.result.structuredContent.path, target);
+  const second = await call(3, "obsidian_daily_append", { content: "- first commit", section: "abc1234 first commit", target_path: target, skip_if_hash: "abc1234" });
+  assert.equal(second.result.isError, false);
+  const written = await readFile(join(vaultPath, target), "utf8");
+  assert.equal(written.split("abc1234 first commit").length - 1, 1, "hash gate must not append the same commit twice");
+  await assert.rejects(readFile(join(vaultPath, "Daily", "2026-10-08.md"), "utf8"));
+
+  for (const [id, bad] of [[4, { target_path: "../escape.md" }], [5, { target_path: "Projects/note.txt" }], [6, { target_path: target, date: "2026-10-08" }]]) {
+    const rejected = await call(id, "obsidian_daily_append", { content: "x", ...bad });
+    assert.equal(rejected.result.isError, true, JSON.stringify(bad));
+  }
+
+  const saved = await call(7, "obsidian_keeper_save", {
+    title: "Linked session", body: "Body", resolved: true, folder_hint: "Inbox", session_link_date: "2026-10-08",
+  });
+  assert.equal(saved.result.isError, false);
+  assert.match(await readFile(join(vaultPath, "Daily", "2026-10-08.md"), "utf8"), /Linked session/);
+});
+
+test("find_notes matches every term of a multi-word query, not the whole phrase (#162)", async (t) => {
+  const { root, vaultPath, configPath } = await createFixtureVault();
+  const server = startStdioServer(configPath);
+  t.after(async () => {
+    if (!server.child.killed) server.child.stdin.end();
+    await once(server.child, "close").catch(() => {});
+    await rm(root, { recursive: true, force: true });
+  });
+  await writeFile(join(vaultPath, "Projects", "TypeSafe outage.md"), "The obsidian mcp skill was down.\n", "utf8");
+  await writeFile(join(vaultPath, "Projects", "Other.md"), "typesafe only here\n", "utf8");
+  await server.request({
+    jsonrpc: "2.0", id: 1, method: "initialize",
+    params: { protocolVersion: "2025-11-25", capabilities: {}, clientInfo: { name: "test", version: "1.0" } },
+  }, 1);
+  server.notification({ jsonrpc: "2.0", method: "notifications/initialized" });
+  const found = await server.request({
+    jsonrpc: "2.0", id: 2, method: "tools/call",
+    params: { name: "obsidian_find_notes", arguments: { query: "typesafe skill obsidian mcp outage" } },
+  }, 2);
+  assert.deepEqual(found.result.structuredContent.matches.map((match) => match.path), ["Projects/TypeSafe outage.md"]);
+});
+
 test("stdio writes fail with a structured configuration error when daily_path is missing or invalid", async (t) => {
   for (const scenario of [
     { name: "missing", replace: "", requestId: "missing-daily-path" },

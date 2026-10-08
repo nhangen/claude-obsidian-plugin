@@ -200,16 +200,17 @@ async function collectMarkdownFiles(root, current = root, files = [], signal, st
   return files;
 }
 
-function preview(contents, query) {
-  const lowered = query.toLowerCase();
+function preview(contents, terms) {
   const lines = contents.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
-  const relevant = lines.find((line) => line.toLowerCase().includes(lowered));
+  const relevant = lines.find((line) => terms.some((term) => line.toLowerCase().includes(term)));
   return (relevant || lines[0] || "").slice(0, maxPreviewLength);
 }
 
 async function findNotes({ query }, vaultPath, signal) {
   throwIfAborted(signal);
-  const lowered = query.toLowerCase();
+  // Every whitespace-separated term must appear somewhere in the path, tags, or
+  // body; a whole-phrase substring returned nothing for multi-word queries.
+  const terms = [...new Set(query.toLowerCase().split(/\s+/).filter(Boolean))];
   const files = await collectMarkdownFiles(vaultPath, vaultPath, [], signal);
   const matches = [];
   let nextIndex = 0;
@@ -222,17 +223,19 @@ async function findNotes({ query }, vaultPath, signal) {
       if (contents === null) continue;
       const loweredContents = contents.toLowerCase();
       const relativePath = relative(vaultPath, path).split("\\").join("/");
-      const filenameMatch = relativePath.toLowerCase().includes(lowered);
-      const contentMatch = loweredContents.includes(lowered);
-      const tagLine = contents.match(/^tags:.*$/im)?.[0] || "";
-      const tagMatch = tagLine.toLowerCase().includes(lowered);
-      if (!filenameMatch && !contentMatch && !tagMatch) continue;
-      const occurrences = loweredContents.split(lowered).length - 1;
-      matches.push({
-        path: relativePath,
-        preview: preview(contents, query),
-        score: (filenameMatch ? 1_000_000 : 0) + (tagMatch ? 10_000 : 0) + occurrences * 100,
-      });
+      const loweredPath = relativePath.toLowerCase();
+      const loweredTags = (contents.match(/^tags:.*$/im)?.[0] || "").toLowerCase();
+      let score = 0;
+      let allTermsFound = true;
+      for (const term of terms) {
+        const filenameMatch = loweredPath.includes(term);
+        const tagMatch = loweredTags.includes(term);
+        const occurrences = loweredContents.split(term).length - 1;
+        if (!filenameMatch && !tagMatch && occurrences === 0) { allTermsFound = false; break; }
+        score += (filenameMatch ? 1_000_000 : 0) + (tagMatch ? 10_000 : 0) + occurrences * 100;
+      }
+      if (!allTermsFound) continue;
+      matches.push({ path: relativePath, preview: preview(contents, terms), score });
     }
   }
   await Promise.all(Array.from({ length: Math.min(searchConcurrency, files.length) }, () => searchWorker()));
@@ -457,7 +460,10 @@ function writeRequestFallback(toolName, args, configuration) {
   const date = typeof values.date === "string" && /^\d{4}-\d{2}-\d{2}$/.test(values.date)
     ? values.date
     : new Date().toISOString().slice(0, 10);
-  const path = configuration.dailyPath ? `${configuration.dailyPath}/${date}.md` : "";
+  const explicit = typeof values.target_path === "string" && !values.target_path.startsWith("/") && !values.target_path.split("/").some((part) => part === ".." || part === ".")
+    ? values.target_path
+    : "";
+  const path = explicit || (configuration.dailyPath ? `${configuration.dailyPath}/${date}.md` : "");
   return emptyWriteOutcome(requestId, idempotencyKey, path, path ? [path] : []);
 }
 
@@ -721,7 +727,7 @@ async function executeKeeperWrite(args, bodyContent, signal, fallback, timeoutMs
 
 // Exported for tests: the error detail it rejects with is not part of the MCP
 // result, so only an in-process call can check it.
-export async function keeperSave({ title, body, folder_hint, type, links, idempotency_key, request_id }, vaultPath, signal) {
+export async function keeperSave({ title, body, folder_hint, type, links, session_link_date, idempotency_key, request_id }, vaultPath, signal, dailyPath) {
   const target = normalizedKeeperSaveTarget(title, folder_hint);
   if (!target) throw codedError("PATH_INVALID", "keeper save target is invalid");
   const { cleanTitle, targetFolder, targetPath, affectedPaths } = target;
@@ -737,8 +743,13 @@ export async function keeperSave({ title, body, folder_hint, type, links, idempo
   const requestId = request_id || randomUUID();
   const idempotencyKey = idempotency_key || "";
   const fallback = emptyWriteOutcome(requestId, idempotencyKey, targetPath, affectedPaths);
+  const args = ["insert", "--vault", vaultPath, "--target", targetPath, "--title", cleanTitle, "--request-id", requestId, "--idempotency-key", idempotencyKey];
+  if (session_link_date) {
+    if (!dailyPath) throw codedError("CONFIG_INVALID", "session_link_date requires a configured daily_path");
+    args.push("--session-link-date", session_link_date, "--daily-path", dailyPath);
+  }
   return executeKeeperWrite(
-    ["insert", "--vault", vaultPath, "--target", targetPath, "--title", cleanTitle, "--request-id", requestId, "--idempotency-key", idempotencyKey],
+    args,
     formattedBody,
     signal,
     fallback,
@@ -747,9 +758,9 @@ export async function keeperSave({ title, body, folder_hint, type, links, idempo
   );
 }
 
-async function dailyAppend({ content, section, date, skip_if_hash, idempotency_key, request_id }, vaultPath, dailyPath, signal) {
+async function dailyAppend({ content, section, date, target_path, skip_if_hash, idempotency_key, request_id }, vaultPath, dailyPath, signal) {
   const targetDate = date || new Date().toISOString().slice(0, 10);
-  const targetPath = `${dailyPath.replace(/\/+$/, "")}/${targetDate}.md`;
+  const targetPath = target_path || `${dailyPath.replace(/\/+$/, "")}/${targetDate}.md`;
   const requestId = request_id || randomUUID();
   const idempotencyKey = idempotency_key || "";
   const args = ["append", "--vault", vaultPath, "--target", targetPath, "--request-id", requestId, "--idempotency-key", idempotencyKey];
@@ -945,6 +956,7 @@ const keeperSaveInput = z.strictObject({
   folder_hint: safeText(1024).trim().min(1),
   type: safeText(100).optional(),
   links: z.array(safeText(2048)).max(20).optional(),
+  session_link_date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
   idempotency_key: z.string().min(1).max(240).regex(/^[A-Za-z0-9._:-]+$/).optional(),
   request_id: z.string().min(1).max(240).regex(/^[A-Za-z0-9._:-]+$/).optional(),
 });
@@ -954,10 +966,11 @@ const dailyAppendInput = z.strictObject({
   content: z.string().min(1).max(65536),
   section: safeText(240).optional(),
   date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+  target_path: z.string().trim().min(4).max(1024).regex(/^(?!\.{1,2}(?:\/|$))[^\\/\u0000-\u001F\u007F]+(?:\/(?!\.{1,2}(?:\/|$))[^\\/\u0000-\u001F\u007F]+)*\.[mM][dD]$/).optional(),
   skip_if_hash: z.string().min(7).max(64).regex(/^[0-9a-fA-F]+$/).optional(),
   idempotency_key: z.string().min(1).max(240).regex(/^[A-Za-z0-9._:-]+$/).optional(),
   request_id: z.string().min(1).max(240).regex(/^[A-Za-z0-9._:-]+$/).optional(),
-});
+}).refine((value) => !(value.target_path && value.date), { message: "target_path and date are mutually exclusive" });
 
 const readToolAnnotations = {
   readOnlyHint: true,
@@ -1047,7 +1060,8 @@ export function createServer({ supportedProtocolVersions = protocolVersions, sco
       try {
         const input = parseToolInput(keeperSaveInput, args);
         if (requireWriteIdempotency && !input.idempotency_key) throw codedError("INVALID_INPUT", "idempotency_key is required for remote writes");
-        return successResult(await keeperSave({ ...input, request_id: input.request_id || fallback.request_id }, configuration.vaultPath, ctx.mcpReq.signal));
+        if (input.session_link_date) requireDailyWriteConfiguration(configuration);
+        return successResult(await keeperSave({ ...input, request_id: input.request_id || fallback.request_id }, configuration.vaultPath, ctx.mcpReq.signal, configuration.dailyPath));
       } catch (error) {
         return writeErrorResult(error, fallback);
       }
@@ -1065,8 +1079,8 @@ export function createServer({ supportedProtocolVersions = protocolVersions, sco
     async (args, ctx) => {
       const fallback = writeRequestFallback("obsidian_daily_append", args, configuration);
       try {
-        requireDailyWriteConfiguration(configuration);
         const input = parseToolInput(dailyAppendInput, args);
+        if (!input.target_path) requireDailyWriteConfiguration(configuration);
         if (requireWriteIdempotency && !input.idempotency_key) throw codedError("INVALID_INPUT", "idempotency_key is required for remote writes");
         return successResult(await dailyAppend({ ...input, request_id: input.request_id || fallback.request_id }, configuration.vaultPath, configuration.dailyPath, ctx.mcpReq.signal));
       } catch (error) {
