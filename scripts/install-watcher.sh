@@ -107,9 +107,14 @@ installed_program() {
       prog="$(_program_of "$HOME/Library/LaunchAgents/${LABEL}.plist")"
       ;;
     *)
-      # The tick path is the double-quoted field of the rendered cron line.
-      prog="$(crontab -l 2>/dev/null | grep -F "# ${LABEL}" | head -1 \
-        | sed -n 's/.*"\([^"]*\)".*/\1/p')"
+      # The tick path is the double-quoted field of the rendered cron line, with an
+      # unquoted fallback for a hand-edited line.
+      local line
+      line="$(crontab -l 2>/dev/null | grep -F "# ${LABEL}" | head -1)" || line=""
+      prog="$(sed -n 's/.*"\([^"]*\)".*/\1/p' <<<"$line")"
+      if [ -z "$prog" ] && [ -n "$line" ]; then
+        prog="$(sed -n 's/.*\/bin\/bash[[:space:]][[:space:]]*\([^[:space:]][^[:space:]]*\).*/\1/p' <<<"$line")"
+      fi
       ;;
   esac
   [ -n "$prog" ] || return 1
@@ -144,7 +149,21 @@ install_watcher() {
         exit 1
       fi
       local line; line="$(render_cron "$tick" "$interval")" || exit 1
-      ( crontab -l 2>/dev/null | grep -vF "# ${LABEL}"; printf '%s\n' "$line" ) | crontab -
+      # Read the crontab first. "no crontab for <user>" is an empty one; any other
+      # failure aborts before anything is written, so a read error can never
+      # install our line alone over the user's other entries.
+      local current="" crc=0
+      current="$(crontab -l 2>&1)" || crc=$?
+      if [ "$crc" -ne 0 ]; then
+        case "$current" in
+          *"no crontab for"*) current="" ;;
+          *) echo "install-watcher: could not read the crontab: [$current]" >&2; exit 1 ;;
+        esac
+      fi
+      # grep -v exits 1 when our line was the only one; that is not a failure.
+      local kept
+      kept="$(printf '%s\n' "$current" | { grep -vF "# ${LABEL}" || true; })"
+      { [ -z "$kept" ] || printf '%s\n' "$kept"; printf '%s\n' "$line"; } | crontab -
       echo "installed cron line for ${LABEL}" ;;
   esac
 }
