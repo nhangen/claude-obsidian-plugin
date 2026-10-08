@@ -51,7 +51,6 @@ PATH="$CRONDIR/bin:$PATH" bash "$SH" install "$TICK" 3600 >/dev/null 2>&1 || fai
 [ "$(grep -cF "$LABEL_MARK" "$CRONDIR/crontab")" = 1 ] || fail "re-install must leave exactly one watcher line"
 grep -q '^0 \* \* \* \* ' "$CRONDIR/crontab" || fail "re-install should write the hourly line"
 grep -qF '/usr/bin/other' "$CRONDIR/crontab" || fail "re-install dropped an unrelated crontab entry"
-rm -rf "$CRONDIR"
 
 # Unknown subcommand must fail loudly (enum-config-typo-fallback discipline).
 if bash "$SH" frobnicate "$TICK" 900 >/dev/null 2>&1; then
@@ -71,7 +70,7 @@ grep -q '<key>StandardErrorPath</key>' <<<"$PLIST" || fail "plist has no Standar
 # swapped the delegator for a version-pinned path and printed "activated", which
 # strands the pin on the next plugin update: #35, reintroduced by the installer.
 HOMEDIR="$(mktemp -d "${TMPDIR:-/tmp}/iw-home-XXXXXX")"
-trap 'rm -rf "$HOMEDIR"' EXIT
+trap 'rm -rf "$HOMEDIR" "$CRONDIR"' EXIT
 mkdir -p "$HOMEDIR/Library/LaunchAgents" "$HOMEDIR/bin"
 PL="$HOMEDIR/Library/LaunchAgents/com.nhangen.obsidian-vaultkeeper.plist"
 # A launchctl that always succeeds, so the only thing under test is the refusal.
