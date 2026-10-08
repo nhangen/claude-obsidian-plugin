@@ -276,7 +276,7 @@ calls_for() {  # calls_for <notes> [bsd]: tool call counts for one cold apply
   for i in $(seq 1 "$1"); do printf 'c %s\n' "$i" > "$d/c$i.md"; done
   : > "$TMP/count.log"
   if [ "${2-}" = bsd ]; then
-    stat_table "$d" > "$d.table" || fail "setup: could not build the stat table for $d"
+    stat_table "$(cd "$d" && pwd -P)" > "$d.table" || fail "setup: could not build the stat table for $d"
     COUNT_LOG="$TMP/count.log" PATH="$CNT:$PATH" bsd_run "$d.table" "$TMP/count-shim.log" \
       vault_index_apply "$TMP" "$d" "$d/INDEX.md" >/dev/null
     [ ! -s "$TMP/count-shim.log.miss" ] || fail "BSD stat: the shim could not answer:"$'\n'"$(cat "$TMP/count-shim.log.miss")"
