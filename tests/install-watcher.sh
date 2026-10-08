@@ -38,7 +38,7 @@ mkdir -p "$CRONDIR/bin"
 printf '#!/usr/bin/env bash\necho Linux\n' > "$CRONDIR/bin/uname"
 cat > "$CRONDIR/bin/crontab" <<STUB
 #!/usr/bin/env bash
-if [ "\$1" = "-l" ]; then cat "$CRONDIR/crontab" 2>/dev/null; exit 0; fi
+if [ "\$1" = "-l" ]; then cat "$CRONDIR/crontab" 2>/dev/null; [ -s "$CRONDIR/crontab" ]; exit \$?; fi
 cat > "$CRONDIR/crontab.new" && mv "$CRONDIR/crontab.new" "$CRONDIR/crontab"
 STUB
 chmod +x "$CRONDIR/bin/uname" "$CRONDIR/bin/crontab"
@@ -51,6 +51,17 @@ PATH="$CRONDIR/bin:$PATH" bash "$SH" install "$TICK" 3600 >/dev/null 2>&1 || fai
 [ "$(grep -cF "$LABEL_MARK" "$CRONDIR/crontab")" = 1 ] || fail "re-install must leave exactly one watcher line"
 grep -q '^0 \* \* \* \* ' "$CRONDIR/crontab" || fail "re-install should write the hourly line"
 grep -qF '/usr/bin/other' "$CRONDIR/crontab" || fail "re-install dropped an unrelated crontab entry"
+
+# Re-installing over a crontab that holds only our own line: grep -v prints nothing
+# and exits 1, which under pipefail aborts the pipeline and wipes the crontab.
+printf '*/15 * * * * /bin/bash "%s" >/dev/null 2>&1 %s\n' "$TICK" "$LABEL_MARK" > "$CRONDIR/crontab"
+PATH="$CRONDIR/bin:$PATH" bash "$SH" install "$TICK" 3600 >/dev/null 2>&1 || fail "install over a crontab holding only our line should succeed"
+[ "$(grep -cF "$LABEL_MARK" "$CRONDIR/crontab")" = 1 ] || fail "only-our-line re-install must leave exactly one watcher line"
+grep -q '^0 \* \* \* \* ' "$CRONDIR/crontab" || fail "only-our-line re-install should write the hourly line"
+
+# A hand-edited line without quotes around the tick path still reports its program.
+printf '0 * * * * /bin/bash %s %s\n' "$TICK" "$LABEL_MARK" > "$CRONDIR/crontab"
+[ "$(PATH="$CRONDIR/bin:$PATH" bash "$SH" installed-program)" = "$TICK" ] || fail "installed-program should read an unquoted hand-edited line"
 
 # Unknown subcommand must fail loudly (enum-config-typo-fallback discipline).
 if bash "$SH" frobnicate "$TICK" 900 >/dev/null 2>&1; then

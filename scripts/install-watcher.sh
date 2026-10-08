@@ -107,9 +107,14 @@ installed_program() {
       prog="$(_program_of "$HOME/Library/LaunchAgents/${LABEL}.plist")"
       ;;
     *)
-      # The tick path is the double-quoted field of the rendered cron line.
-      prog="$(crontab -l 2>/dev/null | grep -F "# ${LABEL}" | head -1 \
-        | sed -n 's/.*"\([^"]*\)".*/\1/p')"
+      # The tick path is the double-quoted field of the rendered cron line, with an
+      # unquoted fallback for a hand-edited line.
+      local line
+      line="$(crontab -l 2>/dev/null | grep -F "# ${LABEL}" | head -1)" || line=""
+      prog="$(sed -n 's/.*"\([^"]*\)".*/\1/p' <<<"$line")"
+      if [ -z "$prog" ] && [ -n "$line" ]; then
+        prog="$(sed -n 's/.*\/bin\/bash[[:space:]][[:space:]]*\([^[:space:]][^[:space:]]*\).*/\1/p' <<<"$line")"
+      fi
       ;;
   esac
   [ -n "$prog" ] || return 1
@@ -144,7 +149,8 @@ install_watcher() {
         exit 1
       fi
       local line; line="$(render_cron "$tick" "$interval")" || exit 1
-      ( crontab -l 2>/dev/null | grep -vF "# ${LABEL}"; printf '%s\n' "$line" ) | crontab -
+      # grep -v exits 1 when our line was the only one; that is not a failure.
+      ( { crontab -l 2>/dev/null || true; } | { grep -vF "# ${LABEL}" || true; }; printf '%s\n' "$line" ) | crontab -
       echo "installed cron line for ${LABEL}" ;;
   esac
 }
