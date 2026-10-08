@@ -541,6 +541,31 @@ test("stdio daily append takes an exact target_path with a hash gate, and keeper
   assert.match(await readFile(join(vaultPath, "Daily", "2026-10-08.md"), "utf8"), /Linked session/);
 });
 
+test("target_path ignores a bad daily_path but session_link_date requires a valid one (#162)", async (t) => {
+  const { root, vaultPath, configPath } = await createFixtureVault();
+  await writeFile(configPath, (await readFile(configPath, "utf8")).replace(/^daily_path:.*$/m, "daily_path: ../escape/"), "utf8");
+  const server = startStdioServer(configPath);
+  t.after(async () => {
+    if (!server.child.killed) server.child.stdin.end();
+    await once(server.child, "close").catch(() => {});
+    await rm(root, { recursive: true, force: true });
+  });
+  await server.request({
+    jsonrpc: "2.0", id: 1, method: "initialize",
+    params: { protocolVersion: "2025-11-25", capabilities: {}, clientInfo: { name: "test", version: "1.0" } },
+  }, 1);
+  server.notification({ jsonrpc: "2.0", method: "notifications/initialized" });
+  const call = (id, name, args) => server.request({ jsonrpc: "2.0", id, method: "tools/call", params: { name, arguments: args } }, id);
+  const ok = await call(2, "obsidian_daily_append", { content: "x", target_path: "Projects/a.md" });
+  assert.equal(ok.result.isError, false);
+  assert.equal(ok.result.structuredContent.path, "Projects/a.md");
+  const bad = await call(3, "obsidian_keeper_save", { title: "T", body: "b", resolved: true, folder_hint: "Inbox", session_link_date: "2026-10-08" });
+  assert.equal(bad.result.isError, true);
+  assert.equal(bad.result.structuredContent.error_code, "CONFIG_INVALID");
+  const abs = await call(4, "obsidian_daily_append", { content: "x", target_path: "/etc/x.md" });
+  assert.equal(abs.result.isError, true);
+});
+
 test("find_notes matches every term of a multi-word query, not the whole phrase (#162)", async (t) => {
   const { root, vaultPath, configPath } = await createFixtureVault();
   const server = startStdioServer(configPath);

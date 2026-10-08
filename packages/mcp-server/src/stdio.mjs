@@ -455,15 +455,16 @@ function writeRequestFallback(toolName, args, configuration) {
     : "";
   if (toolName === "obsidian_keeper_save") {
     const target = normalizedKeeperSaveTarget(values.title, values.folder_hint);
-    return emptyWriteOutcome(requestId, idempotencyKey, target?.targetPath || "", target?.affectedPaths || []);
+    const linked = target && values.session_link_date && /^\d{4}-\d{2}-\d{2}$/.test(values.session_link_date) && configuration.dailyPath
+      ? [`${configuration.dailyPath}/${values.session_link_date}.md`]
+      : [];
+    return emptyWriteOutcome(requestId, idempotencyKey, target?.targetPath || "", [...(target?.affectedPaths || []), ...linked]);
   }
   const date = typeof values.date === "string" && /^\d{4}-\d{2}-\d{2}$/.test(values.date)
     ? values.date
     : new Date().toISOString().slice(0, 10);
-  const explicit = typeof values.target_path === "string" && !values.target_path.startsWith("/") && !values.target_path.split("/").some((part) => part === ".." || part === ".")
-    ? values.target_path
-    : "";
-  const path = explicit || (configuration.dailyPath ? `${configuration.dailyPath}/${date}.md` : "");
+  const explicit = typeof values.target_path === "string" && targetPathPattern.test(values.target_path.trim()) ? values.target_path.trim() : "";
+  const path = explicit || (typeof values.target_path === "string" ? "" : configuration.dailyPath ? `${configuration.dailyPath}/${date}.md` : "");
   return emptyWriteOutcome(requestId, idempotencyKey, path, path ? [path] : []);
 }
 
@@ -742,7 +743,8 @@ export async function keeperSave({ title, body, folder_hint, type, links, sessio
 
   const requestId = request_id || randomUUID();
   const idempotencyKey = idempotency_key || "";
-  const fallback = emptyWriteOutcome(requestId, idempotencyKey, targetPath, affectedPaths);
+  const linkedDaily = session_link_date && dailyPath ? [`${dailyPath.replace(/\/+$/, "")}/${session_link_date}.md`] : [];
+  const fallback = emptyWriteOutcome(requestId, idempotencyKey, targetPath, [...affectedPaths, ...linkedDaily]);
   const args = ["insert", "--vault", vaultPath, "--target", targetPath, "--title", cleanTitle, "--request-id", requestId, "--idempotency-key", idempotencyKey];
   if (session_link_date) {
     if (!dailyPath) throw codedError("CONFIG_INVALID", "session_link_date requires a configured daily_path");
@@ -943,6 +945,7 @@ export const writeOutput = z.strictObject({
   }
 });
 
+const targetPathPattern = /^(?!\.{1,2}(?:\/|$))[^\\/\u0000-\u001F\u007F]+(?:\/(?!\.{1,2}(?:\/|$))[^\\/\u0000-\u001F\u007F]+)*\.[mM][dD]$/;
 const nonBlankText = (max) => z.string().trim().min(1).max(max).regex(/\S/);
 const searchInput = z.strictObject({ query: nonBlankText(240) });
 const metadataInput = z.strictObject({ repository: nonBlankText(maxRepositoryPathCharacters) });
@@ -966,7 +969,7 @@ const dailyAppendInput = z.strictObject({
   content: z.string().min(1).max(65536),
   section: safeText(240).optional(),
   date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
-  target_path: z.string().trim().min(4).max(1024).regex(/^(?!\.{1,2}(?:\/|$))[^\\/\u0000-\u001F\u007F]+(?:\/(?!\.{1,2}(?:\/|$))[^\\/\u0000-\u001F\u007F]+)*\.[mM][dD]$/).optional(),
+  target_path: z.string().trim().min(4).max(1024).regex(targetPathPattern).optional(),
   skip_if_hash: z.string().min(7).max(64).regex(/^[0-9a-fA-F]+$/).optional(),
   idempotency_key: z.string().min(1).max(240).regex(/^[A-Za-z0-9._:-]+$/).optional(),
   request_id: z.string().min(1).max(240).regex(/^[A-Za-z0-9._:-]+$/).optional(),
@@ -1070,8 +1073,8 @@ export function createServer({ supportedProtocolVersions = protocolVersions, sco
   if (availableScopes.has("vault:write")) server.registerTool(
     "obsidian_daily_append",
     {
-      title: "Append to daily note",
-      description: "Append a section to today's daily note in the Obsidian vault.",
+      title: "Append to note",
+      description: "Append a section to a daily note (default today, or `date`), or to an exact vault-relative .md note via `target_path`. `skip_if_hash` skips the write when a section heading already carries that commit hash.",
       inputSchema: advertisedInputSchema(dailyAppendInput),
       outputSchema: writeOutput,
       annotations: writeToolAnnotations,

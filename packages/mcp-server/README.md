@@ -122,7 +122,7 @@ writes require `idempotency_key`; local stdio calls retain keyless compatibility
 `target_path` (an exact vault-relative `.md` path to append to instead of the daily note; mutually exclusive with `date`), and
 `skip_if_hash` (a 7-64 character hexadecimal commit hash that must appear in an existing section heading), plus the same request fields. Daily writes use the configured
 `daily_path`, and results report the vault-relative path actually written. MCP
-writes fail with `CONFIG_INVALID` when `daily_path` is absent or invalid; the
+writes that use `daily_path` (daily appends without `target_path`, and `session_link_date`) fail with `CONFIG_INVALID` when it is absent or invalid; the
 adapter never silently substitutes `Daily/`.
 
 Both tools return `status`, `request_id`, `idempotency_key`, `path`,
