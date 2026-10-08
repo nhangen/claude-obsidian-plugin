@@ -73,9 +73,31 @@ EOF
 }
 
 render_cron() {
-  local tick="$1" interval="$2" minutes
-  minutes=$(( interval / 60 )); [ "$minutes" -lt 1 ] && minutes=1
-  printf '*/%s * * * * /bin/bash "%s" >/dev/null 2>&1 # %s\n' "$minutes" "$tick" "$LABEL"
+  local tick="$1" interval="$2" minutes hours spec
+  case "$interval" in ''|*[!0-9]*) echo "install-watcher: interval '$interval' is not a number of seconds" >&2; return 1 ;; esac
+  # Strip leading zeros so $(( )) does not read 0900 as octal.
+  interval=$(( 10#$interval ))
+  if [ "$interval" -lt 60 ]; then
+    spec='* * * * *'
+  elif [ $(( interval % 60 )) -ne 0 ]; then
+    echo "install-watcher: ${interval}s is not a whole number of minutes; cron cannot express it" >&2; return 1
+  else
+    minutes=$(( interval / 60 ))
+    if [ "$minutes" -lt 60 ]; then
+      # A step that does not divide the hour fires unevenly at the hour boundary.
+      [ $(( 60 % minutes )) -eq 0 ] || { echo "install-watcher: ${minutes}m does not divide an hour evenly; cron cannot express it" >&2; return 1; }
+      spec="*/${minutes} * * * *"
+    else
+      [ $(( minutes % 60 )) -eq 0 ] || { echo "install-watcher: ${interval}s is not a whole number of hours; cron cannot express it" >&2; return 1; }
+      hours=$(( minutes / 60 ))
+      [ $(( 24 % hours )) -eq 0 ] || { echo "install-watcher: ${hours}h does not divide a day evenly; cron cannot express it" >&2; return 1; }
+      # */24 is past the hour field's maximum (23), same failure as */60 in minutes.
+      if [ "$hours" -eq 1 ]; then spec='0 * * * *'
+      elif [ "$hours" -eq 24 ]; then spec='0 0 * * *'
+      else spec="0 */${hours} * * *"; fi
+    fi
+  fi
+  printf '%s /bin/bash "%s" >/dev/null 2>&1 # %s\n' "$spec" "$tick" "$LABEL"
 }
 
 installed_program() {
@@ -121,7 +143,7 @@ install_watcher() {
         echo "install-watcher: [$existing]" >&2
         exit 1
       fi
-      local line; line="$(render_cron "$tick" "$interval")"
+      local line; line="$(render_cron "$tick" "$interval")" || exit 1
       ( crontab -l 2>/dev/null | grep -vF "# ${LABEL}"; printf '%s\n' "$line" ) | crontab -
       echo "installed cron line for ${LABEL}" ;;
   esac
