@@ -15,6 +15,17 @@ grep -qF "$TICK" <<<"$CRON" || fail "cron line missing tick path"
 grep -q '# com.nhangen.obsidian-vaultkeeper' <<<"$CRON" || fail "cron line missing namespace marker"
 grep -qF "\"$TICK\"" <<<"$CRON" || fail "cron line tick path not wrapped in double quotes"
 
+# Cron cannot express every interval (#144): hourly and longer must not render */60.
+cron_spec() { bash "$SH" render-cron "$TICK" "$1" | cut -d' ' -f1-5; }
+[ "$(cron_spec 900)" = '*/15 * * * *' ] || fail "900s should render */15"
+[ "$(cron_spec 3600)" = '0 * * * *' ] || fail "3600s should render hourly, got $(cron_spec 3600)"
+[ "$(cron_spec 7200)" = '0 */2 * * *' ] || fail "7200s should render 0 */2"
+for bad in 5400 420 90 18000 abc; do
+  if bash "$SH" render-cron "$TICK" "$bad" >/dev/null 2>&1; then fail "interval $bad should be refused"; fi
+done
+# The hourly form must still be recognised as ours so a re-install replaces it.
+bash "$SH" render-cron "$TICK" 3600 | grep -q 'vaultkeeper-tick.sh' || fail "hourly line lost the tick basename"
+
 # Unknown subcommand must fail loudly (enum-config-typo-fallback discipline).
 if bash "$SH" frobnicate "$TICK" 900 >/dev/null 2>&1; then
   fail "unknown subcommand should exit non-zero"
