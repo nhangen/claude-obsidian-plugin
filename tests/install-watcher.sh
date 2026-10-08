@@ -20,7 +20,9 @@ cron_spec() { bash "$SH" render-cron "$TICK" "$1" | cut -d' ' -f1-5; }
 [ "$(cron_spec 900)" = '*/15 * * * *' ] || fail "900s should render */15"
 [ "$(cron_spec 3600)" = '0 * * * *' ] || fail "3600s should render hourly, got $(cron_spec 3600)"
 [ "$(cron_spec 7200)" = '0 */2 * * *' ] || fail "7200s should render 0 */2"
-for bad in 5400 420 90 18000 abc; do
+[ "$(cron_spec 86400)" = '0 0 * * *' ] || fail "86400s should render daily, got $(cron_spec 86400)"
+[ "$(cron_spec 0900)" = '*/15 * * * *' ] || fail "0900 must not be read as octal"
+for bad in 5400 420 90 18000 172800 abc -5; do
   if bash "$SH" render-cron "$TICK" "$bad" >/dev/null 2>&1; then fail "interval $bad should be refused"; fi
 done
 # The hourly form must still be recognised as ours so a re-install replaces it.
