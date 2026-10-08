@@ -22,11 +22,36 @@ cron_spec() { bash "$SH" render-cron "$TICK" "$1" | cut -d' ' -f1-5; }
 [ "$(cron_spec 7200)" = '0 */2 * * *' ] || fail "7200s should render 0 */2"
 [ "$(cron_spec 86400)" = '0 0 * * *' ] || fail "86400s should render daily, got $(cron_spec 86400)"
 [ "$(cron_spec 0900)" = '*/15 * * * *' ] || fail "0900 must not be read as octal"
-for bad in 5400 420 90 18000 172800 abc -5; do
-  if bash "$SH" render-cron "$TICK" "$bad" >/dev/null 2>&1; then fail "interval $bad should be refused"; fi
+[ "$(cron_spec 30)" = '* * * * *' ] || fail "sub-minute interval should render every minute"
+[ "$(cron_spec 60)" = '*/1 * * * *' ] || fail "60s should render */1"
+[ "$(cron_spec 43200)" = '0 */12 * * *' ] || fail "43200s should render 0 */12"
+for bad in 5400 420 90 18000 172800 abc; do
+  if out="$(bash "$SH" render-cron "$TICK" "$bad" 2>/dev/null)"; then fail "interval $bad should be refused"; fi
+  [ -z "$out" ] || fail "refused interval $bad must print no cron line, got: $out"
 done
-# The hourly form must still be recognised as ours so a re-install replaces it.
-bash "$SH" render-cron "$TICK" 3600 | grep -q 'vaultkeeper-tick.sh' || fail "hourly line lost the tick basename"
+
+# Drive the cron `install` branch with a stubbed uname and crontab (#144). The suite
+# otherwise only stubs launchctl, so a refused interval that wrote an empty line
+# would pass.
+CRONDIR="$(mktemp -d "${TMPDIR:-/tmp}/iw-cron-XXXXXX")"
+mkdir -p "$CRONDIR/bin"
+printf '#!/usr/bin/env bash\necho Linux\n' > "$CRONDIR/bin/uname"
+cat > "$CRONDIR/bin/crontab" <<STUB
+#!/usr/bin/env bash
+if [ "\$1" = "-l" ]; then cat "$CRONDIR/crontab" 2>/dev/null; exit 0; fi
+cat > "$CRONDIR/crontab.new" && mv "$CRONDIR/crontab.new" "$CRONDIR/crontab"
+STUB
+chmod +x "$CRONDIR/bin/uname" "$CRONDIR/bin/crontab"
+LABEL_MARK='# com.nhangen.obsidian-vaultkeeper'
+printf '0 1 * * * /usr/bin/other\n*/15 * * * * /bin/bash "%s" >/dev/null 2>&1 %s\n' "$TICK" "$LABEL_MARK" > "$CRONDIR/crontab"
+BEFORE="$(cat "$CRONDIR/crontab")"
+if PATH="$CRONDIR/bin:$PATH" bash "$SH" install "$TICK" 5400 >/dev/null 2>&1; then fail "install of a refused interval should exit non-zero"; fi
+[ "$(cat "$CRONDIR/crontab")" = "$BEFORE" ] || fail "a refused install must leave the crontab untouched"
+PATH="$CRONDIR/bin:$PATH" bash "$SH" install "$TICK" 3600 >/dev/null 2>&1 || fail "install of 3600 should succeed over an existing */15 line"
+[ "$(grep -cF "$LABEL_MARK" "$CRONDIR/crontab")" = 1 ] || fail "re-install must leave exactly one watcher line"
+grep -q '^0 \* \* \* \* ' "$CRONDIR/crontab" || fail "re-install should write the hourly line"
+grep -qF '/usr/bin/other' "$CRONDIR/crontab" || fail "re-install dropped an unrelated crontab entry"
+rm -rf "$CRONDIR"
 
 # Unknown subcommand must fail loudly (enum-config-typo-fallback discipline).
 if bash "$SH" frobnicate "$TICK" 900 >/dev/null 2>&1; then
