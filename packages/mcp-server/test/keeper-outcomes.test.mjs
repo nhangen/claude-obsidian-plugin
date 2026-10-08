@@ -61,6 +61,14 @@ test("keeper diagnostics drop progress markers and keep everything else", { time
   assert.doesNotMatch(keeperDiagnostics(stderr), /keeper-progress/);
 });
 
+test("a keeper save with session_link_date reports the daily link as unfinished after a stop", () => {
+  const stderr = "keeper-progress tok: note-written pending=index,daily-link\nkeeper-progress tok: index-written";
+  assert.deepEqual(keeperProgress(stderr, "tok"), { noteWritten: true, unfinished: ["daily Session Link"] });
+  const stopped = noteWrittenStopOutcome(keyed, "SUBPROCESS_TIMEOUT", ["daily Session Link"], "MCP_KEEPER_SAVE_TIMEOUT_MS");
+  assertContract(stopped);
+  assert.match(stopped.recovery.action, /daily Session Link/);
+});
+
 test("a stop after the note is written is worded by its cause and keeps the write contract", { timeout: 10_000 }, () => {
   const timeout = noteWrittenStopOutcome(keyed, "SUBPROCESS_TIMEOUT", ["INDEX"], "MCP_KEEPER_SAVE_TIMEOUT_MS");
   assertContract(timeout);
