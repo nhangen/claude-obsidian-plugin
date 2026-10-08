@@ -515,9 +515,9 @@ function compatibleKeeperExit(code, outcome) {
 // stderr (see keeper_progress in scripts/keeper). tests/keeper-progress.sh is
 // the protocol contract; this parser must accept exactly what it pins. Steps
 // are named the way a caller recognizes them; a step this adapter does not
-// know is reported by its raw name. The adapter never passes
-// --session-link-date, so a keeper save never has the daily link pending, and
-// the idempotency record is the implicit last step of every keyed insert.
+// know is reported by its raw name. The daily link is pending only when the
+// save passed session_link_date, and the idempotency record is the implicit
+// last step of every keyed insert.
 const keeperStepNames = Object.freeze({
   index: "INDEX",
   "daily-link": "daily Session Link",
@@ -1018,7 +1018,7 @@ export function createServer({ supportedProtocolVersions = protocolVersions, sco
     "obsidian_find_notes",
     {
       title: "Find Obsidian notes",
-      description: "Search the configured Obsidian vault without modifying it.",
+      description: "Search the configured Obsidian vault without modifying it. Every whitespace-separated term must appear in the path, tags, or body; results are ranked by summed per-term score.",
       inputSchema: advertisedInputSchema(searchInput),
       outputSchema: searchOutput,
       annotations: readToolAnnotations,

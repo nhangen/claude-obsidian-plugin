@@ -529,9 +529,17 @@ test("stdio daily append takes an exact target_path with a hash gate, and keeper
   assert.equal(written.split("abc1234 first commit").length - 1, 1, "hash gate must not append the same commit twice");
   await assert.rejects(readFile(join(vaultPath, "Daily", "2026-10-08.md"), "utf8"));
 
-  for (const [id, bad] of [[4, { target_path: "../escape.md" }], [5, { target_path: "Projects/note.txt" }], [6, { target_path: target, date: "2026-10-08" }]]) {
+  // A rejected target_path never reports the daily note as the path; the date
+  // conflict reports the path the caller asked for.
+  for (const [id, bad, expectedPath] of [
+    [4, { target_path: "../escape.md" }, ""],
+    [5, { target_path: "Projects/note.txt" }, ""],
+    [6, { target_path: target, date: "2026-10-08" }, target],
+  ]) {
     const rejected = await call(id, "obsidian_daily_append", { content: "x", ...bad });
     assert.equal(rejected.result.isError, true, JSON.stringify(bad));
+    assert.equal(rejected.result.structuredContent.error_code, "INVALID_INPUT", JSON.stringify(bad));
+    assert.equal(rejected.result.structuredContent.path, expectedPath, JSON.stringify(bad));
   }
 
   const saved = await call(7, "obsidian_keeper_save", {
@@ -539,6 +547,14 @@ test("stdio daily append takes an exact target_path with a hash gate, and keeper
   });
   assert.equal(saved.result.isError, false);
   assert.match(await readFile(join(vaultPath, "Daily", "2026-10-08.md"), "utf8"), /Linked session/);
+  assert.ok(saved.result.structuredContent.affected_paths.includes("Daily/2026-10-08.md"));
+
+  // The fallback outcome (used when the keeper never reports) also names the daily note.
+  const invalid = await call(8, "obsidian_keeper_save", {
+    title: "Linked session", body: "", resolved: true, folder_hint: "Inbox", session_link_date: "2026-10-08",
+  });
+  assert.equal(invalid.result.isError, true);
+  assert.ok(invalid.result.structuredContent.affected_paths.includes("Daily/2026-10-08.md"));
 });
 
 test("target_path ignores a bad daily_path but session_link_date requires a valid one (#162)", async (t) => {
@@ -564,6 +580,8 @@ test("target_path ignores a bad daily_path but session_link_date requires a vali
   assert.equal(bad.result.structuredContent.error_code, "CONFIG_INVALID");
   const abs = await call(4, "obsidian_daily_append", { content: "x", target_path: "/etc/x.md" });
   assert.equal(abs.result.isError, true);
+  assert.equal(abs.result.structuredContent.error_code, "INVALID_INPUT");
+  assert.equal(abs.result.structuredContent.path, "");
 });
 
 test("find_notes matches every term of a multi-word query, not the whole phrase (#162)", async (t) => {
@@ -576,6 +594,8 @@ test("find_notes matches every term of a multi-word query, not the whole phrase 
   });
   await writeFile(join(vaultPath, "Projects", "TypeSafe outage.md"), "The obsidian mcp skill was down.\n", "utf8");
   await writeFile(join(vaultPath, "Projects", "Other.md"), "typesafe only here\n", "utf8");
+  await writeFile(join(vaultPath, "Projects", "Strong.md"), "alpha alpha alpha alpha alpha beta\n", "utf8");
+  await writeFile(join(vaultPath, "Projects", "Weak.md"), "beta first line\nalpha beta second line\n", "utf8");
   await server.request({
     jsonrpc: "2.0", id: 1, method: "initialize",
     params: { protocolVersion: "2025-11-25", capabilities: {}, clientInfo: { name: "test", version: "1.0" } },
@@ -586,6 +606,16 @@ test("find_notes matches every term of a multi-word query, not the whole phrase 
     params: { name: "obsidian_find_notes", arguments: { query: "typesafe skill obsidian mcp outage" } },
   }, 2);
   assert.deepEqual(found.result.structuredContent.matches.map((match) => match.path), ["Projects/TypeSafe outage.md"]);
+
+  // Per-term scores add up (Strong 5+1 occurrences beats Weak 1+2), and the preview
+  // is the first line that holds any term, not only the first term.
+  const ranked = await server.request({
+    jsonrpc: "2.0", id: 3, method: "tools/call",
+    params: { name: "obsidian_find_notes", arguments: { query: "alpha beta alpha" } },
+  }, 3);
+  const matches = ranked.result.structuredContent.matches;
+  assert.deepEqual(matches.map((match) => match.path), ["Projects/Strong.md", "Projects/Weak.md"]);
+  assert.equal(matches[1].preview, "beta first line");
 });
 
 test("stdio writes fail with a structured configuration error when daily_path is missing or invalid", async (t) => {
