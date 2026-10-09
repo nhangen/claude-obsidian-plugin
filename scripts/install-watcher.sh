@@ -152,14 +152,19 @@ install_watcher() {
       # Read the crontab first. "no crontab for <user>" is an empty one; any other
       # failure aborts before anything is written, so a read error can never
       # install our line alone over the user's other entries.
-      local current="" crc=0
-      current="$(crontab -l 2>&1)" || crc=$?
+      # Stderr is kept apart from the content so a warning can never be written
+      # back into the crontab. BusyBox words the empty case differently.
+      local current="" crc=0 cerr
+      cerr="$(mktemp)"
+      current="$(crontab -l 2>"$cerr")" || crc=$?
       if [ "$crc" -ne 0 ]; then
-        case "$current" in
-          *"no crontab for"*) current="" ;;
-          *) echo "install-watcher: could not read the crontab: [$current]" >&2; exit 1 ;;
+        local msg; msg="$(cat "$cerr")"
+        case "$msg" in
+          *"no crontab for"*|*"can't open"*"No such file"*) current="" ;;
+          *) rm -f "$cerr"; echo "install-watcher: could not read the crontab: [$msg]" >&2; exit 1 ;;
         esac
       fi
+      rm -f "$cerr"
       # grep -v exits 1 when our line was the only one; that is not a failure.
       local kept
       kept="$(printf '%s\n' "$current" | { grep -vF "# ${LABEL}" || true; })"
