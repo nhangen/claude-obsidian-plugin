@@ -228,7 +228,7 @@ fi
 
 # --- Extract git metadata ---
 
-HASH=$(GIT rev-parse --short HEAD 2>/dev/null) || exit 0
+HASH="$FULL_SHA"
 
 # Which commits did this call make? Oldest first, so appending the records to a
 # daily note reads in the order the work happened. Without a trusted before-image
@@ -306,7 +306,7 @@ if [ "$SHA_COUNT" -gt "$MAX_RECORDS" ]; then
     if [ "$N" -le "$MAX_RECORDS" ]; then
       KEPT="${KEPT}${SHA_ONE}"$'\n'
     else
-      SKIPPED="${SKIPPED}$(GIT rev-parse --short "$SHA_ONE" 2>/dev/null) "
+      SKIPPED="${SKIPPED}$(GIT rev-parse --verify "$SHA_ONE^{commit}" 2>/dev/null) "
     fi
   done
   SHAS="$KEPT"
@@ -488,7 +488,7 @@ fi
 # One record per commit this call made, oldest first. The skill reads each line
 # independently, so several records from one invocation need no new contract.
 for SHA_ONE in $SHAS; do
-  ONE_HASH=$(GIT rev-parse --short "$SHA_ONE" 2>/dev/null) || continue
+  ONE_HASH=$(GIT rev-parse --verify "$SHA_ONE^{commit}" 2>/dev/null) || continue
   ONE_MSG=$(GIT log -1 --pretty=format:'%s' "$SHA_ONE" 2>/dev/null) || ONE_MSG=""
   say "$(printf 'hash=%s | branch=%s | files=%s | org_repo=%s | repo_name=%s | ticket=%s | date=%s | time=%s | vault_path=%s | msg=%s' \
     "$ONE_HASH" "$BRANCH" "$(scrub_field "$(cc_files_for "$SHA_ONE")")" "$ORG_REPO" "$REPO_NAME" \

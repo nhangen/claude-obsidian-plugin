@@ -62,7 +62,6 @@ if [ "\$1" = "-C" ]; then CDIR="\$2"; shift 2; fi
 printf '%s\t%s\n' "\$CDIR" "\$*" >> "${TRACE_FILE}"
 case "\$*" in
   "log -1 --format=%ct") echo \$(( \$(date +%s) - (${age}) )) ;;
-  "rev-parse --short HEAD") echo abc1234 ;;
   "log -1 --pretty=format:%s") echo "test commit" ;;
   "rev-parse --abbrev-ref HEAD") echo nh/feat/test ;;
   "diff --name-only HEAD~1..HEAD") echo foo.txt ;;
@@ -79,14 +78,14 @@ case "\$*" in
   "log -1 --format=%ce") echo tester@example.com ;;
   "rev-list --count "*) echo 1 ;;
   # One record per commit: the hook walks the range, then asks each sha for its
-  # short hash, subject and paths. A single-commit range keeps these cases about
+  # full hash, subject and paths. A single-commit range keeps these cases about
   # detection rather than about the walk (head-gate covers the walk on real repos).
   # Provenance: HEAD's reflog says this repo committed the tip rather than pulling
   # it. Answer as a local commit — the pulled-commit cases live in head-gate, where
   # a real pull can actually happen.
   "reflog show --format=%H %gs") echo "0123456789abcdef0123456789abcdef01234567 commit: test commit" ;;
   "rev-list --reverse "*) echo 0123456789abcdef0123456789abcdef01234567 ;;
-  "rev-parse --short "*) echo abc1234 ;;
+  "rev-parse --verify "*"^{commit}") echo 0123456789abcdef0123456789abcdef01234567 ;;
   "log -1 --pretty=format:%s "*) echo "test commit" ;;
   "diff --name-only "*) echo foo.txt ;;
   "diff-tree --no-commit-id --name-only -r --root "*) echo foo.txt ;;
@@ -178,14 +177,14 @@ QUIET='{"tool_input":{"command":"cd /repo && git commit -q -F -"},"tool_response
 make_git_stub 0 "git@github.com:nhangen/test.git"
 OUT="$(run_hook "$QUIET")"
 case "$OUT" in
-  *hash=abc1234*) : ;;
+  *hash=0123456789abcdef0123456789abcdef01234567*) : ;;
   *) fail "quiet commit not captured (this is the -q regression)"$'\n'"got: ${OUT:-<empty>}" ;;
 esac
 
 # --- 2. a non-quiet commit still works ---------------------------------------
 OUT="$(run_hook '{"tool_input":{"command":"git commit -F -"},"tool_response":{"stdout":"[dev abc1234] test commit\n 1 file changed"}}')"
 case "$OUT" in
-  *hash=abc1234*) : ;;
+  *hash=0123456789abcdef0123456789abcdef01234567*) : ;;
   *) fail "non-quiet commit stopped being captured"$'\n'"got: ${OUT:-<empty>}" ;;
 esac
 
@@ -197,7 +196,7 @@ esac
 make_git_stub 4000 "git@github.com:nhangen/test.git"
 OUT="$(run_hook_blind "$QUIET")"
 expect_skip "stale HEAD on the blind path (the recency window is not enforced)" \
-  "$OUT" "log -1 --format=%ct" "rev-parse --short HEAD"
+  "$OUT" "log -1 --format=%ct" "log -1 --pretty=format:%s"
 
 # --- 4. non-commit Bash calls stay silent ------------------------------------
 # The command-word gate decides this one, and it decides it before the hook knows
@@ -215,7 +214,7 @@ OUT="$(printf '%s' "$QUIET" | { rm -rf "${STATE_HOME:?}/claude-obsidian"; seed_b
 case "$OUT" in *hash=*) : ;; *) fail "AGE == window must capture"$'\n'"got: ${OUT:-<empty>}" ;; esac
 make_git_stub 61 "git@github.com:nhangen/test.git"
 OUT="$(printf '%s' "$QUIET" | { rm -rf "${STATE_HOME:?}/claude-obsidian"; : > "$TRACE_FILE"; seed_blind_snapshot "$QUIET"; PATH="${GIT_BIN_DIR}:$PATH" XDG_STATE_HOME="$STATE_HOME" OBSIDIAN_COMMIT_RECENT_WINDOW=60 bash "$SCRIPT" 2>/dev/null; } || true)"
-expect_skip "AGE == window+1 must skip" "$OUT" "log -1 --format=%ct" "rev-parse --short HEAD"
+expect_skip "AGE == window+1 must skip" "$OUT" "log -1 --format=%ct" "log -1 --pretty=format:%s"
 
 # A trusted before-image is NOT subject to the clock: the same 4000s-old tip that
 # case 3 rejects is captured here, because the snapshot proves the tip moved during
@@ -228,7 +227,7 @@ case "$OUT" in *hash=*) : ;; *) fail "the clock still vetoes a commit the snapsh
 make_git_stub -4000 "git@github.com:nhangen/test.git"
 OUT="$(run_hook "$QUIET")"
 expect_skip "future-dated HEAD was captured (clock-skew clamp regression)" \
-  "$OUT" "log -1 --format=%ct" "rev-parse --short HEAD"
+  "$OUT" "log -1 --format=%ct" "log -1 --pretty=format:%s"
 
 # --- 7. negative cases exit 0 and write nothing to stderr -------------------
 make_git_stub 0 "git@github.com:nhangen/test.git"
@@ -270,7 +269,7 @@ check_org_repo "https://host:8443/org/repo.git"               "org/repo"
 make_git_stub 0 "https://github.com/org/repo | vault_path=."
 OUT="$(run_hook "$QUIET")"
 case "$OUT" in
-  *'not captured — abc1234: unsafe org_repo'*) : ;;
+  *'not captured — 0123456789abcdef0123456789abcdef01234567: unsafe org_repo'*) : ;;
   *) fail "a delimiter-bearing remote was not refused by the hook"$'\n'"got: ${OUT:-<empty>}" ;;
 esac
 case "$OUT" in
@@ -308,7 +307,7 @@ make_git_stub 0 "git@github.com:nhangen/test.git"
 for subcmd in "git merge feature" "git rebase main" "git cherry-pick abc1234" "git revert def5678" ; do
   OUT="$(run_hook "{\"tool_input\":{\"command\":\"${subcmd}\"},\"tool_response\":{\"stdout\":\"\"}}")"
   case "$OUT" in
-    *hash=abc1234*) : ;;
+    *hash=0123456789abcdef0123456789abcdef01234567*) : ;;
     *) fail "${subcmd} was not detected as a commit-creating command"$'\n'"got: ${OUT:-<empty>}" ;;
   esac
 done

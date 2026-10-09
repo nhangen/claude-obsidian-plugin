@@ -12,7 +12,7 @@
 # which is exactly the regression that matters here.
 set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-CMD="${ROOT_DIR}/scripts/commit-meta.sh"
+CMD="${COMMIT_META_UNDER_TEST:-${ROOT_DIR}/scripts/commit-meta.sh}"
 fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
 
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/commit-meta-XXXXXX")"; trap 'rm -rf "$TMP"' EXIT
@@ -52,6 +52,16 @@ case "$OUT" in
 esac
 [ "$(field "$OUT" org_repo)" = "org/repo" ] \
   || fail "expected org_repo=org/repo from a token-bearing remote, got: $(field "$OUT" org_repo)"
+
+# Metadata identity is always the full object id, independent of core.abbrev.
+FULL_HASH="$(git -C "$R" rev-parse HEAD)"
+for ABBREV in 4 7 8 12 auto no; do
+  git -C "$R" config core.abbrev "$ABBREV"
+  OUT="$(run)"
+  [ "$(field "$OUT" hash)" = "$FULL_HASH" ] \
+    || fail "core.abbrev=$ABBREV changed the emitted commit identity: $(field "$OUT" hash)"
+done
+git -C "$R" config --unset core.abbrev
 
 # Same remote without a port — the arm that regressed historically, because the
 # scp-style branch matched first and carried the userinfo through.
@@ -166,5 +176,20 @@ git -C "$ROOT_REPO" commit -q -m 'first commit'
 ROOT_OUT="$(bash "$CMD" -C "$ROOT_REPO" HEAD)"
 [ "$(field "$ROOT_OUT" files)" = "first.txt" ] \
   || fail "expected files=first.txt for root commit, got: $(field "$ROOT_OUT" files)"
+
+# SHA-256 repositories use 64-character object ids and must not be truncated.
+SHA256_REPO="$TMP/sha256-repo"; mkdir -p "$SHA256_REPO"
+git -C "$SHA256_REPO" init -q --object-format=sha256
+git -C "$SHA256_REPO" config core.hooksPath /dev/null
+git -C "$SHA256_REPO" config user.email t@example.com
+git -C "$SHA256_REPO" config user.name Tester
+git -C "$SHA256_REPO" config core.abbrev 8
+printf 'sha256\n' > "$SHA256_REPO/file.txt"; git -C "$SHA256_REPO" add file.txt
+git -C "$SHA256_REPO" commit -q -m 'sha256 commit'
+SHA256_OUT="$(bash "$CMD" -C "$SHA256_REPO" HEAD)"
+[ "$(field "$SHA256_OUT" hash)" = "$(git -C "$SHA256_REPO" rev-parse HEAD)" ] \
+  || fail "SHA-256 metadata was not the full object id: $(field "$SHA256_OUT" hash)"
+[ "${#FULL_HASH}" = 40 ] || fail "SHA-1 fixture did not produce a 40-character id"
+[ "${#SHA256_OUT}" -gt 64 ] || fail "SHA-256 fixture did not produce a metadata record"
 
 printf 'ok   commit-meta.sh (record for an existing commit; userinfo strip at the second entry point)\n'

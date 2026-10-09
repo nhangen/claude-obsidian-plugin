@@ -99,6 +99,7 @@ mkdir -p "$REPO" "$VAULT"
 git -C "$REPO" init -q
 git -C "$REPO" config core.hooksPath /dev/null
 git -C "$REPO" config commit.gpgsign false
+git -C "$REPO" config core.abbrev 4
 git -C "$REPO" config user.email codex@example.com
 git -C "$REPO" config user.name Codex
 git -C "$REPO" remote add origin https://oauth2:SECRET_TOKEN@github.com/nhangen/codex-fixture.git
@@ -117,6 +118,8 @@ case "$RECORD" in
 esac
 
 HASH="$(printf '%s' "$RECORD" | sed -n 's/^hash=\([^ ]*\).*/\1/p')"
+[ "$HASH" = "$(git -C "$REPO" rev-parse HEAD)" ] \
+  || fail "installed commit-meta did not emit the full commit id"
 TODAY="$(date '+%Y-%m-%d')"
 TARGET="Projects/Development/nhangen/codex-fixture/$TODAY.md"
 BODY="$TMP/body.md"

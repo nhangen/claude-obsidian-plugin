@@ -24,7 +24,7 @@ if [ "$1" = "-C" ]; then shift 2; fi
 case "$*" in
   "log -1 --format=%ct") date +%s ;;
   "rev-parse HEAD") echo 0123456789abcdef0123456789abcdef01234567 ;;
-  "rev-parse --short HEAD") echo abc1234 ;;
+  "rev-parse --verify "*"^{commit}") echo 0123456789abcdef0123456789abcdef01234567 ;;
   "log -1 --pretty=format:%s") echo "test commit" ;;
   "rev-parse --abbrev-ref HEAD") echo nh/feat/test ;;
   "diff --name-only HEAD~1..HEAD") echo foo.txt ;;
