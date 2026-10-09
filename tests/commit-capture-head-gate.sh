@@ -845,6 +845,7 @@ FIRST_HASH="$(printf '%s' "$POST_OUT" | sed -n 's/.*hash=\([0-9a-f]*\).*/\1/p')"
 [ -n "$FIRST_HASH" ] || fail "case 25 setup: the pre-amend commit was not captured"$'\n'"got: ${POST_OUT:-<empty>}"
 
 reset_state
+git -C "$REPO" config core.abbrev 4
 P="$(payload 'git commit -q --amend -m "amended subject"' "$REPO" call-25b)"
 run_pre "$P"
 git -C "$REPO" commit -q --amend -m "amended subject"
@@ -856,9 +857,10 @@ esac
 RECORDS="$(printf '%s' "$POST_OUT" | grep -o 'hash=' | wc -l | tr -d ' ')"
 [ "$RECORDS" -eq 1 ] || fail "an amend produced ${RECORDS} records; the walk is not starting at the amended commit's parent"$'\n'"got: $POST_OUT"
 AMEND_HASH="$(printf '%s' "$POST_OUT" | sed -n 's/.*hash=\([0-9a-f]*\).*/\1/p')"
-[ "$AMEND_HASH" = "$(git -C "$REPO" rev-parse --short HEAD)" ] \
-  || fail "the amend record names ${AMEND_HASH}, not the amended tip $(git -C "$REPO" rev-parse --short HEAD)"
+[ "$AMEND_HASH" = "$(git -C "$REPO" rev-parse HEAD)" ] \
+  || fail "the amend record names ${AMEND_HASH}, not the full amended tip $(git -C "$REPO" rev-parse HEAD)"
 [ "$AMEND_HASH" != "$FIRST_HASH" ] || fail "the amend record repeats the pre-amend sha ${FIRST_HASH}; an amend always rewrites it"
+git -C "$REPO" config --unset core.abbrev
 case "$POST_OUT" in
   *'msg=amended subject'*) : ;;
   *) fail "the amend record carries the pre-amend subject; the record is not read from the new tip"$'\n'"got: $POST_OUT" ;;

@@ -238,7 +238,7 @@
           "retryable": { "type": "boolean" }
         }
       },
-      "idempotency": "required for Streamable HTTP writes and optional for local stdio compatibility; same key and payload skips, same key with a different payload conflicts",
+      "idempotency": "required for Streamable HTTP writes and optional for local stdio compatibility; same key and payload skips, same key with a different payload conflicts; an exact heading hash skips while a strict abbreviation/full-hash relation conflicts without writing",
       "errors": ["INVALID_INPUT", "PATH_INVALID", "CONFIG_INVALID", "FORBIDDEN", "IDEMPOTENCY_CONFLICT", "CONFLICT", "PARTIAL", "WRITE_FAILED", "KEEPER_PROTOCOL_ERROR", "SUBPROCESS_TIMEOUT", "SUBPROCESS_OUTPUT_LIMIT", "CANCELLED"]
     }
   },

@@ -502,6 +502,43 @@ test("packed stdio and HTTP entrypoints serialize contended keeper writes", asyn
     }
   });
 
+  await t.test("packaged stdio rejects legacy/full hash relations without writing", async () => {
+    const server = await startStdio();
+    const shortHash = "9876543210ab";
+    const fullHash = "9876543210abcdef9876543210abcdef98765432";
+    const target = "Journal/Days/2026-09-30.md";
+    const first = await stdioCall(server, 250, "obsidian_daily_append", {
+      content: "legacy packaged capture",
+      section: `## ${shortHash} — legacy packaged capture`,
+      date: "2026-09-30",
+      skip_if_hash: shortHash,
+    });
+    assert.equal(writeOutcome(first).status, "committed");
+    const before = await readFile(join(vault, target), "utf8");
+    const idempotencyDirectory = join(vault, ".obsidian", "keeper-idempotency");
+    const recordsBefore = await readdir(idempotencyDirectory).catch(() => []);
+
+    const second = await stdioCall(server, 251, "obsidian_daily_append", {
+      content: "portable packaged capture",
+      section: `## ${fullHash} — portable packaged capture`,
+      date: "2026-09-30",
+      skip_if_hash: fullHash,
+      idempotency_key: "packaged-prefix-conflict",
+      request_id: "packaged-prefix-conflict-request",
+    });
+    const outcome = writeOutcome(second);
+    assert.equal(second.result.isError, true);
+    assert.equal(outcome.status, "conflict");
+    assert.equal(outcome.error_code, "CONFLICT");
+    assert.equal(outcome.path, target);
+    assert.deepEqual(outcome.affected_paths, [target]);
+    assert.ok(outcome.warnings.includes("verify the existing heading against the full commit before retrying"));
+    assert.equal(await readFile(join(vault, target), "utf8"), before);
+    assert.deepEqual(await readdir(idempotencyDirectory).catch(() => []), recordsBefore);
+    await close(server.child, server.output);
+    assertMcpOutput(server.output);
+  });
+
   await t.test("stdio and HTTP expose one insert commit and one conflict", async () => {
     const stdio = await startStdio();
     const httpChild = spawn(httpLauncher, [], {

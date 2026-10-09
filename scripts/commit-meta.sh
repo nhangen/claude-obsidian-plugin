@@ -56,7 +56,7 @@ GIT() {
 GIT rev-parse --is-inside-work-tree >/dev/null 2>&1 \
   || die "not a git work tree${GIT_DIR_ARG:+ ($GIT_DIR_ARG)}"
 
-HASH="$(GIT rev-parse --short "$REV" 2>/dev/null)" || die "no such commit: $REV"
+HASH="$(GIT rev-parse --verify "$REV^{commit}" 2>/dev/null)" || die "no such commit: $REV"
 MSG="$(GIT log -1 --pretty=format:'%s' "$REV" 2>/dev/null)" || MSG=""
 BRANCH="$(GIT rev-parse --abbrev-ref HEAD 2>/dev/null)" || BRANCH=""
 FILES="$(GIT diff-tree --no-commit-id --name-only -r --root -m --first-parent "$REV" 2>/dev/null | tr '\n' ',' | sed 's/,$//')" || FILES=""

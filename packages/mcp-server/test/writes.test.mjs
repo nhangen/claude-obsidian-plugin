@@ -480,6 +480,123 @@ test("stdio server executes obsidian_daily_append with skip_if_hash idempotency"
   assert.equal(JSON.parse(conflict.result.content[0].text).code, "IDEMPOTENCY_CONFLICT");
 });
 
+test("stdio daily append rejects abbreviation relations without writing or claiming a skip", async (t) => {
+  const { root, vaultPath, configPath } = await createFixtureVault();
+  const server = startStdioServer(configPath);
+  t.after(async () => {
+    if (!server.child.killed) server.child.stdin.end();
+    await once(server.child, "close").catch(() => {});
+    await rm(root, { recursive: true, force: true });
+  });
+
+  await server.request({
+    jsonrpc: "2.0", id: 1, method: "initialize",
+    params: { protocolVersion: "2025-11-25", capabilities: {}, clientInfo: { name: "test", version: "1.0" } },
+  }, 1);
+  server.notification({ jsonrpc: "2.0", method: "notifications/initialized" });
+
+  const shortHash = "abcdef123456";
+  const fullHash = "abcdef1234567890abcdef1234567890abcdef12";
+  const target = "Daily/2026-09-23.md";
+  const first = await server.request({
+    jsonrpc: "2.0", id: 2, method: "tools/call",
+    params: { name: "obsidian_daily_append", arguments: {
+      content: "legacy capture", section: `## ${shortHash} — legacy`, date: "2026-09-23", skip_if_hash: shortHash,
+    } },
+  }, 2);
+  assert.equal(first.result.isError, false);
+  const before = await readFile(join(vaultPath, target), "utf8");
+  const idempotencyDirectory = join(vaultPath, ".obsidian", "keeper-idempotency");
+  const recordsBefore = await readdir(idempotencyDirectory).catch(() => []);
+
+  const second = await server.request({
+    jsonrpc: "2.0", id: 3, method: "tools/call",
+    params: { name: "obsidian_daily_append", arguments: {
+      content: "portable capture", section: `## ${fullHash} — portable`, date: "2026-09-23", skip_if_hash: fullHash,
+      idempotency_key: "prefix-conflict-key", request_id: "prefix-conflict-request",
+    } },
+  }, 3);
+  assert.equal(second.result.isError, true);
+  const outcome = second.result.structuredContent;
+  assert.equal(outcome.status, "conflict");
+  assert.equal(outcome.error_code, "CONFLICT");
+  assert.equal(outcome.path, target);
+  assert.deepEqual(outcome.affected_paths, [target]);
+  assert.deepEqual(outcome.recovery, { required: false, action: "" });
+  assert.equal(outcome.retryable, false);
+  assert.ok(outcome.warnings.includes("verify the existing heading against the full commit before retrying"));
+  assert.equal(await readFile(join(vaultPath, target), "utf8"), before);
+  assert.deepEqual(await readdir(idempotencyDirectory).catch(() => []), recordsBefore);
+});
+
+test("stdio prefix conflict preserves existing pending recovery evidence", async (t) => {
+  const { root, vaultPath, configPath } = await createFixtureVault();
+  const faultServer = startStdioServer(configPath, { KEEPER_FAULT_INJECT: "before_append" });
+  let recoveryServer;
+  t.after(async () => {
+    for (const server of [faultServer, recoveryServer]) {
+      if (server?.child.exitCode === null) {
+        server.child.stdin.end();
+        await once(server.child, "close").catch(() => {});
+      }
+    }
+    await rm(root, { recursive: true, force: true });
+  });
+
+  await faultServer.request({
+    jsonrpc: "2.0", id: 1, method: "initialize",
+    params: { protocolVersion: "2025-11-25", capabilities: {}, clientInfo: { name: "test", version: "1.0" } },
+  }, 1);
+  faultServer.notification({ jsonrpc: "2.0", method: "notifications/initialized" });
+
+  const fullHash = "bcdefab1234567890bcdefab1234567890bcdefab";
+  const target = "Daily/2026-09-24.md";
+  const requestArguments = {
+    content: "portable capture",
+    section: `## ${fullHash} — portable`,
+    date: "2026-09-24",
+    skip_if_hash: fullHash,
+    idempotency_key: "pending-prefix-key",
+  };
+  const first = await faultServer.request({
+    jsonrpc: "2.0", id: 2, method: "tools/call",
+    params: { name: "obsidian_daily_append", arguments: { ...requestArguments, request_id: "pending-prefix-first" } },
+  }, 2);
+  assert.equal(first.result.isError, true);
+  assert.equal(first.result.structuredContent.status, "partial");
+  faultServer.child.stdin.end();
+  await once(faultServer.child, "close");
+
+  const idempotencyDirectory = join(vaultPath, ".obsidian", "keeper-idempotency");
+  const records = await readdir(idempotencyDirectory);
+  assert.equal(records.length, 1);
+  const recordPath = join(idempotencyDirectory, records[0]);
+  const recordBefore = await readFile(recordPath, "utf8");
+  const notePath = join(vaultPath, target);
+  await writeFile(notePath, "## bcdefab — legacy capture\n\nlegacy body\n");
+  const noteBefore = await readFile(notePath, "utf8");
+
+  recoveryServer = startStdioServer(configPath);
+  await recoveryServer.request({
+    jsonrpc: "2.0", id: 3, method: "initialize",
+    params: { protocolVersion: "2025-11-25", capabilities: {}, clientInfo: { name: "test", version: "1.0" } },
+  }, 3);
+  recoveryServer.notification({ jsonrpc: "2.0", method: "notifications/initialized" });
+  const second = await recoveryServer.request({
+    jsonrpc: "2.0", id: 4, method: "tools/call",
+    params: { name: "obsidian_daily_append", arguments: { ...requestArguments, request_id: "pending-prefix-retry" } },
+  }, 4);
+  assert.equal(second.result.isError, true);
+  const outcome = second.result.structuredContent;
+  assert.equal(outcome.status, "conflict");
+  assert.equal(outcome.error_code, "CONFLICT");
+  assert.equal(outcome.recovery.required, true);
+  assert.match(outcome.recovery.action, /verify the existing heading against the full commit, then recover with the same idempotency_key/);
+  assert.equal(outcome.retryable, false);
+  assert.equal(await readFile(recordPath, "utf8"), recordBefore);
+  assert.equal(await readFile(notePath, "utf8"), noteBefore);
+});
+
 test("stdio write validation rejects unsafe replay guards and calendar dates before a vault write", async (t) => {
   const { root, vaultPath, configPath } = await createFixtureVault();
   const server = startStdioServer(configPath);

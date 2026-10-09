@@ -135,15 +135,138 @@ bash "$KEEPER" append --vault "$V" --target "Notes/lead.md" \
 [ "$(cat "$V/Notes/lead.md")" = "$LEAD_BEFORE" ] \
   || fail "an uppercase --skip-if-hash missed the lowercase section it names"
 
-# 17d. the boundary is real: a heading naming a LONGER sha that merely starts
-#      with this one is a different commit and must not suppress it.
+# 17d. an abbreviation/full-hash relation cannot be proven from the vault. It
+#      must conflict without changing the note or creating idempotency state.
 printf 'longer sha section\n' > "$TMP/long.md"
 bash "$KEEPER" append --vault "$V" --target "Notes/boundary.md" \
   --section '## abc12345 — a different commit' --body-file "$TMP/long.md" >/dev/null
+BOUNDARY_BEFORE="$(cat "$V/Notes/boundary.md")"
+IDEMPOTENCY_BEFORE="$(find "$V/.obsidian" -path '*/keeper-idempotency/*' -type f | wc -l | tr -d ' ')"
+set +e
 bash "$KEEPER" append --vault "$V" --target "Notes/boundary.md" \
-  --section '## abc1234 — the commit we mean' --body-file "$TMP/b.md" --skip-if-hash abc1234 >/dev/null
-grep -q '^## abc1234 — the commit we mean' "$V/Notes/boundary.md" \
-  || fail "a heading for a longer sha with the same prefix suppressed a distinct commit"
+  --section '## abc1234 — the commit we mean' --body-file "$TMP/b.md" --skip-if-hash abc1234 \
+  --request-id prefix-short-request --idempotency-key prefix-short-key --format json \
+  > "$TMP/prefix-short.json"
+PREFIX_SHORT_RC=$?
+set -e
+[ "$PREFIX_SHORT_RC" = 3 ] || fail "short-to-long hash relation did not conflict"
+grep -q '"status":"conflict"' "$TMP/prefix-short.json" \
+  || fail "short-to-long relation was not reported as conflict"
+grep -q '"error_code":"CONFLICT"' "$TMP/prefix-short.json" \
+  || fail "short-to-long relation masqueraded as an idempotency conflict"
+grep -q 'verify the existing heading against the full commit' "$TMP/prefix-short.json" \
+  || fail "prefix conflict omitted verification guidance"
+[ "$(cat "$V/Notes/boundary.md")" = "$BOUNDARY_BEFORE" ] \
+  || fail "short-to-long conflict changed the note"
+IDEMPOTENCY_AFTER="$(find "$V/.obsidian" -path '*/keeper-idempotency/*' -type f | wc -l | tr -d ' ')"
+[ "$IDEMPOTENCY_AFTER" = "$IDEMPOTENCY_BEFORE" ] \
+  || fail "short-to-long conflict left a new idempotency record"
+
+# 17daa. A prefix conflict discovered while recovering an existing pending
+# append must preserve that pending evidence. The conflict is not retryable
+# until the heading identity is verified, but recovery is still required.
+PENDING_KEY=prefix-pending-key
+PENDING_FULL=bcdefab1234567890bcdefab1234567890bcdefab
+bash "$KEEPER" append --vault "$V" --target "Notes/pending-prefix.md" \
+  --section '## baseline' --body-file "$TMP/long.md" >/dev/null
+set +e
+KEEPER_FAULT_INJECT=before_append bash "$KEEPER" append --vault "$V" \
+  --target "Notes/pending-prefix.md" --section "## $PENDING_FULL — portable capture" \
+  --body-file "$TMP/b.md" --skip-if-hash "$PENDING_FULL" \
+  --request-id prefix-pending-first --idempotency-key "$PENDING_KEY" --format json \
+  > "$TMP/prefix-pending-first.json"
+PENDING_FIRST_RC=$?
+set -e
+[ "$PENDING_FIRST_RC" = 2 ] || fail "pending prefix fixture did not stop before append"
+PENDING_KEY_HASH="$(printf '%s:%s\n' "${#PENDING_KEY}" "$PENDING_KEY" | shasum -a 256 | awk '{print $1}')"
+PENDING_RECORD="$V/.obsidian/keeper-idempotency/$PENDING_KEY_HASH"
+[ -f "$PENDING_RECORD" ] || fail "pending prefix fixture did not create recovery state"
+PENDING_RECORD_BEFORE="$(cat "$PENDING_RECORD")"
+bash "$KEEPER" append --vault "$V" --target "Notes/pending-prefix.md" \
+  --section '## bcdefab — legacy capture' --body-file "$TMP/long.md" >/dev/null
+PENDING_NOTE_BEFORE="$(cat "$V/Notes/pending-prefix.md")"
+set +e
+bash "$KEEPER" append --vault "$V" --target "Notes/pending-prefix.md" \
+  --section "## $PENDING_FULL — portable capture" --body-file "$TMP/b.md" \
+  --skip-if-hash "$PENDING_FULL" --request-id prefix-pending-retry \
+  --idempotency-key "$PENDING_KEY" --format json > "$TMP/prefix-pending-retry.json"
+PENDING_RETRY_RC=$?
+set -e
+[ "$PENDING_RETRY_RC" = 3 ] || fail "pending prefix recovery did not conflict"
+grep -q '"recovery":{"required":true' "$TMP/prefix-pending-retry.json" \
+  || fail "pending prefix conflict discarded required recovery state"
+grep -q 'verify the existing heading against the full commit, then recover with the same idempotency_key' \
+  "$TMP/prefix-pending-retry.json" \
+  || fail "pending prefix conflict omitted safe recovery guidance"
+grep -q '"retryable":false' "$TMP/prefix-pending-retry.json" \
+  || fail "pending prefix conflict was marked retryable before identity verification"
+[ "$(cat "$PENDING_RECORD")" = "$PENDING_RECORD_BEFORE" ] \
+  || fail "pending prefix conflict changed existing recovery evidence"
+[ "$(cat "$V/Notes/pending-prefix.md")" = "$PENDING_NOTE_BEFORE" ] \
+  || fail "pending prefix conflict changed the note"
+
+# 17dab. awk uses exit 2 for an input read failure, so the semantic prefix
+# relation has a dedicated exit code. An unreadable note must fail closed and
+# must not be reported as a hash conflict.
+printf '## cdefabc1 — unreadable legacy heading\n' > "$V/Notes/unreadable-prefix.md"
+chmod 000 "$V/Notes/unreadable-prefix.md"
+set +e
+bash "$KEEPER" append --vault "$V" --target "Notes/unreadable-prefix.md" \
+  --section '## cdefabc — portable capture' --body-file "$TMP/b.md" \
+  --skip-if-hash cdefabc --format json > "$TMP/unreadable-prefix.json" 2>/dev/null
+UNREADABLE_PREFIX_RC=$?
+set -e
+chmod 600 "$V/Notes/unreadable-prefix.md"
+[ "$UNREADABLE_PREFIX_RC" = 1 ] || fail "heading read failure did not fail closed"
+grep -q '"error_code":"WRITE_FAILED"' "$TMP/unreadable-prefix.json" \
+  || fail "heading read failure was misclassified as a prefix conflict"
+
+# 17da. The reverse direction is also a conflict, including SHA-256 widths.
+bash "$KEEPER" append --vault "$V" --target "Notes/reverse-boundary.md" \
+  --section '## fedcba9 — legacy capture' --body-file "$TMP/long.md" >/dev/null
+REVERSE_BEFORE="$(cat "$V/Notes/reverse-boundary.md")"
+FULL_SHA1=fedcba9876543210fedcba9876543210fedcba98
+set +e
+bash "$KEEPER" append --vault "$V" --target "Notes/reverse-boundary.md" \
+  --section "## $FULL_SHA1 — portable capture" --body-file "$TMP/b.md" --skip-if-hash "$FULL_SHA1" \
+  --format json > "$TMP/prefix-full.json"
+PREFIX_FULL_RC=$?
+set -e
+[ "$PREFIX_FULL_RC" = 3 ] || fail "long-to-short hash relation did not conflict"
+grep -q '"error_code":"CONFLICT"' "$TMP/prefix-full.json" \
+  || fail "long-to-short relation did not return generic CONFLICT"
+[ "$(cat "$V/Notes/reverse-boundary.md")" = "$REVERSE_BEFORE" ] \
+  || fail "long-to-short conflict changed the note"
+
+FULL_SHA256=1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef
+bash "$KEEPER" append --vault "$V" --target "Notes/sha256-boundary.md" \
+  --section '## 1234567890ab — legacy SHA-256 capture' --body-file "$TMP/long.md" >/dev/null
+SHA256_BEFORE="$(cat "$V/Notes/sha256-boundary.md")"
+set +e
+bash "$KEEPER" append --vault "$V" --target "Notes/sha256-boundary.md" \
+  --section "## $FULL_SHA256 — portable capture" --body-file "$TMP/b.md" --skip-if-hash "$FULL_SHA256" \
+  --format json > "$TMP/prefix-sha256.json"
+PREFIX_SHA256_RC=$?
+set -e
+[ "$PREFIX_SHA256_RC" = 3 ] || fail "SHA-256 prefix relation did not conflict"
+[ "$(cat "$V/Notes/sha256-boundary.md")" = "$SHA256_BEFORE" ] \
+  || fail "SHA-256 prefix conflict changed the note"
+
+# 17db. An exact heading wins over another prefix-related heading in the note.
+EXACT_HASH=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+bash "$KEEPER" append --vault "$V" --target "Notes/exact-priority.md" \
+  --section '## aaaaaaa — legacy heading' --body-file "$TMP/long.md" >/dev/null
+bash "$KEEPER" append --vault "$V" --target "Notes/exact-priority.md" \
+  --section "## $EXACT_HASH — exact heading" --body-file "$TMP/long.md" >/dev/null
+EXACT_BEFORE="$(cat "$V/Notes/exact-priority.md")"
+bash "$KEEPER" append --vault "$V" --target "Notes/exact-priority.md" \
+  --section "## $EXACT_HASH — replay" --body-file "$TMP/b.md" --skip-if-hash "$EXACT_HASH" \
+  --format json > "$TMP/exact-priority.json" \
+  || fail "exact replay conflicted with a different prefix-related heading"
+grep -q '"status":"skipped"' "$TMP/exact-priority.json" \
+  || fail "exact heading did not take priority over prefix conflict"
+[ "$(cat "$V/Notes/exact-priority.md")" = "$EXACT_BEFORE" ] \
+  || fail "exact-priority replay changed the note"
 
 # 17e. fence tracking: a heading inside a code fence must not suppress capture.
 printf '%s\n' '```markdown' '## deadbee — some diff heading' '```' > "$TMP/fenced.md"
@@ -175,26 +298,26 @@ bash "$KEEPER" append --vault "$V" --target "Notes/mixed.md" \
 
 # 17g. CommonMark indented code fences (1-3 spaces) must toggle fence state,
 #      so headings inside indented fences are ignored by --skip-if-hash.
-printf '%s\n' '   ```' '## 111111 — indented illustrative heading' '   ```' \
+printf '%s\n' '   ```' '## 1111111 — indented illustrative heading' '   ```' \
   > "$TMP/indented.md"
 bash "$KEEPER" append --vault "$V" --target "Notes/indented.md" \
   --section '## 18:00 — init' --body-file "$TMP/indented.md" >/dev/null
 INDENTED_BEFORE="$(cat "$V/Notes/indented.md")"
 bash "$KEEPER" append --vault "$V" --target "Notes/indented.md" \
-  --section '## 111111 — real commit' --body-file "$TMP/b.md" --skip-if-hash 111111 >/dev/null
+  --section '## 1111111 — real commit' --body-file "$TMP/b.md" --skip-if-hash 1111111 >/dev/null
 [ "$(cat "$V/Notes/indented.md")" != "$INDENTED_BEFORE" ] \
   || fail 'a heading inside a 1-3 space indented fence was read as a real capture; commit was silently dropped'
 
 # 17h. Under CommonMark, a mismatched fence pair (e.g. ``` closed with ~~~)
 #      remains an unterminated fence extending to EOF. Headings after the
 #      mismatched opening delimiter are treated as fenced content.
-printf '%s\n' '```' 'some content' '~~~' '## 222222 — heading after mismatched fence' \
+printf '%s\n' '```' 'some content' '~~~' '## 2222222 — heading after mismatched fence' \
   > "$TMP/mismatched.md"
 bash "$KEEPER" append --vault "$V" --target "Notes/mismatched.md" \
   --section '## 18:00 — init' --body-file "$TMP/mismatched.md" >/dev/null
 MISMATCHED_BEFORE="$(cat "$V/Notes/mismatched.md")"
 bash "$KEEPER" append --vault "$V" --target "Notes/mismatched.md" \
-  --section '## 222222 — real commit' --body-file "$TMP/b.md" --skip-if-hash 222222 >/dev/null
+  --section '## 2222222 — real commit' --body-file "$TMP/b.md" --skip-if-hash 2222222 >/dev/null
 [ "$(cat "$V/Notes/mismatched.md")" != "$MISMATCHED_BEFORE" ] \
   || fail 'a heading after a mismatched fence pair was incorrectly treated as an un-fenced heading'
 

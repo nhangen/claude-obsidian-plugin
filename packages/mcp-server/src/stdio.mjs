@@ -1003,8 +1003,8 @@ export const writeOutput = z.strictObject({
   if (value.status === "partial" && (!pathsAreComplete || !value.recovery.required || !value.retryable || value.recovery.action.length === 0)) {
     context.addIssue({ code: "custom", message: "partial keeper outcomes require paths and recovery instructions" });
   }
-  if (value.status === "conflict" && (value.recovery.required || value.retryable || value.recovery.action !== "")) {
-    context.addIssue({ code: "custom", message: "conflict keeper outcomes cannot request recovery" });
+  if (value.status === "conflict" && (value.retryable || value.recovery.required !== (value.recovery.action.length > 0))) {
+    context.addIssue({ code: "custom", message: "conflict keeper outcome recovery fields disagree" });
   }
   if (value.status === "failed" && value.recovery.required !== (value.recovery.action.length > 0)) {
     context.addIssue({ code: "custom", message: "failed keeper outcome recovery fields disagree" });
