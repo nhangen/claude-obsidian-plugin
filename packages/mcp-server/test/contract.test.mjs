@@ -123,7 +123,18 @@ test("pins read prompts and released write status", () => {
 });
 
 test("adapter contains no direct filesystem mutation path", async () => {
-  const source = `${await readFile(new URL("../src/stdio.mjs", import.meta.url), "utf8")}\n${await readFile(new URL("../src/http.mjs", import.meta.url), "utf8")}`;
-  assert.doesNotMatch(source, /\b(?:writeFile|writeFileSync|appendFile|appendFileSync|rename|renameSync|rm|rmSync|unlink|unlinkSync|mkdir|mkdirSync|mkdtemp|mkdtempSync)\b/);
+  const mutation = /\b(?:writeFile|writeFileSync|appendFile|appendFileSync|rename|renameSync|rm|rmSync|unlink|unlinkSync|mkdir|mkdirSync|mkdtemp|mkdtempSync)\b/;
+  const stdioSource = await readFile(new URL("../src/stdio.mjs", import.meta.url), "utf8");
+  // The sole exception: init_content is staged as a temp file for keeper's
+  // --init-file, under the OS temp directory and never the vault (#184).
+  const staging = stdioSource.match(/\nasync function withStagedInitFile\([\s\S]*?\n}\n/);
+  assert.ok(staging, "withStagedInitFile must exist as a top-level function");
+  assert.match(staging[0], /mkdtemp\(join\(tmpdir\(\), "obsidian-init-"\)\)/);
+  assert.match(staging[0], /finally \{[\s\S]*\brm\(directory/);
+  const imports = stdioSource.match(/^import [^\n]*$/gm).join("\n");
+  const body = stdioSource.replace(/^import [^\n]*$/gm, "").replace(staging[0], "\n");
+  const source = `${body}\n${await readFile(new URL("../src/http.mjs", import.meta.url), "utf8")}`;
+  assert.doesNotMatch(source, mutation);
+  assert.match(imports, /import \{ lstat, mkdtemp, open, readdir, rm, writeFile \} from "node:fs\/promises";/);
   assert.match(source, /spawn\("bash", \[keeperScript/);
 });

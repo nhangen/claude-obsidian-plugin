@@ -3,7 +3,8 @@
 import { spawn, spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { constants as fsConstants, existsSync, readFileSync, realpathSync, statSync } from "node:fs";
-import { lstat, open, readdir } from "node:fs/promises";
+import { lstat, mkdtemp, open, readdir, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { delimiter, dirname, extname, isAbsolute, join, relative, resolve } from "node:path";
 import { McpServer, ResourceTemplate } from "@modelcontextprotocol/server";
@@ -771,7 +772,28 @@ export async function keeperSave({ title, body, folder_hint, type, links, sessio
   );
 }
 
-async function dailyAppend({ content, section, date, target_path, skip_if_hash, idempotency_key, request_id }, vaultPath, dailyPath, signal) {
+// The one filesystem mutation the adapter performs itself: keeper append takes
+// init content only as a file, so it is staged under the OS temp directory,
+// never the vault, and removed once keeper exits.
+async function withStagedInitFile(initContent, run) {
+  if (initContent === undefined) return run(undefined);
+  let directory;
+  try {
+    let initFile;
+    try {
+      directory = await mkdtemp(join(tmpdir(), "obsidian-init-"));
+      initFile = join(directory, "init.md");
+      await writeFile(initFile, initContent, { encoding: "utf8", mode: 0o600, flag: "wx" });
+    } catch {
+      throw codedError("WRITE_FAILED", "could not stage init_content");
+    }
+    return await run(initFile);
+  } finally {
+    if (directory) await rm(directory, { recursive: true, force: true }).catch(() => {});
+  }
+}
+
+async function dailyAppend({ content, section, date, target_path, skip_if_hash, init_content, idempotency_key, request_id }, vaultPath, dailyPath, signal) {
   const targetDate = date || new Date().toISOString().slice(0, 10);
   const targetPath = target_path || `${dailyPath.replace(/\/+$/, "")}/${targetDate}.md`;
   const requestId = request_id || randomUUID();
@@ -779,7 +801,11 @@ async function dailyAppend({ content, section, date, target_path, skip_if_hash, 
   const args = ["append", "--vault", vaultPath, "--target", targetPath, "--request-id", requestId, "--idempotency-key", idempotencyKey];
   if (section) args.push("--section", section);
   if (skip_if_hash) args.push("--skip-if-hash", skip_if_hash);
-  return executeKeeperWrite(args, content, signal, emptyWriteOutcome(requestId, idempotencyKey, targetPath, [targetPath]), subprocessTimeouts.dailyAppend, subprocessTimeoutSettings.dailyAppend);
+  const fallback = emptyWriteOutcome(requestId, idempotencyKey, targetPath, [targetPath]);
+  return withStagedInitFile(init_content, (initFile) => {
+    throwIfAborted(signal);
+    return executeKeeperWrite(initFile ? [...args, "--init-file", initFile] : args, content, signal, fallback, subprocessTimeouts.dailyAppend, subprocessTimeoutSettings.dailyAppend);
+  });
 }
 
 async function targetParentWasAbsent(targetPath, vaultPath) {
@@ -1033,6 +1059,7 @@ const dailyAppendInput = z.strictObject({
   date: calendarDate("date").optional(),
   target_path: z.string().trim().min(4).max(1024).regex(targetPathPattern).optional(),
   skip_if_hash: z.string().min(7).max(64).regex(/^[0-9a-fA-F]+$/).optional(),
+  init_content: z.string().min(1).max(65536).optional(),
   idempotency_key: z.string().min(1).max(240).regex(/^[A-Za-z0-9._:-]+$/).optional(),
   request_id: z.string().min(1).max(240).regex(/^[A-Za-z0-9._:-]+$/).optional(),
 })
@@ -1140,7 +1167,7 @@ export function createServer({ supportedProtocolVersions = protocolVersions, sco
     "obsidian_daily_append",
     {
       title: "Append to note",
-      description: "Append a section to a daily note (default today, or `date`), or to an exact vault-relative .md note via `target_path`. `skip_if_hash` skips the write when a section heading already carries that commit hash.",
+      description: "Append a section to a daily note (default today, or `date`), or to an exact vault-relative .md note via `target_path`. `skip_if_hash` skips the write when a section heading already carries that commit hash. `init_content` seeds a note that does not exist yet (for example, frontmatter); it is ignored when the note exists.",
       inputSchema: advertisedInputSchema(dailyAppendInput),
       outputSchema: writeOutput,
       annotations: writeToolAnnotations,

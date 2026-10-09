@@ -717,6 +717,62 @@ test("stdio daily append takes an exact target_path with a hash gate, and keeper
   assert.deepEqual(invalid.result.structuredContent.affected_paths, []);
 });
 
+test("daily append init_content seeds an absent note, leaves an existing one alone, and cleans up its temp file (#184)", async (t) => {
+  const { root, vaultPath, configPath } = await createFixtureVault();
+  const stagingRoot = join(root, "tmp");
+  await mkdir(stagingRoot);
+  const server = startStdioServer(configPath, { TMPDIR: stagingRoot });
+  t.after(async () => {
+    if (!server.child.killed) server.child.stdin.end();
+    await once(server.child, "close").catch(() => {});
+    await rm(root, { recursive: true, force: true });
+  });
+  await server.request({
+    jsonrpc: "2.0", id: 1, method: "initialize",
+    params: { protocolVersion: "2025-11-25", capabilities: {}, clientInfo: { name: "test", version: "1.0" } },
+  }, 1);
+  server.notification({ jsonrpc: "2.0", method: "notifications/initialized" });
+  const call = (id, name, args) => server.request({ jsonrpc: "2.0", id, method: "tools/call", params: { name, arguments: args } }, id);
+  const stagedInitDirs = async () => (await readdir(stagingRoot)).filter((name) => name.startsWith("obsidian-init-"));
+
+  const target = "Projects/Development/nhangen/demo/2026-10-09.md";
+  const init = "---\ntype: commit-log\nrepo: nhangen/demo\n---\n\n# demo commits 2026-10-09\n";
+  const first = await call(2, "obsidian_daily_append", {
+    content: "- first commit", section: "abc1234 first commit", target_path: target, skip_if_hash: "abc1234", init_content: init,
+  });
+  assert.equal(first.result.isError, false, JSON.stringify(first.result.structuredContent));
+  assert.equal(first.result.structuredContent.status, "committed");
+  const created = await readFile(join(vaultPath, target), "utf8");
+  assert.ok(created.startsWith(init), "a missing target starts with init_content");
+  assert.match(created, /\n## abc1234 first commit\n\n- first commit\n$/);
+  assert.deepEqual(await stagedInitDirs(), [], "temp init file is removed after a write");
+
+  const second = await call(3, "obsidian_daily_append", {
+    content: "- second commit", section: "def5678 second commit", target_path: target, skip_if_hash: "def5678",
+    init_content: "---\ntype: replaced\n---\n",
+  });
+  assert.equal(second.result.isError, false, JSON.stringify(second.result.structuredContent));
+  const appended = await readFile(join(vaultPath, target), "utf8");
+  assert.equal(appended, `${created}\n## def5678 second commit\n\n- second commit\n`, "an existing target is not re-initialised");
+  assert.doesNotMatch(appended, /type: replaced/);
+  assert.deepEqual(await stagedInitDirs(), []);
+
+  // A keeper failure still removes the staged file.
+  await mkdir(join(vaultPath, "Projects", "occupied.md"));
+  const failed = await call(4, "obsidian_daily_append", { content: "x", target_path: "Projects/occupied.md", init_content: init });
+  assert.equal(failed.result.isError, true);
+  assert.deepEqual(await stagedInitDirs(), [], "temp init file is removed after a failed write");
+
+  for (const [id, bad] of [[5, 42], [6, ["---"]], [7, ""], [8, "x".repeat(65537)]]) {
+    const rejected = await call(id, "obsidian_daily_append", { content: "x", target_path: "Projects/rejected.md", init_content: bad });
+    assert.equal(rejected.result.isError, true, `init_content ${JSON.stringify(bad).slice(0, 20)}`);
+    assert.equal(rejected.result.structuredContent.error_code, "INVALID_INPUT");
+    assert.equal(rejected.result.structuredContent.path, "");
+  }
+  await assert.rejects(access(join(vaultPath, "Projects", "rejected.md")));
+  assert.deepEqual(await stagedInitDirs(), []);
+});
+
 test("target_path ignores a bad daily_path but session_link_date requires a valid one (#162)", async (t) => {
   const { root, vaultPath, configPath } = await createFixtureVault();
   await writeFile(configPath, (await readFile(configPath, "utf8")).replace(/^daily_path:.*$/m, "daily_path: ../escape/"), "utf8");
