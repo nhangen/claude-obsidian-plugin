@@ -131,10 +131,12 @@ test("adapter contains no direct filesystem mutation path", async () => {
   assert.ok(staging, "withStagedInitFile must exist as a top-level function");
   assert.match(staging[0], /mkdtemp\(join\(tmpdir\(\), "obsidian-init-"\)\)/);
   assert.match(staging[0], /finally \{[\s\S]*\brm\(directory/);
-  const imports = stdioSource.match(/^import [^\n]*$/gm).join("\n");
-  const body = stdioSource.replace(/^import [^\n]*$/gm, "").replace(staging[0], "\n");
+  assert.equal((staging[0].match(/\bwriteFile\(/g) ?? []).length, 1, "withStagedInitFile may write exactly one file");
+  assert.match(staging[0], /\bwriteFile\(initFile\b/);
+  const pinnedImport = 'import { lstat, mkdtemp, open, readdir, rm, writeFile } from "node:fs/promises";';
+  assert.ok(stdioSource.includes(pinnedImport), "the node:fs/promises import line is pinned");
+  const body = stdioSource.replace(pinnedImport, "").replace(staging[0], "\n");
   const source = `${body}\n${await readFile(new URL("../src/http.mjs", import.meta.url), "utf8")}`;
   assert.doesNotMatch(source, mutation);
-  assert.match(imports, /import \{ lstat, mkdtemp, open, readdir, rm, writeFile \} from "node:fs\/promises";/);
   assert.match(source, /spawn\("bash", \[keeperScript/);
 });
