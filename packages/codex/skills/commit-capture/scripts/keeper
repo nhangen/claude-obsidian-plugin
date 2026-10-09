@@ -215,7 +215,8 @@ keeper_idempotency_record() {
 }
 
 keeper_idempotency_begin() {
-  local vault="$1" payload_hash="$2" record stored_hash stored_state stored_kind stored_preimage stored_postimage tmp
+  local vault="$1" payload_hash="$2" create_record="${3:-true}"
+  local record stored_hash stored_state stored_kind stored_preimage stored_postimage tmp
   [ -n "$KEEPER_IDEMPOTENCY_KEY" ] || return 0
   KEEPER_PENDING_KIND=""
   KEEPER_PENDING_PREIMAGE=""
@@ -251,6 +252,7 @@ keeper_idempotency_begin() {
     KEEPER_RECOVERY_ACTION="retry with the same idempotency_key"
     return 0
   fi
+  [ "$create_record" = true ] || return 11
   tmp="$(mktemp "$(dirname "$record")/.keeper-idempotency-XXXXXX")" || return 1
   printf '%s\npending\n' "$payload_hash" > "$tmp" \
     || { rm -f "$tmp"; return 1; }
@@ -352,18 +354,19 @@ keeper_commit_staged() {
   keeper_swap_or_clean "$tmp" "$fresh"
 }
 
-# Does any section heading in $1 name the sha $2? Heading-only (a context bullet
-# legitimately names other commits' shas) and position-independent: writers put
-# the sha at the head of the line ("## <sha> — msg") as often as at the end, and
-# an end-anchored match never fired for them (#101).
+# Compare sha-shaped tokens in section headings with $2. Exit 0 for an exact
+# token, 10 when either token is a strict prefix of the other, and 1 otherwise.
+# Exact wins across the whole note. A prefix can be the same abbreviated object
+# or a different object with a colliding prefix, so it is never reported as a
+# successful replay.
 #
 # awk, not a grep pipeline: `grep -E '^#' | grep -q` lets -q's early exit SIGPIPE
 # the first grep, which `set -o pipefail` then reports as a failed match.
 # Boundaries are hex-class rather than \b — BSD grep/awk do not carry \b — and
 # the compare is case-folded because the validator accepts [0-9a-fA-F].
-keeper_heading_has_sha() {
+keeper_heading_sha_relation() {
   awk -v sha="$2" '
-    BEGIN { sha = tolower(sha); pat = "(^|[^0-9a-f])" sha "([^0-9a-f]|$)" }
+    BEGIN { sha = tolower(sha) }
     # Track the OPEN delimiter, not a bare toggle. A single boolean shared by
     # ``` and ~~~ mis-reads a note that mixes them -- a doc illustrating this
     # very format -- and an illustrative heading then scans as a real capture,
@@ -376,8 +379,18 @@ keeper_heading_has_sha() {
       else if (ch == fence_ch && n >= fence_n) { fence_ch = ""; fence_n = 0 }
       next
     }
-    fence_ch == "" && $1 ~ /^##?#?#?#?#?$/ && NF > 1 && tolower($0) ~ pat { found = 1; exit }
-    END { exit(found ? 0 : 1) }
+    fence_ch == "" && $1 ~ /^##?#?#?#?#?$/ && NF > 1 {
+      rest = tolower($0)
+      while (match(rest, /[0-9a-f]+/)) {
+        token = substr(rest, RSTART, RLENGTH)
+        if (length(token) >= 7 && length(token) <= 64) {
+          if (token == sha) exact = 1
+          else if (index(token, sha) == 1 || index(sha, token) == 1) related = 1
+        }
+        rest = substr(rest, RSTART + RLENGTH)
+      }
+    }
+    END { exit(exact ? 0 : (related ? 10 : 1)) }
   ' "$1"
 }
 
@@ -385,25 +398,54 @@ keeper_heading_has_sha() {
 _cmd_append_locked() {
   local vault_abs="$1" target="$2" section="$3" body_file="$4" init_file="$5"
   local skip_hash="$6" skip_given="$7" payload_hash="$8" full tmp fragment body
-  local preimage postimage current_state idem_rc=0
-  keeper_idempotency_begin "$vault_abs" "$payload_hash" || idem_rc=$?
+  local preimage postimage current_state idem_rc=0 relation=1 create_idempotency=0
+  keeper_idempotency_begin "$vault_abs" "$payload_hash" false || idem_rc=$?
   [ "$idem_rc" -ne 10 ] || return 0
-  [ "$idem_rc" -eq 0 ] || return "$idem_rc"
+  if [ "$idem_rc" -eq 11 ]; then
+    create_idempotency=1
+  elif [ "$idem_rc" -ne 0 ]; then
+    return "$idem_rc"
+  fi
   keeper_prepare_target "$vault_abs" "$target" >/dev/null \
     || { keeper_fail_locked "append target is not writable inside the vault"; return 1; }
   full="$KEEPER_PREPARED_TARGET"
   keeper_test_pause after_target_prepare \
     || { keeper_fail_locked "append target validation pause failed"; return 1; }
 
-  if [ "$skip_given" = 1 ] && [ -f "$full" ] \
-     && keeper_heading_has_sha "$full" "$skip_hash"; then
-    printf 'keeper: append skipped — %s already has a section for %s\n' "$target" "$skip_hash" >&2
-    keeper_idempotency_commit "$vault_abs" "$payload_hash" \
-      || { keeper_partial_locked "$target was already present but idempotency recovery remains"; return 2; }
-    KEEPER_RECOVERY_REQUIRED=false
-    KEEPER_RECOVERY_ACTION=""
-    keeper_emit_outcome skipped "$full"
-    return 0
+  if [ "$skip_given" = 1 ] && [ -f "$full" ]; then
+    relation=0
+    keeper_heading_sha_relation "$full" "$skip_hash" || relation=$?
+    if [ "$relation" -eq 0 ]; then
+      if [ "$create_idempotency" = 1 ]; then
+        keeper_idempotency_begin "$vault_abs" "$payload_hash" \
+          || { keeper_partial_locked "$target was already present but idempotency recovery remains"; return 2; }
+      fi
+      printf 'keeper: append skipped — %s already has a section for %s\n' "$target" "$skip_hash" >&2
+      keeper_idempotency_commit "$vault_abs" "$payload_hash" \
+        || { keeper_partial_locked "$target was already present but idempotency recovery remains"; return 2; }
+      KEEPER_RECOVERY_REQUIRED=false
+      KEEPER_RECOVERY_ACTION=""
+      keeper_emit_outcome skipped "$full"
+      return 0
+    fi
+    if [ "$relation" -eq 10 ]; then
+      KEEPER_WARNINGS="verify the existing heading against the full commit before retrying"
+      if [ "$KEEPER_RECOVERY_REQUIRED" = true ]; then
+        KEEPER_RECOVERY_ACTION="verify the existing heading against the full commit, then recover with the same idempotency_key"
+      else
+        KEEPER_RECOVERY_ACTION=""
+      fi
+      KEEPER_RETRYABLE=false
+      KEEPER_ERROR_CODE=CONFLICT
+      keeper_conflict_locked "hash prefix relation in $target requires commit identity verification"
+      return 3
+    fi
+    [ "$relation" -eq 1 ] \
+      || { keeper_fail_locked "could not inspect section headings in $target"; return 1; }
+  fi
+  if [ "$create_idempotency" = 1 ]; then
+    keeper_idempotency_begin "$vault_abs" "$payload_hash" \
+      || { keeper_fail_locked "could not create idempotency state for $target"; return 1; }
   fi
 
   tmp="$(mktemp "$(dirname "$full")/.keeper-append-XXXXXX")" \

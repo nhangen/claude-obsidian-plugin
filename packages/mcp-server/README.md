@@ -121,7 +121,7 @@ writes require `idempotency_key`; local stdio calls retain keyless compatibility
 `obsidian_daily_append` accepts `content`, optional `section`, `date` or
 `target_path` (an exact vault-relative `.md` path to append to instead of the daily note; mutually exclusive with `date`),
 `skip_if_hash` (a 7-64 character hexadecimal commit hash that must appear in an existing section heading), and
-`init_content` (up to 65536 characters written as the note's initial content, such as frontmatter, only when the target note does not exist yet; ignored for an existing note), plus the same request fields. Daily writes use the configured
+`init_content` (up to 65536 characters written as the note's initial content, such as frontmatter, only when the target note does not exist yet; ignored for an existing note), plus the same request fields. An exact heading hash skips; a strict abbreviation/full-hash relation returns `CONFLICT` without writing because the vault cannot prove commit identity. Daily writes use the configured
 `daily_path`, and results report the vault-relative path actually written. MCP
 writes that use `daily_path` (daily appends without `target_path`, and `session_link_date`) fail with `CONFIG_INVALID` when it is absent or invalid; the
 adapter never silently substitutes `Daily/`.
@@ -130,6 +130,10 @@ Both tools return `status`, `request_id`, `idempotency_key`, `path`,
 `affected_paths`, `warnings`, `recovery`, `error_code`, and `retryable`.
 `committed` and `skipped` are successful. `conflict`, `partial`, and `failed`
 return `isError=true`.
+
+Commit-capture rollback is safe only after both the server/plugin and any copied
+Git-hook runtime have this guard and emit full commit IDs. Pre-upgrade plugin
+rollback remains unsupported.
 
 Reuse an idempotency key only for the same payload. A repeated key and payload
 returns `skipped`; a repeated key with different content returns
