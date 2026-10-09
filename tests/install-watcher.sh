@@ -40,7 +40,11 @@ cat > "$CRONDIR/bin/crontab" <<STUB
 #!/usr/bin/env bash
 if [ "\$1" = "-l" ]; then
   if [ -e "$CRONDIR/deny" ]; then echo "crontab: cannot read crontab: Permission denied" >&2; exit 1; fi
-  if [ ! -e "$CRONDIR/crontab" ]; then echo "no crontab for tester" >&2; exit 1; fi
+  if [ ! -e "$CRONDIR/crontab" ]; then
+    if [ -e "$CRONDIR/busybox" ]; then echo "crontab: can't open 'tester': No such file or directory" >&2; else echo "no crontab for tester" >&2; fi
+    exit 1
+  fi
+  if [ -e "$CRONDIR/warn" ]; then echo "crontab: warning: ignored" >&2; fi
   cat "$CRONDIR/crontab"; exit 0
 fi
 cat > "$CRONDIR/crontab.new" && mv "$CRONDIR/crontab.new" "$CRONDIR/crontab"
@@ -67,6 +71,24 @@ grep -q '^0 \* \* \* \* ' "$CRONDIR/crontab" || fail "only-our-line re-install s
 rm -f "$CRONDIR/crontab"
 PATH="$CRONDIR/bin:$PATH" bash "$SH" install "$TICK" 900 >/dev/null 2>&1 || fail "fresh install with no crontab should succeed"
 [ "$(grep -cF "$LABEL_MARK" "$CRONDIR/crontab")" = 1 ] || fail "fresh install must write exactly one watcher line"
+
+# BusyBox phrases the empty case as "can't open ... No such file or directory".
+rm -f "$CRONDIR/crontab"; touch "$CRONDIR/busybox"
+PATH="$CRONDIR/bin:$PATH" bash "$SH" install "$TICK" 900 >/dev/null 2>&1 || fail "BusyBox fresh install should succeed"
+rm -f "$CRONDIR/busybox"
+[ "$(grep -cF "$LABEL_MARK" "$CRONDIR/crontab")" = 1 ] || fail "BusyBox fresh install must write exactly one watcher line"
+
+# A warning on stderr from a successful read must not be written into the crontab.
+printf '0 1 * * * /usr/bin/other\n' > "$CRONDIR/crontab"; touch "$CRONDIR/warn"
+PATH="$CRONDIR/bin:$PATH" bash "$SH" install "$TICK" 900 >/dev/null 2>&1 || fail "install with a stderr warning should succeed"
+rm -f "$CRONDIR/warn"
+if grep -q 'warning' "$CRONDIR/crontab"; then fail "crontab stderr leaked into the crontab"; fi
+
+# A labelled line this script did not render is refused, not replaced.
+printf '0 1 * * * /usr/bin/other\n*/5 * * * * /opt/custom.sh %s\n' "$LABEL_MARK" > "$CRONDIR/crontab"
+BEFORE="$(cat "$CRONDIR/crontab")"
+if PATH="$CRONDIR/bin:$PATH" bash "$SH" install "$TICK" 900 >/dev/null 2>&1; then fail "a foreign labelled line must refuse the install"; fi
+[ "$(cat "$CRONDIR/crontab")" = "$BEFORE" ] || fail "a refused foreign-line install must leave the crontab untouched"
 
 # A crontab that cannot be read for any other reason must abort without writing.
 printf '0 1 * * * /usr/bin/other\n' > "$CRONDIR/crontab"
