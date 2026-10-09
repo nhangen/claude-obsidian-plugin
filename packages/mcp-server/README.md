@@ -119,8 +119,9 @@ the caller-resolved vault-relative target folder; this MCP adapter does not run
 librarian routing or deduplication. Streamable HTTP
 writes require `idempotency_key`; local stdio calls retain keyless compatibility.
 `obsidian_daily_append` accepts `content`, optional `section`, `date` or
-`target_path` (an exact vault-relative `.md` path to append to instead of the daily note; mutually exclusive with `date`), and
-`skip_if_hash` (a 7-64 character hexadecimal commit hash that must appear in an existing section heading), plus the same request fields. Daily writes use the configured
+`target_path` (an exact vault-relative `.md` path to append to instead of the daily note; mutually exclusive with `date`),
+`skip_if_hash` (a 7-64 character hexadecimal commit hash that must appear in an existing section heading), and
+`init_content` (up to 65536 characters written as the note's initial content, such as frontmatter, only when the target note does not exist yet; ignored for an existing note), plus the same request fields. Daily writes use the configured
 `daily_path`, and results report the vault-relative path actually written. MCP
 writes that use `daily_path` (daily appends without `target_path`, and `session_link_date`) fail with `CONFIG_INVALID` when it is absent or invalid; the
 adapter never silently substitutes `Daily/`.
