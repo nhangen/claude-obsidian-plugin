@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { access, mkdtemp, readdir, readFile, rm, writeFile, mkdir } from "node:fs/promises";
+import { access, mkdtemp, readdir, readFile, rm, symlink, writeFile, mkdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { spawn } from "node:child_process";
@@ -480,6 +480,166 @@ test("stdio server executes obsidian_daily_append with skip_if_hash idempotency"
   assert.equal(JSON.parse(conflict.result.content[0].text).code, "IDEMPOTENCY_CONFLICT");
 });
 
+test("stdio write validation rejects unsafe replay guards and calendar dates before a vault write", async (t) => {
+  const { root, vaultPath, configPath } = await createFixtureVault();
+  const server = startStdioServer(configPath);
+  t.after(async () => {
+    if (!server.child.killed) server.child.stdin.end();
+    await once(server.child, "close").catch(() => {});
+    await rm(root, { recursive: true, force: true });
+  });
+  await server.request({
+    jsonrpc: "2.0", id: 1, method: "initialize",
+    params: { protocolVersion: "2025-11-25", capabilities: {}, clientInfo: { name: "test", version: "1.0" } },
+  }, 1);
+  server.notification({ jsonrpc: "2.0", method: "notifications/initialized" });
+  const call = (id, name, args) => server.request({ jsonrpc: "2.0", id, method: "tools/call", params: { name, arguments: args } }, id);
+  const assertZeroFootprint = (response, requestId, idempotencyKey) => {
+    const outcome = response.result.structuredContent;
+    assert.equal(outcome.request_id, requestId);
+    assert.equal(outcome.idempotency_key, idempotencyKey);
+    assert.deepEqual(outcome.affected_paths, []);
+    assert.equal(outcome.path, "");
+    assert.deepEqual(outcome.warnings, []);
+    assert.deepEqual(outcome.recovery, { required: false, action: "" });
+    assert.equal(outcome.retryable, false);
+    assert.doesNotMatch(JSON.stringify(outcome), /may have committed/);
+  };
+
+  const hash = "0123456789abcdef";
+  const rejectedGuard = await call(2, "obsidian_daily_append", {
+    content: "must not append", section: "## another commit", date: "2026-09-22", skip_if_hash: hash,
+    request_id: "invalid-daily-request", idempotency_key: "invalid-daily-key",
+  });
+  const guardPayload = JSON.parse(rejectedGuard.result.content[0].text);
+  assert.equal(rejectedGuard.result.isError, true);
+  assert.equal(guardPayload.code, "INVALID_INPUT");
+  assert.match(guardPayload.detail, /skip_if_hash requires section to contain the same hash/);
+  assert.doesNotMatch(guardPayload.detail, /another commit|0123456789abcdef/);
+  assertZeroFootprint(rejectedGuard, "invalid-daily-request", "invalid-daily-key");
+  await assert.rejects(access(join(vaultPath, "Daily", "2026-09-22.md")));
+
+  const leapDate = await call(3, "obsidian_daily_append", {
+    content: "valid leap day", date: "0004-02-29",
+  });
+  assert.equal(leapDate.result.isError, false);
+  assert.match(await readFile(join(vaultPath, "Daily", "0004-02-29.md"), "utf8"), /valid leap day/);
+
+  const badDate = await call(4, "obsidian_daily_append", {
+    content: "must not append", date: "2026-02-29",
+  });
+  const badDatePayload = JSON.parse(badDate.result.content[0].text);
+  assert.equal(badDate.result.isError, true);
+  assert.equal(badDatePayload.code, "INVALID_INPUT");
+  assert.match(badDatePayload.detail, /date must be a valid calendar date/);
+  assert.equal(badDatePayload.path, "");
+  await assert.rejects(access(join(vaultPath, "Daily", "2026-02-29.md")));
+
+  const badLinkDate = await call(5, "obsidian_keeper_save", {
+    title: "Invalid linked date", body: "must not save", resolved: true, folder_hint: "Inbox", session_link_date: "2026-02-30",
+    request_id: "invalid-keeper-request", idempotency_key: "invalid-keeper-key",
+  });
+  const badLinkPayload = JSON.parse(badLinkDate.result.content[0].text);
+  assert.equal(badLinkDate.result.isError, true);
+  assert.equal(badLinkPayload.code, "INVALID_INPUT");
+  assert.match(badLinkPayload.detail, /session_link_date must be a valid calendar date/);
+  assertZeroFootprint(badLinkDate, "invalid-keeper-request", "invalid-keeper-key");
+  await assert.rejects(access(join(vaultPath, "Inbox", "Invalid linked date.md")));
+
+  const mutuallyExclusive = await call(6, "obsidian_daily_append", {
+    content: "must not append", target_path: "Projects/diagnostic.md", date: "2026-09-22",
+  });
+  const mutuallyExclusivePayload = JSON.parse(mutuallyExclusive.result.content[0].text);
+  assert.equal(mutuallyExclusive.result.isError, true);
+  assert.match(mutuallyExclusivePayload.detail, /target_path and date are mutually exclusive/);
+  assert.doesNotMatch(mutuallyExclusivePayload.detail, /Projects\/diagnostic\.md|2026-09-22/);
+  await assert.rejects(access(join(vaultPath, "Projects", "diagnostic.md")));
+
+  for (const [id, section, requestId, idempotencyKey] of [
+    [7, "## abc12345 commit", "partial-hash-request", "partial-hash-key"],
+    [8, "## commit\nabc1234", "non-heading-hash-request", "non-heading-hash-key"],
+  ]) {
+    const rejected = await call(id, "obsidian_daily_append", {
+      content: "must not append", section, date: "2026-09-24", skip_if_hash: "abc1234", request_id: requestId, idempotency_key: idempotencyKey,
+    });
+    const payload = JSON.parse(rejected.result.content[0].text);
+    assert.equal(rejected.result.isError, true);
+    assert.equal(payload.code, "INVALID_INPUT");
+    assert.match(payload.detail, /skip_if_hash requires section to contain the same hash/);
+    assertZeroFootprint(rejected, requestId, idempotencyKey);
+  }
+  await assert.rejects(access(join(vaultPath, "Daily", "2026-09-24.md")));
+
+  const caseInsensitiveHash = "ABCDEF12";
+  const firstCaseEquivalent = await call(9, "obsidian_daily_append", {
+    content: "Case-equivalent commit", section: "## abcdef12 commit", date: "2026-09-25", skip_if_hash: caseInsensitiveHash,
+  });
+  assert.equal(firstCaseEquivalent.result.isError, false);
+  assert.equal(firstCaseEquivalent.result.structuredContent.status, "committed");
+  const secondCaseEquivalent = await call(10, "obsidian_daily_append", {
+    content: "Case-equivalent commit", section: "## abcdef12 commit", date: "2026-09-25", skip_if_hash: caseInsensitiveHash,
+  });
+  assert.equal(secondCaseEquivalent.result.isError, false);
+  assert.equal(secondCaseEquivalent.result.structuredContent.status, "skipped");
+  const caseEquivalentNote = await readFile(join(vaultPath, "Daily", "2026-09-25.md"), "utf8");
+  assert.equal(caseEquivalentNote.match(/^## abcdef12 commit$/gm)?.length, 1);
+});
+
+test("stdio daily append refuses target paths through a symlinked vault component", async (t) => {
+  const { root, vaultPath, configPath } = await createFixtureVault();
+  const outside = join(root, "outside");
+  await mkdir(outside);
+  await symlink(outside, join(vaultPath, "Linked"), "dir");
+  const server = startStdioServer(configPath);
+  t.after(async () => {
+    if (!server.child.killed) server.child.stdin.end();
+    await once(server.child, "close").catch(() => {});
+    await rm(root, { recursive: true, force: true });
+  });
+  await server.request({
+    jsonrpc: "2.0", id: 1, method: "initialize",
+    params: { protocolVersion: "2025-11-25", capabilities: {}, clientInfo: { name: "test", version: "1.0" } },
+  }, 1);
+  server.notification({ jsonrpc: "2.0", method: "notifications/initialized" });
+  const response = await server.request({
+    jsonrpc: "2.0", id: 2, method: "tools/call",
+    params: { name: "obsidian_daily_append", arguments: { content: "must not escape", target_path: "Linked/escape.md" } },
+  }, 2);
+  assert.equal(response.result.isError, true);
+  assert.equal(response.result.structuredContent.error_code, "PATH_INVALID");
+  await assert.rejects(access(join(outside, "escape.md")));
+});
+
+test("stdio daily append warns only when an explicit target parent was absent before a committed write", async (t) => {
+  const { root, vaultPath, configPath } = await createFixtureVault();
+  const server = startStdioServer(configPath);
+  t.after(async () => {
+    if (!server.child.killed) server.child.stdin.end();
+    await once(server.child, "close").catch(() => {});
+    await rm(root, { recursive: true, force: true });
+  });
+  await mkdir(join(vaultPath, "Projects", "Existing"));
+  await server.request({
+    jsonrpc: "2.0", id: 1, method: "initialize",
+    params: { protocolVersion: "2025-11-25", capabilities: {}, clientInfo: { name: "test", version: "1.0" } },
+  }, 1);
+  server.notification({ jsonrpc: "2.0", method: "notifications/initialized" });
+  const call = (id, targetPath) => server.request({
+    jsonrpc: "2.0", id, method: "tools/call",
+    params: { name: "obsidian_daily_append", arguments: { content: "entry", target_path: targetPath } },
+  }, id);
+
+  const createdParent = await call(2, "Projects/New/note.md");
+  assert.equal(createdParent.result.isError, false);
+  assert.equal(createdParent.result.structuredContent.status, "committed");
+  assert.ok(createdParent.result.structuredContent.warnings.includes("Target parent directory did not exist before this request"));
+
+  const existingParent = await call(3, "Projects/Existing/note.md");
+  assert.equal(existingParent.result.isError, false);
+  assert.equal(existingParent.result.structuredContent.status, "committed");
+  assert.doesNotMatch(existingParent.result.structuredContent.warnings.join(" "), /Target parent directory did not exist before this request/);
+});
+
 test("stdio daily append uses configured daily_path and reports the written path", async (t) => {
   const { root, vaultPath, configPath } = await createFixtureVault("Journal/Days");
   const server = startStdioServer(configPath);
@@ -525,16 +685,16 @@ test("stdio daily append takes an exact target_path with a hash gate, and keeper
   assert.equal(first.result.structuredContent.path, target);
   const second = await call(3, "obsidian_daily_append", { content: "- first commit", section: "abc1234 first commit", target_path: target, skip_if_hash: "abc1234" });
   assert.equal(second.result.isError, false);
+  assert.doesNotMatch(second.result.structuredContent.warnings.join(" "), /Target parent directory did not exist before this request/);
   const written = await readFile(join(vaultPath, target), "utf8");
   assert.equal(written.split("abc1234 first commit").length - 1, 1, "hash gate must not append the same commit twice");
   await assert.rejects(readFile(join(vaultPath, "Daily", "2026-10-08.md"), "utf8"));
 
-  // A rejected target_path never reports the daily note as the path; the date
-  // conflict reports the path the caller asked for.
+  // Invalid input never advertises a vault path before a write starts.
   for (const [id, bad, expectedPath] of [
     [4, { target_path: "../escape.md" }, ""],
     [5, { target_path: "Projects/note.txt" }, ""],
-    [6, { target_path: target, date: "2026-10-08" }, target],
+    [6, { target_path: target, date: "2026-10-08" }, ""],
   ]) {
     const rejected = await call(id, "obsidian_daily_append", { content: "x", ...bad });
     assert.equal(rejected.result.isError, true, JSON.stringify(bad));
@@ -549,12 +709,12 @@ test("stdio daily append takes an exact target_path with a hash gate, and keeper
   assert.match(await readFile(join(vaultPath, "Daily", "2026-10-08.md"), "utf8"), /Linked session/);
   assert.ok(saved.result.structuredContent.affected_paths.includes("Daily/2026-10-08.md"));
 
-  // Input rejection reports through writeRequestFallback, which also names the daily note.
+  // Input rejection has no write footprint, even when the raw arguments name one.
   const invalid = await call(8, "obsidian_keeper_save", {
     title: "Linked session", body: "", resolved: true, folder_hint: "Inbox", session_link_date: "2026-10-08",
   });
   assert.equal(invalid.result.isError, true);
-  assert.ok(invalid.result.structuredContent.affected_paths.includes("Daily/2026-10-08.md"));
+  assert.deepEqual(invalid.result.structuredContent.affected_paths, []);
 });
 
 test("target_path ignores a bad daily_path but session_link_date requires a valid one (#162)", async (t) => {
@@ -1420,7 +1580,11 @@ test("Streamable HTTP transport enforces scope gating on write tools", async (t)
   assert.equal(missingRemoteOutcome.code, "INVALID_INPUT");
   assertFailedWriteEnvelope(missingRemoteOutcome, "INVALID_INPUT");
   assert.equal(missingRemoteOutcome.idempotency_key, "");
-  assert.match(missingRemoteOutcome.path, /^Daily\/\d{4}-\d{2}-\d{2}\.md$/);
+  assert.equal(missingRemoteOutcome.path, "");
+  assert.deepEqual(missingRemoteOutcome.affected_paths, []);
+  assert.deepEqual(missingRemoteOutcome.warnings, []);
+  assert.deepEqual(missingRemoteOutcome.recovery, { required: false, action: "" });
+  assert.equal(missingRemoteOutcome.retryable, false);
 
   const writeAllowed = await fetch(`${url}/mcp`, {
     method: "POST",

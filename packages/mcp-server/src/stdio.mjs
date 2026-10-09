@@ -85,6 +85,12 @@ function codedError(code, detail, outcome) {
   return error;
 }
 
+function inputError(detail) {
+  const error = codedError("INVALID_INPUT", "invalid tool input");
+  error.inputDetail = detail;
+  return error;
+}
+
 function childEnvironment() {
   const allowed = [
     "PATH", "HOME", "XDG_CONFIG_HOME", "OBSIDIAN_LOCAL_MD", "CLAUDE_PLUGIN_ROOT", "LANG", "LC_ALL", "MCP_GIT_MARKER",
@@ -455,16 +461,16 @@ function writeRequestFallback(toolName, args, configuration) {
     : "";
   if (toolName === "obsidian_keeper_save") {
     const target = normalizedKeeperSaveTarget(values.title, values.folder_hint);
-    const linked = target && values.session_link_date && /^\d{4}-\d{2}-\d{2}$/.test(values.session_link_date) && configuration.dailyPath
+    const linked = target && typeof values.session_link_date === "string" && isCalendarDate(values.session_link_date) && configuration.dailyPath
       ? [`${configuration.dailyPath}/${values.session_link_date}.md`]
       : [];
     return emptyWriteOutcome(requestId, idempotencyKey, target?.targetPath || "", [...(target?.affectedPaths || []), ...linked]);
   }
-  const date = typeof values.date === "string" && /^\d{4}-\d{2}-\d{2}$/.test(values.date)
-    ? values.date
+  const date = typeof values.date === "string"
+    ? (isCalendarDate(values.date) ? values.date : "")
     : new Date().toISOString().slice(0, 10);
   const explicit = typeof values.target_path === "string" && targetPathPattern.test(values.target_path.trim()) ? values.target_path.trim() : "";
-  const path = explicit || (typeof values.target_path === "string" ? "" : configuration.dailyPath ? `${configuration.dailyPath}/${date}.md` : "");
+  const path = explicit || (typeof values.target_path === "string" || !date ? "" : configuration.dailyPath ? `${configuration.dailyPath}/${date}.md` : "");
   return emptyWriteOutcome(requestId, idempotencyKey, path, path ? [path] : []);
 }
 
@@ -481,7 +487,12 @@ function writeErrorResult(error, fallback) {
   ]);
   const code = adapterCodes.has(error?.code) ? error.code : "WRITE_FAILED";
   const detail = error instanceof Error ? error.message : "write failed";
-  return errorResult(codedError(code, detail, failedWriteOutcome(fallback, code, detail)));
+  const outcome = code === "INVALID_INPUT"
+    ? { ...emptyWriteOutcome(fallback.request_id, fallback.idempotency_key, "", []), error_code: code }
+    : failedWriteOutcome(fallback, code, detail);
+  const resultError = codedError(code, detail, outcome);
+  if (typeof error?.inputDetail === "string") resultError.inputDetail = error.inputDetail;
+  return errorResult(resultError);
 }
 
 function parseKeeperOutcome(stdout) {
@@ -771,6 +782,25 @@ async function dailyAppend({ content, section, date, target_path, skip_if_hash, 
   return executeKeeperWrite(args, content, signal, emptyWriteOutcome(requestId, idempotencyKey, targetPath, [targetPath]), subprocessTimeouts.dailyAppend, subprocessTimeoutSettings.dailyAppend);
 }
 
+async function targetParentWasAbsent(targetPath, vaultPath) {
+  const candidate = resolve(vaultPath, targetPath);
+  if (!isContained(vaultPath, candidate)) throw codedError("PATH_INVALID", "target path escapes the configured vault");
+  const parent = dirname(targetPath);
+  let current = vaultPath;
+  for (const component of parent === "." ? [] : parent.split("/")) {
+    current = join(current, component);
+    if (!isContained(vaultPath, current)) throw codedError("PATH_INVALID", "target path escapes the configured vault");
+    try {
+      const details = await lstat(current);
+      if (details.isSymbolicLink() || !details.isDirectory()) return false;
+    } catch (error) {
+      if (error?.code === "ENOENT") return true;
+      return false;
+    }
+  }
+  return false;
+}
+
 async function readBounded(path, signal, maxBytes = maxResourceBytes) {
   throwIfAborted(signal);
   return readRegularFile(path, signal, maxBytes);
@@ -870,7 +900,7 @@ function errorResult(error) {
     "CANCELLED", "FORBIDDEN", "CONFIG_INVALID", "CONFLICT", "IDEMPOTENCY_CONFLICT", "PARTIAL", "WRITE_FAILED", "KEEPER_PROTOCOL_ERROR"
   ]);
   const code = knownCodes.has(error?.code) ? error.code : "READ_FAILED";
-  const detail = {
+  const genericDetail = {
     INVALID_INPUT: "invalid tool input",
     PATH_INVALID: "requested path is not allowed",
     CONFIG_INVALID: "Obsidian configuration is invalid",
@@ -887,13 +917,23 @@ function errorResult(error) {
     SUBPROCESS_OUTPUT_LIMIT: "output limit exceeded",
     CANCELLED: "request cancelled",
   }[code];
+  const detail = code === "INVALID_INPUT" && typeof error?.inputDetail === "string"
+    ? error.inputDetail.slice(0, 240)
+    : genericDetail;
   const payload = error?.outcome ? { code, detail, ...error.outcome } : { code, detail };
   return { content: [{ type: "text", text: JSON.stringify(payload) }], isError: true, ...(error?.outcome ? { structuredContent: error.outcome } : {}) };
 }
 
 function parseToolInput(schema, args) {
   const result = schema.safeParse(args);
-  if (!result.success) throw codedError("INVALID_INPUT", "invalid tool input");
+  if (!result.success) {
+    const detail = result.error.issues.slice(0, 3).map((issue) => {
+      const field = issue.path.filter((part) => typeof part === "string" && /^[a-z_]+$/.test(part)).join(".") || "input";
+      const message = issue.code === "unrecognized_keys" ? "unrecognized input field" : issue.message;
+      return `${field}: ${message}`;
+    }).join("; ").slice(0, 240);
+    throw inputError(detail || "invalid tool input");
+  }
   return result.data;
 }
 
@@ -946,6 +986,28 @@ export const writeOutput = z.strictObject({
 });
 
 const targetPathPattern = /^(?!\.{1,2}(?:\/|$))[^\\/\u0000-\u001F\u007F]+(?:\/(?!\.{1,2}(?:\/|$))[^\\/\u0000-\u001F\u007F]+)*\.[mM][dD]$/;
+function isCalendarDate(value) {
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value);
+  if (!match) return false;
+  const [year, month, day] = match.slice(1).map(Number);
+  if (month < 1 || month > 12) return false;
+  const leapYear = year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
+  const daysInMonth = [31, leapYear ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+  return day >= 1 && day <= daysInMonth[month - 1];
+}
+
+function sectionHeadingHasHash(section, skipIfHash) {
+  const firstLine = section.trimStart().split(/\r?\n/, 1)[0] || "";
+  const heading = /^#{1,6}[ \t]+/.test(firstLine) ? firstLine : `## ${firstLine}`;
+  const hash = skipIfHash.toLowerCase();
+  const lowerHeading = heading.toLowerCase();
+  for (let index = lowerHeading.indexOf(hash); index >= 0; index = lowerHeading.indexOf(hash, index + hash.length)) {
+    if (!/[0-9a-f]/i.test(lowerHeading[index - 1] || "") && !/[0-9a-f]/i.test(lowerHeading[index + hash.length] || "")) return true;
+  }
+  return false;
+}
+
+const calendarDate = (field) => z.string().regex(/^\d{4}-\d{2}-\d{2}$/).refine(isCalendarDate, `${field} must be a valid calendar date`);
 const nonBlankText = (max) => z.string().trim().min(1).max(max).regex(/\S/);
 const searchInput = z.strictObject({ query: nonBlankText(240) });
 const metadataInput = z.strictObject({ repository: nonBlankText(maxRepositoryPathCharacters) });
@@ -959,7 +1021,7 @@ const keeperSaveInput = z.strictObject({
   folder_hint: safeText(1024).trim().min(1),
   type: safeText(100).optional(),
   links: z.array(safeText(2048)).max(20).optional(),
-  session_link_date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+  session_link_date: calendarDate("session_link_date").optional(),
   idempotency_key: z.string().min(1).max(240).regex(/^[A-Za-z0-9._:-]+$/).optional(),
   request_id: z.string().min(1).max(240).regex(/^[A-Za-z0-9._:-]+$/).optional(),
 });
@@ -968,12 +1030,16 @@ const keeperSaveAdvertisedInput = keeperSaveInput.extend({ title: noteTitle, fol
 const dailyAppendInput = z.strictObject({
   content: z.string().min(1).max(65536),
   section: safeText(240).optional(),
-  date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+  date: calendarDate("date").optional(),
   target_path: z.string().trim().min(4).max(1024).regex(targetPathPattern).optional(),
   skip_if_hash: z.string().min(7).max(64).regex(/^[0-9a-fA-F]+$/).optional(),
   idempotency_key: z.string().min(1).max(240).regex(/^[A-Za-z0-9._:-]+$/).optional(),
   request_id: z.string().min(1).max(240).regex(/^[A-Za-z0-9._:-]+$/).optional(),
-}).refine((value) => !(value.target_path && value.date), { message: "target_path and date are mutually exclusive" });
+})
+  .refine((value) => !(value.target_path && value.date), { message: "target_path and date are mutually exclusive" })
+  .refine((value) => !value.skip_if_hash || Boolean(value.section && sectionHeadingHasHash(value.section, value.skip_if_hash)), {
+    path: ["skip_if_hash"], message: "skip_if_hash requires section to contain the same hash",
+  });
 
 const readToolAnnotations = {
   readOnlyHint: true,
@@ -1085,7 +1151,12 @@ export function createServer({ supportedProtocolVersions = protocolVersions, sco
         const input = parseToolInput(dailyAppendInput, args);
         if (!input.target_path) requireDailyWriteConfiguration(configuration);
         if (requireWriteIdempotency && !input.idempotency_key) throw codedError("INVALID_INPUT", "idempotency_key is required for remote writes");
-        return successResult(await dailyAppend({ ...input, request_id: input.request_id || fallback.request_id }, configuration.vaultPath, configuration.dailyPath, ctx.mcpReq.signal));
+        const targetParentAbsent = input.target_path && await targetParentWasAbsent(input.target_path, configuration.vaultPath);
+        const outcome = await dailyAppend({ ...input, request_id: input.request_id || fallback.request_id }, configuration.vaultPath, configuration.dailyPath, ctx.mcpReq.signal);
+        if (outcome.status === "committed" && targetParentAbsent) {
+          outcome.warnings.push("Target parent directory did not exist before this request");
+        }
+        return successResult(outcome);
       } catch (error) {
         return writeErrorResult(error, fallback);
       }
