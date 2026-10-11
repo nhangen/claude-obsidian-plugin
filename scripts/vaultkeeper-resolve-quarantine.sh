@@ -18,11 +18,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 _resolve_vault() {
   local v="${1:-}"
   if [ -z "$v" ]; then
-    local cfg
-    cfg="$(resolve_obsidian_config "${CLAUDE_PLUGIN_ROOT:-${ROOT%/scripts}}")" || true
-    if [ -n "$cfg" ] && [ -f "$cfg" ]; then
-      v="$(grep '^vault_path:' "$cfg" | head -1 | sed 's/^vault_path:[[:space:]]*//')"
-    fi
+    v="$(obsidian_config_value vault_path "${CLAUDE_PLUGIN_ROOT:-${ROOT%/scripts}}" || true)"
   fi
   [ -n "$v" ] && [ -d "$v" ] || { printf 'error: vault not found or not specified\n' >&2; exit 1; }
   cd "$v" 2>/dev/null && pwd -P
@@ -93,7 +89,7 @@ cmd_diff() {
     return 0
   fi
   printf '%s\n' "--- live: $live" "+++ quarantine: $q_file"
-  diff -u "$live" "$q_file" || true
+  diff -u "$live" "$q_file" || [ $? -eq 1 ]
 }
 
 cmd_discard() {
@@ -196,7 +192,10 @@ main() {
 
   while [ $# -gt 0 ]; do
     case "$1" in
-      --vault) vault="${2:-}"; shift 2 ;;
+      --vault)
+        [ $# -ge 2 ] || { printf 'error: --vault requires a value\n' >&2; exit 1; }
+        vault="$2"; shift 2
+        ;;
       *)
         if [ -z "$target" ]; then target="$1"; shift; else shift; fi
         ;;

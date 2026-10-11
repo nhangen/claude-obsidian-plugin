@@ -15,11 +15,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 _resolve_vault() {
   local v="${1:-}"
   if [ -z "$v" ]; then
-    local cfg
-    cfg="$(resolve_obsidian_config "${CLAUDE_PLUGIN_ROOT:-${ROOT%/scripts}}")" || true
-    if [ -n "$cfg" ] && [ -f "$cfg" ]; then
-      v="$(grep '^vault_path:' "$cfg" | head -1 | sed 's/^vault_path:[[:space:]]*//')"
-    fi
+    v="$(obsidian_config_value vault_path "${CLAUDE_PLUGIN_ROOT:-${ROOT%/scripts}}" || true)"
   fi
   [ -n "$v" ] && [ -d "$v" ] || { printf 'error: vault not found or not specified\n' >&2; exit 1; }
   cd "$v" 2>/dev/null && pwd -P
@@ -119,8 +115,11 @@ main() {
 
   while [ $# -gt 0 ]; do
     case "$1" in
-      --vault)   vault="${2:-}"; shift 2 ;;
-      --limit)   limit="${2:-}"; shift 2 ;;
+      --vault|--limit)
+        [ $# -ge 2 ] || { printf 'error: %s requires a value\n' "$1" >&2; exit 1; }
+        if [ "$1" = "--vault" ]; then vault="$2"; else limit="$2"; fi
+        shift 2
+        ;;
       --dry-run) mode="dry-run"; shift ;;
       --apply)   mode="apply";   shift ;;
       *)

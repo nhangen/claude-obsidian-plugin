@@ -99,4 +99,8 @@ grep -q "tags: \[unfiled\]" "$V/Mode.md" || fail "one failing note stopped the r
 [ "$(_get_mode "$V/Mode.md")" = "644" ] || fail "file mode changed to $(_get_mode "$V/Mode.md")"
 [ -z "$(find "$V" -maxdepth 1 -name '.backfill-*')" ] || fail "temp file leaked in the vault root"
 
+# 7. option without a value fails with the script's own message
+ERR="$("$SCRIPT" --limit 2>&1)" && fail "--limit with no value should exit non-zero"
+grep -qF -- "--limit requires a value" <<<"$ERR" || fail "missing-value message not shown; got: $ERR"
+
 echo "PASS: vaultkeeper-backfill-frontmatter"

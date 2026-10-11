@@ -88,4 +88,8 @@ grep -qF -- "locked out" "$V/Pending.md" && fail "Pending.md written without the
 rm -f "$Q/$QF"
 [ -z "$(find "$V" -maxdepth 1 -name '.Pending-*')" ] || fail "temp file leaked in the vault root"
 
+# 10. option without a value fails with the script's own message
+ERR="$("$SCRIPT" list --vault 2>&1)" && fail "--vault with no value should exit non-zero"
+grep -qF -- "--vault requires a value" <<<"$ERR" || fail "missing-value message not shown; got: $ERR"
+
 echo "PASS: vaultkeeper-resolve-quarantine"
