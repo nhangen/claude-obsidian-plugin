@@ -116,7 +116,7 @@ rm -f "$Q/$QF"
 
 # 13. diff: a vault-root note wins a stem collision, and the collision is reported
 echo "# Root dup" > "$V/Dup.md"
-mkdir -p "$V/Sub"; echo "# Sub dup" > "$V/Sub/Dup.md"
+mkdir -p "$V/A"; echo "# A dup" > "$V/A/Dup.md"
 QF="1700000006-Dup.sync-conflict-20261010-070707-MBP.md"
 echo "# Dup conflict" > "$Q/$QF"
 DIFF_ERR="$TMP/dup.err"
@@ -126,7 +126,7 @@ grep -qF -- "2 notes named Dup.md" "$DIFF_ERR" || fail "root-wins collision not 
 
 # 14. diff: with no root note, the nested pick is deterministic and warned
 rm -f "$V/Dup.md"
-mkdir -p "$V/A"; echo "# A dup" > "$V/A/Dup.md"
+mkdir -p "$V/Z"; echo "# Z dup" > "$V/Z/Dup.md"
 DIFF_OUT="$("$SCRIPT" diff "$QF" --vault "$V" 2>"$DIFF_ERR")"
 grep -q -- "^--- live: .*/vault/A/Dup.md$" <<<"$DIFF_OUT" || fail "nested pick should be the sorted first match; got: $DIFF_OUT"
 grep -qF -- "2 notes named Dup.md" "$DIFF_ERR" || fail "nested collision not warned; got: $(cat "$DIFF_ERR")"
