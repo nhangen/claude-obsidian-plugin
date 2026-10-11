@@ -146,4 +146,15 @@ grep -q "tags: \[unfiled\]" "$V/Mode.md" || fail "one failing note stopped the r
 ERR="$("$SCRIPT" --limit 2>&1)" && fail "--limit with no value should exit non-zero"
 grep -qF -- "--limit requires a value" <<<"$ERR" || fail "missing-value message not shown; got: $ERR"
 
+# 8. A closing fence with trailing whitespace is not a closing fence: frontmatter.sh
+#    reads to EOF, but the awk rewrites match /^---/ and would patch it anyway
+FV="$TMP/fencevault"; mkdir -p "$FV"
+printf -- '---\ntitle: y\n--- \n\nbody\n' > "$FV/Fence.md"
+cp "$FV/Fence.md" "$TMP/_fence_init"
+FENCE_OUT="$("$SCRIPT" --vault "$FV" --dry-run 2>&1)" && fail "dry-run should fail on a whitespace-only closing fence"
+grep -qF "[failed] Fence.md" <<<"$FENCE_OUT" || fail "dry-run did not fail the whitespace fence: $FENCE_OUT"
+FENCE_OUT="$("$SCRIPT" --vault "$FV" --apply 2>&1)" && fail "apply should fail on a whitespace-only closing fence"
+grep -qF "[failed] Fence.md" <<<"$FENCE_OUT" || fail "apply did not fail the whitespace fence: $FENCE_OUT"
+cmp -s "$FV/Fence.md" "$TMP/_fence_init" || fail "whitespace-fence note was rewritten: $(cat "$FV/Fence.md")"
+
 echo "PASS: vaultkeeper-backfill-frontmatter"
