@@ -81,4 +81,10 @@ rm -f "$QF3"; keeper_monitor_tick "$V3" "" "test-host"
 echo c > "$QF3"; keeper_monitor_tick "$V3" "" "test-host"
 [ "$(grep -c -- '^- \[ \] Resolve' "$V3/CEO/inbox.md")" -eq 1 ] || fail "second transition did not re-escalate; inbox: $(cat "$V3/CEO/inbox.md")"
 
+# 7. A faulted tick with no saved state must not seed the gap baseline at zero
+V4="$TMP/vault4"; mkdir -p "$V4/.vaultkeeper-quarantine" "$V4/CEO/alerts"; touch "$V4/CEO/inbox.md"
+keeper_monitor_tick "$V4" "" "test-host" quarantine-only
+keeper_monitor_tick "$V4" "$HUNDRED" "test-host"
+[ ! -f "$V4/CEO/alerts/vaultkeeper-gaps.md" ] || fail "first-ever faulted tick seeded a zero gap baseline"
+
 echo "PASS: vaultkeeper-monitor"

@@ -88,6 +88,16 @@ grep -qF -- "locked out" "$V/Pending.md" && fail "Pending.md written without the
 rm -f "$Q/$QF"
 [ -z "$(find "$V" -maxdepth 1 -name '.Pending-*')" ] || fail "temp file leaked in the vault root"
 
+# 11. a conflict copy whose extra lines are already in the live file merges cleanly, and Pending.md keeps its mode
+printf -- '# Pending\n- [ ] a\n' > "$V/Pending.md"; chmod 644 "$V/Pending.md"
+QF="1700000004-Pending.sync-conflict-20261010-050505-MBP.md"
+printf -- '# Pending\n- [ ] a\n- [ ] b\n' > "$Q/$QF"
+"$SCRIPT" merge "$QF" --vault "$V" >/dev/null || fail "heading already present in Pending.md should not block the merge"
+[ ! -f "$Q/$QF" ] || fail "fully covered copy should be removed"
+grep -qxF -- "- [ ] b" "$V/Pending.md" || fail "item b not merged"
+MODE="$(stat -c %a "$V/Pending.md" 2>/dev/null || stat -f %Lp "$V/Pending.md")"
+[ "$MODE" = "644" ] || fail "Pending.md mode changed to $MODE"
+
 # 10. option without a value fails with the script's own message
 ERR="$("$SCRIPT" list --vault 2>&1)" && fail "--vault with no value should exit non-zero"
 grep -qF -- "--vault requires a value" <<<"$ERR" || fail "missing-value message not shown; got: $ERR"

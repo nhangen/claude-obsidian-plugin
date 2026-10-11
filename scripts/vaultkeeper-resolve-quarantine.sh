@@ -126,6 +126,9 @@ _merge_pending_locked() {
         MERGE_ADDED=$(( MERGE_ADDED + 1 ))
         ;;
       *)
+        if grep -qxF -- "$line" "$tmp"; then
+          continue
+        fi
         MERGE_SKIPPED="${MERGE_SKIPPED}${MERGE_SKIPPED:+$'\n'}  ${line}"
         ;;
     esac
@@ -133,6 +136,9 @@ _merge_pending_locked() {
   if [ "$MERGE_ADDED" -eq 0 ]; then
     rm -f "$tmp"
     return 0
+  fi
+  if [ -f "$pending" ]; then
+    chmod "$(stat -c %a "$pending" 2>/dev/null || stat -f %Lp "$pending")" "$tmp" || { rm -f "$tmp"; return 1; }
   fi
   keeper_swap_or_clean "$tmp" "$pending"
 }

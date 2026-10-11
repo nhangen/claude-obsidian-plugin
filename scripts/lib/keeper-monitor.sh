@@ -22,7 +22,7 @@ _km_iso8601() {
 # and is unaffected.
 keeper_monitor_tick() {
   local vault="$1" cand="$2" host="${3:-$(hostname -s)}" scope="${4:-all}"
-  local cache_dir state_file now now_iso
+  local cache_dir state_file now now_iso rc=0
   cache_dir="$(keeper_cache_dir "$vault")" || {
     printf 'vaultkeeper: monitor skipped: no cache dir\n' >&2; return 0; }
   mkdir -p "$cache_dir" || {
@@ -54,7 +54,8 @@ keeper_monitor_tick() {
   prev_q_count="$(_km_read_state_val "$state_file" "quarantine_count")" || prev_q_count="0"
   prev_q_since="$(_km_read_state_val "$state_file" "quarantine_since")" || prev_q_since=""
   prev_gap_status="$(_km_read_state_val "$state_file" "gap_status")" || prev_gap_status="clear"
-  prev_gap_count="$(_km_read_state_val "$state_file" "gap_count")" || prev_gap_count="$cur_gap_count"
+  local have_gap_state=1
+  prev_gap_count="$(_km_read_state_val "$state_file" "gap_count")" || { prev_gap_count="$cur_gap_count"; have_gap_state=0; }
   prev_gap_since="$(_km_read_state_val "$state_file" "gap_since")" || prev_gap_since=""
 
   # 3. Determine new quarantine status & transition
@@ -130,7 +131,7 @@ EOF
             printf 'Quarantine is clear (no conflicting note copies).\n'
           fi
         } > "$q_tmp"
-        keeper_swap_or_clean "$q_tmp" "$q_alert_file"
+        keeper_swap_or_clean "$q_tmp" "$q_alert_file" || rc=1
       fi
 
       # Escalate to inbox.md strictly on clear -> firing transition
@@ -171,7 +172,7 @@ EOF
             printf 'Frontmatter gaps are stable or trending down.\n'
           fi
         } > "$g_tmp"
-        keeper_swap_or_clean "$g_tmp" "$gap_alert_file"
+        keeper_swap_or_clean "$g_tmp" "$gap_alert_file" || rc=1
       fi
 
       # Escalate to inbox.md strictly on clear -> firing transition
@@ -192,10 +193,13 @@ EOF
     printf 'quarantine_status=%s\n' "$new_q_status"
     printf 'quarantine_count=%s\n' "$cur_q_count"
     printf 'quarantine_since=%s\n' "${prev_q_since}"
-    printf 'gap_status=%s\n' "$new_gap_status"
-    printf 'gap_count=%s\n' "$cur_gap_count"
-    printf 'gap_since=%s\n' "${prev_gap_since}"
+    if [ "$scope" != "quarantine-only" ] || [ "$have_gap_state" -eq 1 ]; then
+      printf 'gap_status=%s\n' "$new_gap_status"
+      printf 'gap_count=%s\n' "$cur_gap_count"
+      printf 'gap_since=%s\n' "${prev_gap_since}"
+    fi
     printf 'last_tick=%s\n' "$now"
   } > "$s_tmp"
-  keeper_swap_or_clean "$s_tmp" "$state_file"
+  keeper_swap_or_clean "$s_tmp" "$state_file" || rc=1
+  return "$rc"
 }
