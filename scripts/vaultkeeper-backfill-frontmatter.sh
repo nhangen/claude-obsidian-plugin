@@ -79,6 +79,17 @@ _patch_frontmatter() {
   fi
 
   if [ "$has_fm" = "1" ]; then
+    # An unclosed frontmatter block is a malformed note, not a tags gap. Both awk
+    # rewrites below assume a closing --- exists; run against an unclosed file one of
+    # them re-emits the whole body as frontmatter, and the other silently drops the
+    # block. The patched-file verification catches the first case, but --dry-run
+    # never patches, so it printed [dry-run] for a note --apply would report [failed]
+    # (#190): dry-run and apply must agree on which notes are patchable.
+    local closing
+    closing="$(awk 'NR>1 && $0=="---" { print NR; exit }' "$file")"
+    if [ -z "$closing" ]; then
+      return 1
+    fi
     # Has frontmatter: check if tags: already present
     local has_tags=0
     if frontmatter_keys "$file" | grep -qxF "tags"; then
@@ -152,6 +163,23 @@ main() {
         tags="$(_infer_tags "$vault" "$f")"
 
         if [ "$mode" = "dry-run" ]; then
+          # Dry-run parity (#190): stage the same patch into a temp file and run the
+          # same verification as --apply, then discard it. A note that cannot be
+          # patched (e.g. unclosed frontmatter) reports [failed] here too, instead of
+          # promising a change that --apply would refuse to make.
+          tmp="$(mktemp "$vault/.backfill-XXXXXX")" || {
+            printf 'error: cannot create temp file\n' >&2
+            failed=$(( failed + 1 ))
+            continue
+          }
+          if ! _patch_frontmatter "$f" "$tags" "$tmp" \
+            || [ -n "$(frontmatter_missing "$tmp" "tags")" ]; then
+            rm -f "$tmp"
+            printf '  [failed] %s (frontmatter could not be patched; note left unchanged)\n' "$rel" >&2
+            failed=$(( failed + 1 ))
+            continue
+          fi
+          rm -f "$tmp"
           printf '  [dry-run] %s -> tags: [%s]\n' "$rel" "$tags"
           updated=$(( updated + 1 ))
         else
@@ -162,7 +190,7 @@ main() {
           }
           if ! _patch_frontmatter "$f" "$tags" "$tmp" \
             || [ -n "$(frontmatter_missing "$tmp" "tags")" ] \
-            || ! chmod "$(_file_mode "$f")" "$tmp" \
+            || ! keeper_preserve_mode "$tmp" "$f" \
             || ! touch -r "$f" "$tmp" \
             || ! keeper_swap_or_clean "$tmp" "$f"; then
             rm -f "$tmp"

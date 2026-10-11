@@ -236,12 +236,24 @@ keeper_fault() {
 # Atomic replace, or clean up after yourself. Every render-to-temp-then-swap site
 # used a bare `mv`, so a failed swap left the temp behind (#43) — and one of them
 # mktemps into the *vault root*, where the leak is visible in Obsidian and Syncthing
-# replicates it to every host. PR #41 fixed one site; a helper is here so a caller
-# cannot opt out by forgetting.
+# replicates it to every host. PR #41 fixed one site; a helper is here so a failed
+# swap leaves nothing behind.
 #
 # Lives in note-hash.sh because it is the one lib every consumer of this pattern
 # already sources first (the tick, and each affected lib's own suite).
 #
+# chmod the replacement to the live file's mode before the swap. mktemp always
+# stages 0600, so swapping it over a 0644 user note silently tightens the permission
+# the vault already carried — and Syncthing replicates that mode to every host (#190).
+# It is the one step keeper_swap_or_clean cannot repair: after the mv the original
+# mode is gone. Call it just before the swap.
+keeper_preserve_mode() {
+  local tmp="$1" target="$2" mode
+  [ -f "$target" ] || return 0
+  mode="$(stat -c %a "$target" 2>/dev/null || stat -f %Lp "$target" 2>/dev/null)" || return 1
+  chmod "$mode" "$tmp"
+}
+
 # mv's own stderr is left alone: it names the reason (permissions, full disk, cross
 # device), and this adds which file was being replaced rather than replacing that.
 keeper_swap_or_clean() {

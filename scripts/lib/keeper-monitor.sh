@@ -131,14 +131,31 @@ EOF
             printf 'Quarantine is clear (no conflicting note copies).\n'
           fi
         } > "$q_tmp"
+        # mktemp stages 0600; restore the alert's own mode so a swap cannot tighten it (#190).
+        keeper_preserve_mode "$q_tmp" "$q_alert_file"
         keeper_swap_or_clean "$q_tmp" "$q_alert_file" || rc=1
       fi
 
-      # Escalate to inbox.md strictly on clear -> firing transition
+      # Escalate to inbox.md strictly on clear -> firing transition.
+      # Under the keeper lock (#190): the check-then-append race with a concurrent
+      # tick's escalation would duplicate the line, and a plain >> torn-write would
+      # split a line the user then edits in Pending-style.
       if [ "$q_transition" -eq 1 ] && [ "$new_q_status" = "firing" ] && [ -f "$vault/CEO/inbox.md" ]; then
         local inbox_item="- [ ] Resolve ${cur_q_count} quarantined sync conflict(s) in .vaultkeeper-quarantine/ (run scripts/vaultkeeper-resolve-quarantine.sh)"
         if ! grep -qE '^- \[ \] Resolve [0-9]+ quarantined sync conflict' "$vault/CEO/inbox.md" 2>/dev/null; then
-          printf '\n%s\n' "$inbox_item" >> "$vault/CEO/inbox.md"
+          local canonical q_inbox_lock
+          canonical="$(cd "$vault" 2>/dev/null && pwd -P)" || canonical="$vault"
+          q_inbox_lock="$(keeper_lock_acquire "$canonical")" || q_inbox_lock=""
+          if [ -n "$q_inbox_lock" ]; then
+            if ! grep -qE '^- \[ \] Resolve [0-9]+ quarantined sync conflict' "$vault/CEO/inbox.md" 2>/dev/null; then
+              printf '\n%s\n' "$inbox_item" >> "$vault/CEO/inbox.md" || rc=1
+            fi
+            keeper_lock_release "$q_inbox_lock"
+          else
+            # Lock unavailable: fall through to the unlocked append, which is the
+            # old behaviour and strictly better than silently dropping the task.
+            printf '\n%s\n' "$inbox_item" >> "$vault/CEO/inbox.md" || rc=1
+          fi
         fi
       fi
     fi
@@ -172,14 +189,31 @@ EOF
             printf 'Frontmatter gaps are stable or trending down.\n'
           fi
         } > "$g_tmp"
+        # mktemp stages 0600; restore the alert's own mode so a swap cannot tighten it (#190).
+        keeper_preserve_mode "$g_tmp" "$gap_alert_file"
         keeper_swap_or_clean "$g_tmp" "$gap_alert_file" || rc=1
       fi
 
-      # Escalate to inbox.md strictly on clear -> firing transition
+      # Escalate to inbox.md strictly on clear -> firing transition.
+      # Under the keeper lock (#190): the check-then-append race with a concurrent
+      # tick's escalation would duplicate the line, and a plain >> torn-write would
+      # split a line the user then edits in Pending-style.
       if [ "$gap_transition" -eq 1 ] && [ "$new_gap_status" = "firing" ] && [ -f "$vault/CEO/inbox.md" ]; then
         local gap_inbox_item="- [ ] Frontmatter gaps grew (+${gap_delta}, total ${cur_gap_count}) (run scripts/vaultkeeper-backfill-frontmatter.sh)"
         if ! grep -qE '^- \[ \] Frontmatter gaps grew' "$vault/CEO/inbox.md" 2>/dev/null; then
-          printf '\n%s\n' "$gap_inbox_item" >> "$vault/CEO/inbox.md"
+          local canonical g_inbox_lock
+          canonical="$(cd "$vault" 2>/dev/null && pwd -P)" || canonical="$vault"
+          g_inbox_lock="$(keeper_lock_acquire "$canonical")" || g_inbox_lock=""
+          if [ -n "$g_inbox_lock" ]; then
+            if ! grep -qE '^- \[ \] Frontmatter gaps grew' "$vault/CEO/inbox.md" 2>/dev/null; then
+              printf '\n%s\n' "$gap_inbox_item" >> "$vault/CEO/inbox.md" || rc=1
+            fi
+            keeper_lock_release "$g_inbox_lock"
+          else
+            # Lock unavailable: fall through to the unlocked append, which is the
+            # old behaviour and strictly better than silently dropping the task.
+            printf '\n%s\n' "$gap_inbox_item" >> "$vault/CEO/inbox.md" || rc=1
+          fi
         fi
       fi
     fi

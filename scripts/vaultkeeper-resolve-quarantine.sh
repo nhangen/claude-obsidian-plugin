@@ -41,9 +41,25 @@ _resolve_target_live() {
     _vaultkeeper.base.sync-conflict-*|_vaultkeeper.sync-conflict-*.base) printf '%s/_vaultkeeper.base\n' "$vault" ;;
     *.sync-conflict-*.md)
       local stem="${clean%%.sync-conflict-*}"
-      local found
-      found="$(find "$vault" -type f -name "${stem}.md" ! -path '*/.vaultkeeper-quarantine/*' 2>/dev/null | head -1)"
-      [ -n "$found" ] && printf '%s\n' "$found" || printf '%s/%s.md\n' "$vault" "$stem"
+      # The vault-root copy is the natural live note; prefer it over a same-stem
+      # note buried in a folder. `find | head -1` alone picked an arbitrary match
+      # and diffed the conflict against the wrong note when two shared a stem (#190).
+      if [ -f "$vault/${stem}.md" ]; then
+        printf '%s/%s.md\n' "$vault" "$stem"
+      else
+        local found count
+        found="$(find "$vault" -type f -name "${stem}.md" ! -path '*/.vaultkeeper-quarantine/*' 2>/dev/null)" || found=""
+        if [ -n "$found" ]; then
+          count="$(printf '%s\n' "$found" | grep -c .)"
+          if [ "$count" -gt 1 ]; then
+            printf 'warning: %s note(s) named %s.md match; using the first\n' "$count" "$stem" >&2
+            printf '%s\n' "$found" >&2
+          fi
+          printf '%s\n' "$(printf '%s\n' "$found" | head -1)"
+        else
+          printf '%s/%s.md\n' "$vault" "$stem"
+        fi
+      fi
       ;;
     *)
       printf '%s/%s\n' "$vault" "$clean"
@@ -137,9 +153,8 @@ _merge_pending_locked() {
     rm -f "$tmp"
     return 0
   fi
-  if [ -f "$pending" ]; then
-    chmod "$(stat -c %a "$pending" 2>/dev/null || stat -f %Lp "$pending")" "$tmp" || { rm -f "$tmp"; return 1; }
-  fi
+  # mktemp stages 0600; restore Pending.md's own mode so a swap cannot tighten it (#190).
+  keeper_preserve_mode "$tmp" "$pending"
   keeper_swap_or_clean "$tmp" "$pending"
 }
 
