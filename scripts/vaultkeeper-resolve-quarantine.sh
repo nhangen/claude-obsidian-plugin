@@ -106,6 +106,41 @@ cmd_discard() {
   printf 'Discarded %s\n' "$(basename "$q_file")"
 }
 
+# Runs under keeper_with_lock, same as the tick's Pending.md writer, so a merge cannot
+# race a tick's swap. Sets MERGE_ADDED and MERGE_SKIPPED for the caller.
+_merge_pending_locked() {
+  local vault="$1" q_file="$2" pending="$1/Pending.md" tmp line payload
+  [ ! -L "$pending" ] || { printf 'error: refusing symlink %s\n' "$pending" >&2; return 1; }
+  tmp="$(mktemp "$vault/.Pending-XXXXXX")" || return 1
+  if [ -f "$pending" ]; then
+    cp "$pending" "$tmp" || { rm -f "$tmp"; return 1; }
+    if [ -s "$tmp" ] && [ -n "$(tail -c 1 "$tmp")" ]; then
+      printf '\n' >> "$tmp" || { rm -f "$tmp"; return 1; }
+    fi
+  fi
+  while IFS= read -r line || [ -n "$line" ]; do
+    [ -n "$line" ] || continue
+    case "$line" in
+      "- ["*"] "*)
+        payload="${line#- \[[^]]*\] }"
+        if sed -n 's/^- \[[^]]*\] //p' "$tmp" | grep -qxF -- "$payload"; then
+          continue
+        fi
+        printf '%s\n' "$line" >> "$tmp" || { rm -f "$tmp"; return 1; }
+        MERGE_ADDED=$(( MERGE_ADDED + 1 ))
+        ;;
+      *)
+        MERGE_SKIPPED="${MERGE_SKIPPED}${MERGE_SKIPPED:+$'\n'}  ${line}"
+        ;;
+    esac
+  done < "$q_file"
+  if [ "$MERGE_ADDED" -eq 0 ]; then
+    rm -f "$tmp"
+    return 0
+  fi
+  keeper_swap_or_clean "$tmp" "$pending"
+}
+
 cmd_merge() {
   local vault="$1" target="$2"
   local q_dir="$vault/.vaultkeeper-quarantine"
@@ -127,25 +162,21 @@ cmd_merge() {
   # Pending.md: merge checklist items
   case "$b" in
     *[0-9]-Pending.sync-conflict-*)
-      local pending="$vault/Pending.md"
-      local added=0
-      local line
-      while IFS= read -r line; do
-        [ -n "$line" ] || continue
-        case "$line" in
-          "- ["*"] "*)
-            local payload
-            payload="${line#- \[[^]]*\] }"
-            if [ -f "$pending" ] && sed -n 's/^- \[[^]]*\] //p' "$pending" | grep -qxF -- "$payload"; then
-              continue
-            fi
-            printf '%s\n' "$line" >> "$pending"
-            added=$(( added + 1 ))
-            ;;
-        esac
-      done < "$q_file"
+      local canonical
+      canonical="$(cd "$vault" 2>/dev/null && pwd -P)" || return 1
+      MERGE_ADDED=0
+      MERGE_SKIPPED=""
+      keeper_with_lock "$canonical" _merge_pending_locked "$canonical" "$q_file" || {
+        printf 'error: could not merge %s into Pending.md; quarantine copy kept\n' "$b" >&2
+        return 1
+      }
+      if [ -n "$MERGE_SKIPPED" ]; then
+        printf 'Merged %s item(s) into Pending.md; kept %s because these lines are not checklist items:\n%s\n' \
+          "$MERGE_ADDED" "$b" "$MERGE_SKIPPED" >&2
+        return 1
+      fi
       rm -f "$q_file"
-      printf 'Merged %s item(s) into Pending.md and cleared %s\n' "$added" "$b"
+      printf 'Merged %s item(s) into Pending.md and cleared %s\n' "$MERGE_ADDED" "$b"
       return 0
       ;;
   esac

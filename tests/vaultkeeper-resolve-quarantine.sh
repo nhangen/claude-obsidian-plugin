@@ -51,4 +51,41 @@ EOF
 grep -qxF -- "- [ ] TASK: new item from conflict" "$V/Pending.md" || fail "missing task not merged into Pending.md"
 [ "$(grep -F -c -- "- [ ] TASK: existing" "$V/Pending.md")" -eq 1 ] || fail "duplicate task introduced in Pending.md"
 
+# 7. merge: unterminated last line is merged, and Pending.md without a trailing newline stays line-separated
+printf -- '- [ ] a' > "$V/Pending.md"
+QF="1700000001-Pending.sync-conflict-20261010-020202-MBP.md"
+printf -- '- [x] foo bar\n- [ ] last' > "$Q/$QF"
+"$SCRIPT" merge "$QF" --vault "$V" >/dev/null
+grep -qxF -- "- [ ] a" "$V/Pending.md" || fail "append glued onto an unterminated Pending.md line"
+grep -qxF -- "- [x] foo bar" "$V/Pending.md" || fail "first conflict item not merged"
+grep -qxF -- "- [ ] last" "$V/Pending.md" || fail "unterminated last conflict line was dropped"
+[ ! -f "$Q/$QF" ] || fail "fully merged copy should be removed"
+
+# 8. merge: a copy with content that cannot be merged is kept, and the skipped lines are reported
+printf -- '- [ ] a\n' > "$V/Pending.md"
+QF="1700000002-Pending.sync-conflict-20261010-030303-MBP.md"
+printf -- '# Hand notes\n- [ ] kept item\n' > "$Q/$QF"
+if ERR="$("$SCRIPT" merge "$QF" --vault "$V" 2>&1 >/dev/null)"; then fail "merge with unmergeable lines should exit non-zero"; fi
+[ -f "$Q/$QF" ] || fail "quarantine copy with unmerged content was deleted"
+grep -qxF -- "- [ ] kept item" "$V/Pending.md" || fail "mergeable item was not merged"
+grep -qF -- "# Hand notes" <<<"$ERR" || fail "skipped line not reported; got: $ERR"
+rm -f "$Q/$QF"
+
+# 9. merge: Pending.md is written under the keeper lock
+printf -- '- [ ] a\n' > "$V/Pending.md"
+QF="1700000003-Pending.sync-conflict-20261010-040404-MBP.md"
+printf -- '- [ ] locked out\n' > "$Q/$QF"
+(
+  . "$ROOT_DIR/scripts/lib/note-hash.sh"
+  LOCK="$(keeper_lock_acquire "$(cd "$V" && pwd -P)")" || exit 9
+  if KEEPER_LOCK_TIMEOUT_SECONDS=1 "$SCRIPT" merge "$QF" --vault "$V" >/dev/null 2>&1; then
+    keeper_lock_release "$LOCK"; exit 8
+  fi
+  keeper_lock_release "$LOCK"
+) || fail "merge ran while the keeper lock was held (rc=$?)"
+[ -f "$Q/$QF" ] || fail "copy removed although the lock was never acquired"
+grep -qF -- "locked out" "$V/Pending.md" && fail "Pending.md written without the lock"
+rm -f "$Q/$QF"
+[ -z "$(find "$V" -maxdepth 1 -name '.Pending-*')" ] || fail "temp file leaked in the vault root"
+
 echo "PASS: vaultkeeper-resolve-quarantine"
