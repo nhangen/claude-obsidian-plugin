@@ -92,4 +92,30 @@ keeper_monitor_tick "$V4" "" "test-host" quarantine-only
 keeper_monitor_tick "$V4" "$HUNDRED" "test-host"
 [ ! -f "$V4/CEO/alerts/vaultkeeper-gaps.md" ] || fail "first-ever faulted tick seeded a zero gap baseline"
 
+# 8. The inbox escalation re-checks under the lock: a line another tick appended while
+# this one waited for the lock is not duplicated
+V5="$TMP/vault5"; mkdir -p "$V5/.vaultkeeper-quarantine" "$V5/CEO/alerts"; touch "$V5/CEO/inbox.md"
+echo c > "$V5/.vaultkeeper-quarantine/1700000000-Pending.sync-conflict-20261010-010101-MBP.md"
+PAUSE="$TMP/pause5"
+( KEEPER_TEST_PAUSE_POINT=before_lock_owner KEEPER_TEST_PAUSE_DIR="$PAUSE" \
+    keeper_monitor_tick "$V5" "" "test-host" ) &
+TICK_PID=$!
+for _i in $(seq 1 500); do [ -e "$PAUSE/ready" ] && break; sleep 0.01; done
+[ -e "$PAUSE/ready" ] || { kill "$TICK_PID" 2>/dev/null; fail "tick never reached the inbox lock"; }
+printf '\n- [ ] Resolve 1 quarantined sync conflict(s) from another tick\n' >> "$V5/CEO/inbox.md"
+: > "$PAUSE/continue"
+wait "$TICK_PID" || fail "paused tick failed"
+[ "$(grep -c -- '^- \[ \] Resolve' "$V5/CEO/inbox.md")" -eq 1 ] \
+  || fail "escalation duplicated a line appended while it waited for the lock: $(cat "$V5/CEO/inbox.md")"
+
+# 9. With the lock held elsewhere the escalation still lands once, and says it went unlocked
+V6="$TMP/vault6"; mkdir -p "$V6/.vaultkeeper-quarantine" "$V6/CEO/alerts"; touch "$V6/CEO/inbox.md"
+echo c > "$V6/.vaultkeeper-quarantine/1700000000-Pending.sync-conflict-20261010-010101-MBP.md"
+HELD="$(keeper_lock_acquire "$(cd "$V6" && pwd -P)")" || fail "could not hold the keeper lock"
+ERR6="$(KEEPER_LOCK_TIMEOUT_SECONDS=1 keeper_monitor_tick "$V6" "" "test-host" 2>&1 >/dev/null)" \
+  || { keeper_lock_release "$HELD"; fail "tick failed while the lock was held: $ERR6"; }
+keeper_lock_release "$HELD"
+[ "$(grep -c -- '^- \[ \] Resolve' "$V6/CEO/inbox.md")" -eq 1 ] || fail "unlocked fallback did not append exactly once"
+grep -qF "inbox lock unavailable" <<<"$ERR6" || fail "unlocked fallback was silent; got: $ERR6"
+
 echo "PASS: vaultkeeper-monitor"
