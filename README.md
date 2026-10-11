@@ -105,9 +105,21 @@ bash scripts/install-watcher.sh install "$(pwd)/scripts/vaultkeeper-tick.sh"
 
 Either way the keeper registers under the `com.nhangen.obsidian-vaultkeeper` namespace — visible in `crontab -l` (Linux) or `launchctl list | grep obsidian-vaultkeeper` (macOS) for audits.
 
-### No CEO writes
+### Quarantine resolution and frontmatter backfill
 
-The keeper writes only to the Obsidian vault (`vault_path` from `obsidian.local.md`). It never writes to the CEO vault or any other synced store.
+- **Quarantine resolution** (`scripts/vaultkeeper-resolve-quarantine.sh`): inspect, diff, merge, or discard sync conflict copies isolated in `.vaultkeeper-quarantine/`:
+  - `scripts/vaultkeeper-resolve-quarantine.sh list`
+  - `scripts/vaultkeeper-resolve-quarantine.sh diff <conflict-file>`
+  - `scripts/vaultkeeper-resolve-quarantine.sh merge <conflict-file>` (reconciles checkboxes into `Pending.md`)
+  - `scripts/vaultkeeper-resolve-quarantine.sh discard <conflict-file>`
+- **Frontmatter backfill** (`scripts/vaultkeeper-backfill-frontmatter.sh`): safely backfills missing `tags` in bounded batches (default 50) without touching note bodies or modification timestamps:
+  - `scripts/vaultkeeper-backfill-frontmatter.sh --dry-run` (default preview)
+  - `scripts/vaultkeeper-backfill-frontmatter.sh --apply --limit 50`
+- **Transition monitoring**: the keeper tracks metric transitions across ticks. If `$VAULT/CEO/alerts/` exists, it updates `CEO/alerts/vaultkeeper-quarantine.md` and `CEO/alerts/vaultkeeper-gaps.md`, escalating new actionable transitions to `CEO/inbox.md`. Ticks with no changes post nothing.
+
+### Scoped writes
+
+The keeper writes only within the configured Obsidian vault (`vault_path` from `obsidian.local.md`). It never touches external paths or unsanctioned stores.
 
 ## Hooks
 
