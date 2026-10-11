@@ -114,4 +114,22 @@ chmod 755 "$V/Locked"
 grep -q -- "^--- live: .*/Notes/Nested.md$" <<<"$DIFF_OUT" || fail "unreadable folder hid the nested live note; got: $DIFF_OUT"
 rm -f "$Q/$QF"
 
+# 13. diff: a vault-root note wins a stem collision, and the collision is reported
+echo "# Root dup" > "$V/Dup.md"
+mkdir -p "$V/Sub"; echo "# Sub dup" > "$V/Sub/Dup.md"
+QF="1700000006-Dup.sync-conflict-20261010-070707-MBP.md"
+echo "# Dup conflict" > "$Q/$QF"
+DIFF_ERR="$TMP/dup.err"
+DIFF_OUT="$("$SCRIPT" diff "$QF" --vault "$V" 2>"$DIFF_ERR")"
+grep -q -- "^--- live: .*/vault/Dup.md$" <<<"$DIFF_OUT" || fail "root note should win the stem collision; got: $DIFF_OUT"
+grep -qF -- "2 notes named Dup.md" "$DIFF_ERR" || fail "root-wins collision not warned; got: $(cat "$DIFF_ERR")"
+
+# 14. diff: with no root note, the nested pick is deterministic and warned
+rm -f "$V/Dup.md"
+mkdir -p "$V/A"; echo "# A dup" > "$V/A/Dup.md"
+DIFF_OUT="$("$SCRIPT" diff "$QF" --vault "$V" 2>"$DIFF_ERR")"
+grep -q -- "^--- live: .*/vault/A/Dup.md$" <<<"$DIFF_OUT" || fail "nested pick should be the sorted first match; got: $DIFF_OUT"
+grep -qF -- "2 notes named Dup.md" "$DIFF_ERR" || fail "nested collision not warned; got: $(cat "$DIFF_ERR")"
+rm -f "$Q/$QF"
+
 echo "PASS: vaultkeeper-resolve-quarantine"

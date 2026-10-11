@@ -41,25 +41,24 @@ _resolve_target_live() {
     _vaultkeeper.base.sync-conflict-*|_vaultkeeper.sync-conflict-*.base) printf '%s/_vaultkeeper.base\n' "$vault" ;;
     *.sync-conflict-*.md)
       local stem="${clean%%.sync-conflict-*}"
-      # The vault-root copy is the natural live note; prefer it over a same-stem
-      # note buried in a folder. `find | head -1` alone picked an arbitrary match
-      # and diffed the conflict against the wrong note when two shared a stem (#190).
+      # Quarantine flattens the conflict's folder away, so the stem is all there is to
+      # go on. Prefer the vault-root copy, and say so whenever more than one note
+      # shares the stem, since the pick may be the wrong one (#190).
+      local found count pick
+      found="$(find "$vault" -type f -name "${stem}.md" ! -path '*/.vaultkeeper-quarantine/*' 2>/dev/null | LC_ALL=C sort || true)"
+      count="$(printf '%s' "$found" | grep -c . || true)"
       if [ -f "$vault/${stem}.md" ]; then
-        printf '%s/%s.md\n' "$vault" "$stem"
+        pick="$vault/${stem}.md"
+      elif [ -n "$found" ]; then
+        pick="$(printf '%s\n' "$found" | head -1)"
       else
-        local found count
-        found="$(find "$vault" -type f -name "${stem}.md" ! -path '*/.vaultkeeper-quarantine/*' 2>/dev/null || true)"
-        if [ -n "$found" ]; then
-          count="$(printf '%s\n' "$found" | grep -c .)"
-          if [ "$count" -gt 1 ]; then
-            printf 'warning: %s note(s) named %s.md match; using the first\n' "$count" "$stem" >&2
-            printf '%s\n' "$found" >&2
-          fi
-          printf '%s\n' "$(printf '%s\n' "$found" | head -1)"
-        else
-          printf '%s/%s.md\n' "$vault" "$stem"
-        fi
+        pick="$vault/${stem}.md"
       fi
+      if [ "$count" -gt 1 ]; then
+        printf 'warning: %s notes named %s.md; diffing against %s\n' "$count" "$stem" "$pick" >&2
+        printf '%s\n' "$found" >&2
+      fi
+      printf '%s\n' "$pick"
       ;;
     *)
       printf '%s/%s\n' "$vault" "$clean"
