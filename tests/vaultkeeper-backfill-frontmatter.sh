@@ -112,6 +112,19 @@ inbox body
 printf '%s' "$_expected_inbox" > "$TMP/_expected_inbox"
 cmp -s "$V/Inbox/inbox.md" "$TMP/_expected_inbox" \
   || fail "Inbox/inbox.md changed unexpectedly after apply: $(cat "$V/Inbox/inbox.md")"
+_expected_project='---
+title: My Project
+type: note
+tags: [projects, awesome-motive]
+---
+
+# Project Header
+
+project content body
+'
+printf '%s' "$_expected_project" > "$TMP/_expected_project"
+cmp -s "$V/Projects/Awesome Motive/project.md" "$TMP/_expected_project" \
+  || fail "project.md changed unexpectedly after apply: $(cat "$V/Projects/Awesome Motive/project.md")"
 
 # 6. A malformed note is reported as failed, left byte-identical, leaves no temp file, and does not stop the run;
 #    a note's file mode survives the rewrite
