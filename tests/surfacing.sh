@@ -4,6 +4,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 . "${ROOT_DIR}/scripts/lib/note-hash.sh"
 . "${ROOT_DIR}/scripts/lib/keeper-state.sh"
 . "${ROOT_DIR}/scripts/lib/surfacing.sh"
+_mode() { stat -c %a "$1" 2>/dev/null || stat -f %Lp "$1"; }
 fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/surfacing-XXXXXX")"; trap 'rm -rf "$TMP"' EXIT
 export XDG_CACHE_HOME="$TMP/cache"
@@ -20,6 +21,9 @@ grep -q 'Projects/gap.md' "$V/Librarian.md" || fail "gap not in digest"
 printf '\nHAND EDIT\n' >> "$V/Librarian.md"
 printf '%s\n' "$C1" | surfacing_digest "$V"
 grep -q 'HAND EDIT' "$V/Librarian.md" && fail "hand edit survived (not machine-owned)"
+chmod 644 "$V/Librarian.md"
+printf '%s\n' "$C1" | surfacing_digest "$V"
+[ "$(_mode "$V/Librarian.md")" = "644" ] || fail "digest regeneration changed Librarian.md mode to $(_mode "$V/Librarian.md")"
 
 # --- Pending.md transition gating ---
 # scan 1 = cold cache: snapshot written, Pending untouched
@@ -69,8 +73,10 @@ COUNT="$(grep -c 'UNFILED: Inbox/a.md' "$RV/Pending.md" | tr -d ' ')"
 grep -qxF -- '- [x] UNFILED: Inbox/a.md' "$RV/Pending.md" \
   || fail "the user's tick was lost:"$'\n'"$(cat "$RV/Pending.md")"
 
-# A genuinely different candidate still gets its own line.
+# A genuinely different candidate still gets its own line, and the append keeps Pending.md's mode.
+chmod 644 "$RV/Pending.md"
 t $'UNFILED\tInbox/b.md\n'
+[ "$(_mode "$RV/Pending.md")" = "644" ] || fail "Pending.md append changed its mode to $(_mode "$RV/Pending.md")"
 grep -qxF -- '- [ ] UNFILED: Inbox/b.md' "$RV/Pending.md" \
   || fail "a new candidate was suppressed by the dedup:"$'\n'"$(cat "$RV/Pending.md")"
 

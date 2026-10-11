@@ -78,4 +78,14 @@ DUPS="$(grep '^- \[ \]' "$V/Pending.md" | sort | uniq -d | wc -l | tr -d ' ')"
 [ "$DUPS" = "0" ] \
   || fail "a stuck snapshot duplicated $DUPS Pending.md line(s) over four ticks:"$'\n'"$(cat "$V/Pending.md")"
 
+# keeper_preserve_mode: the staged temp takes the live file's mode, and a missing target leaves it alone
+PM="$TMP/pm"; mkdir -p "$PM"
+printf 'live\n' > "$PM/live.md"; chmod 644 "$PM/live.md"
+PT="$(mktemp "$PM/.t-XXXXXX")"
+keeper_preserve_mode "$PT" "$PM/live.md" || fail "keeper_preserve_mode failed on a readable target"
+[ "$(stat -c %a "$PT" 2>/dev/null || stat -f %Lp "$PT")" = "644" ] || fail "temp did not take the target's 644 mode"
+PT2="$(mktemp "$PM/.t-XXXXXX")"
+keeper_preserve_mode "$PT2" "$PM/absent.md" || fail "a missing target should be a no-op, not a failure"
+[ "$(stat -c %a "$PT2" 2>/dev/null || stat -f %Lp "$PT2")" = "600" ] || fail "a missing target changed the temp's mode"
+
 echo "PASS: temp-swap"
