@@ -67,6 +67,10 @@ _infer_tags() {
   printf '%s\n' "$tags"
 }
 
+_file_mode() {
+  stat -c %a "$1" 2>/dev/null || stat -f %Lp "$1"
+}
+
 _patch_frontmatter() {
   local file="$1" tags="$2" tmp="$3"
   local has_fm=0
@@ -137,7 +141,7 @@ main() {
 
   printf 'vaultkeeper-backfill: scanning for notes missing tags (mode=%s, limit=%s)\n' "$mode" "$limit"
 
-  local gaps_found=0 updated=0
+  local gaps_found=0 updated=0 failed=0
   local f rel missing tags tmp
 
   while IFS= read -r f; do
@@ -154,14 +158,19 @@ main() {
         else
           tmp="$(mktemp "$vault/.backfill-XXXXXX")" || {
             printf 'error: cannot create temp file\n' >&2
+            failed=$(( failed + 1 ))
             continue
           }
-          # Record mtime before edit
-          touch -r "$f" "$tmp"
-          _patch_frontmatter "$f" "$tags" "$tmp"
-          # Restore mtime from original file
-          touch -r "$f" "$tmp"
-          mv "$tmp" "$f"
+          if ! _patch_frontmatter "$f" "$tags" "$tmp" \
+            || [ -n "$(frontmatter_missing "$tmp" "tags")" ] \
+            || ! chmod "$(_file_mode "$f")" "$tmp" \
+            || ! touch -r "$f" "$tmp" \
+            || ! keeper_swap_or_clean "$tmp" "$f"; then
+            rm -f "$tmp"
+            printf '  [failed] %s (frontmatter could not be patched; note left unchanged)\n' "$rel" >&2
+            failed=$(( failed + 1 ))
+            continue
+          fi
           printf '  [applied] %s -> tags: [%s] (mtime preserved)\n' "$rel" "$tags"
           updated=$(( updated + 1 ))
         fi
@@ -171,6 +180,10 @@ main() {
 
   printf 'Summary: %s note(s) identified for update; %s total gap note(s) in vault.\n' \
     "$updated" "$gaps_found"
+  if [ "$failed" -gt 0 ]; then
+    printf 'vaultkeeper-backfill: %s note(s) failed and were left unchanged\n' "$failed" >&2
+    return 1
+  fi
 }
 
 main "$@"

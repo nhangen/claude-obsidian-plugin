@@ -80,4 +80,23 @@ grep -qF "project content body" "$V/Projects/Awesome Motive/project.md" || fail 
 ROOT_MTIME_AFTER="$(_get_mtime "$V/root.md")"
 [ "$ROOT_MTIME_AFTER" = "$ROOT_MTIME_INIT" ] || fail "mtime was not preserved on root.md (before=$ROOT_MTIME_INIT after=$ROOT_MTIME_AFTER)"
 
+# 6. A malformed note is reported as failed, left byte-identical, leaves no temp file, and does not stop the run;
+#    a note's file mode survives the rewrite
+_get_mode() {
+  if stat -c %a "$1" >/dev/null 2>&1; then stat -c %a "$1"; else stat -f %Lp "$1"; fi
+}
+printf -- '---\ntitle: no closing fence\nbody text\n' > "$V/Unclosed.md"
+UNCLOSED_INIT="$(cat "$V/Unclosed.md")"
+printf '# Mode Note\n\nmode body\n' > "$V/Mode.md"
+chmod 644 "$V/Mode.md"
+RC=0
+FAIL_OUT="$("$SCRIPT" --vault "$V" --apply --limit 10 2>&1)" || RC=$?
+[ "$RC" -ne 0 ] || fail "a note that could not be patched should make the run exit non-zero"
+grep -qF "[applied] Unclosed.md" <<<"$FAIL_OUT" && fail "unclosed note reported as applied: $FAIL_OUT"
+grep -qF "Unclosed.md" <<<"$FAIL_OUT" || fail "unclosed note not named in the output: $FAIL_OUT"
+[ "$(cat "$V/Unclosed.md")" = "$UNCLOSED_INIT" ] || fail "unclosed note was modified"
+grep -q "tags: \[unfiled\]" "$V/Mode.md" || fail "one failing note stopped the rest of the batch"
+[ "$(_get_mode "$V/Mode.md")" = "644" ] || fail "file mode changed to $(_get_mode "$V/Mode.md")"
+[ -z "$(find "$V" -maxdepth 1 -name '.backfill-*')" ] || fail "temp file leaked in the vault root"
+
 echo "PASS: vaultkeeper-backfill-frontmatter"
