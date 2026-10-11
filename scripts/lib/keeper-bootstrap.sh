@@ -86,7 +86,7 @@ _kb_cfg_ensure() {
 # keeper_ensure_active <config_file> <vault_path> [interval_secs]
 # Does the config still lack a usable frontmatter_required? Absent OR present-but-empty
 # both count: the seed used to write the key empty when nothing cleared its threshold,
-# and readers then fall back to a hardcoded `tags type` while the seed's own presence
+# and readers then fall back to a hardcoded `tags` while the seed's own presence
 # check short-circuits forever.
 _kb_needs_schema() {
   local cfg="$1" line
@@ -114,7 +114,7 @@ _kb_seed_schema() {
   else
     bash "$scripts/seed-frontmatter-schema.sh" "$vault" "$cfg" >/dev/null 2>&1 && return 0
   fi
-  printf 'vaultkeeper: frontmatter-schema seed failed; using default (tags type)%s\n' \
+  printf 'vaultkeeper: frontmatter-schema seed failed; using default (tags)%s\n' \
     "${err:+ — it said: ${err%"${err##*[![:space:]]}"}}" >&2
   return 0
 }

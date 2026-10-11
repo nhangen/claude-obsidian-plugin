@@ -12,15 +12,16 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "${ROOT}/lib/keeper-lease.sh"
 . "${ROOT}/lib/surfacing.sh"
 . "${ROOT}/lib/resolve-config.sh"
+. "${ROOT}/lib/keeper-monitor.sh"
 
 CONFIG="$(resolve_obsidian_config "${CLAUDE_PLUGIN_ROOT:-${ROOT%/scripts}}")" || {
   echo "vaultkeeper: no config; run /obsidian:setup" >&2; exit 0; }
 
-cfg_val() { grep "^$1:" "$CONFIG" | head -1 | sed "s/^$1: *//"; }
+cfg_val() { { grep "^$1:" "$CONFIG" 2>/dev/null || true; } | head -1 | sed "s/^$1: *//"; }
 VAULT="$(cfg_val vault_path)"
 [ -n "$VAULT" ] && [ -d "$VAULT" ] || { echo "vaultkeeper: vault not found: $VAULT" >&2; exit 0; }
 
-REQUIRED="$(cfg_val frontmatter_required)"; REQUIRED="${REQUIRED:-tags type}"
+REQUIRED="$(cfg_val frontmatter_required)"; REQUIRED="${REQUIRED:-tags}"
 PRIORITY="$(cfg_val keeper_host_priority | tr ' ' ',')"
 INTERVAL="$(cfg_val keeper_interval_secs)"; INTERVAL="${INTERVAL:-900}"
 MAXAGE=$(( INTERVAL * 2 ))
@@ -198,6 +199,7 @@ if [ -n "$SCAN_FAULT" ]; then
   if [ -n "$QUARANTINE_ROWS" ]; then
     printf '%s\n' "$QUARANTINE_ROWS" | surfacing_pending_append "$VAULT"
   fi
+  keeper_monitor_tick "$VAULT" "$CAND" "$HOST"
   printf 'vaultkeeper: scan INCOMPLETE on %s — snapshot untouched%s; scanners said: %s\n' \
     "$HOST" "${QUARANTINE_ROWS:+, quarantine receipts appended to Pending.md}" "$SCAN_FAULT" >&2
   exit 0
@@ -213,4 +215,5 @@ printf '%s\n' "$CAND" | surfacing_pending_transition "$VAULT"
 if ! keeper_record_scan "$VAULT"; then
   printf 'vaultkeeper: scan complete but last_scan could not be recorded (cache dir unwritable)\n' >&2
 fi
+keeper_monitor_tick "$VAULT" "$CAND" "$HOST"
 echo "vaultkeeper: scan complete ($HOST)"

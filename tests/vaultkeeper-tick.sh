@@ -427,4 +427,25 @@ grep -q 'scan INCOMPLETE' "$UOUT" \
 grep -q 'scan complete' "$UOUT" \
   && fail "a scan it could not account for reported itself complete: $(cat "$UOUT")"
 
+# --- frontmatter_required defaults to tags when absent (#143) ---
+DV="$TMP/defaultreqvault"; mkdir -p "$DV/Inbox"
+printf -- '---\ntags: [x]\n---\nbody\n' > "$DV/onlytags.md"
+printf -- '---\ntype: note\n---\nbody\n' > "$DV/onlytype.md"
+DCFG="$TMP/defaultreq.local.md"
+cat > "$DCFG" <<EOF
+---
+vault_path: $DV
+keeper_host_priority: ml-1
+keeper_interval_secs: 900
+---
+EOF
+OBSIDIAN_LOCAL_MD="$DCFG" VAULTKEEPER_HOST="ml-1" \
+  bash "${ROOT_DIR}/scripts/vaultkeeper-tick.sh" >/dev/null 2>&1
+if grep -q 'onlytags.md' "$DV/Librarian.md"; then
+  fail "onlytags.md was reported as a gap when required keys defaulted to tags"
+fi
+if ! grep -q 'onlytype.md' "$DV/Librarian.md"; then
+  fail "onlytype.md was not reported as a gap when required keys defaulted to tags"
+fi
+
 echo "PASS: vaultkeeper-tick"
