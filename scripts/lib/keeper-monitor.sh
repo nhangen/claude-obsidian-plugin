@@ -156,7 +156,6 @@ EOF
             printf 'Quarantine is clear (no conflicting note copies).\n'
           fi
         } > "$q_tmp"
-        # mktemp stages 0600; restore the alert's own mode so a swap cannot tighten it (#190).
         if keeper_preserve_mode "$q_tmp" "$q_alert_file"; then
           keeper_swap_or_clean "$q_tmp" "$q_alert_file" || rc=1
         else
@@ -201,7 +200,6 @@ EOF
             printf 'Frontmatter gaps are stable or trending down.\n'
           fi
         } > "$g_tmp"
-        # mktemp stages 0600; restore the alert's own mode so a swap cannot tighten it (#190).
         if keeper_preserve_mode "$g_tmp" "$gap_alert_file"; then
           keeper_swap_or_clean "$g_tmp" "$gap_alert_file" || rc=1
         else

@@ -152,7 +152,6 @@ _merge_pending_locked() {
     rm -f "$tmp"
     return 0
   fi
-  # mktemp stages 0600; restore Pending.md's own mode so a swap cannot tighten it (#190).
   keeper_preserve_mode "$tmp" "$pending" || { rm -f "$tmp"; return 1; }
   keeper_swap_or_clean "$tmp" "$pending"
 }
