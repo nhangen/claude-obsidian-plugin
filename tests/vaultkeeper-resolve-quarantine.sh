@@ -102,4 +102,16 @@ MODE="$(stat -c %a "$V/Pending.md" 2>/dev/null || stat -f %Lp "$V/Pending.md")"
 ERR="$("$SCRIPT" list --vault 2>&1)" && fail "--vault with no value should exit non-zero"
 grep -qF -- "--vault requires a value" <<<"$ERR" || fail "missing-value message not shown; got: $ERR"
 
+# 12. diff: an unreadable folder elsewhere in the vault does not hide the nested live note
+rm -f "$V/Live.md"
+mkdir -p "$V/Notes" "$V/Locked"
+echo "# Nested live" > "$V/Notes/Nested.md"
+QF="1700000005-Nested.sync-conflict-20261010-060606-MBP.md"
+echo "# Nested conflict" > "$Q/$QF"
+chmod 000 "$V/Locked"
+DIFF_OUT="$("$SCRIPT" diff "$QF" --vault "$V" 2>/dev/null)" || true
+chmod 755 "$V/Locked"
+grep -q -- "^--- live: .*/Notes/Nested.md$" <<<"$DIFF_OUT" || fail "unreadable folder hid the nested live note; got: $DIFF_OUT"
+rm -f "$Q/$QF"
+
 echo "PASS: vaultkeeper-resolve-quarantine"

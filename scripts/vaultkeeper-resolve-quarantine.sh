@@ -48,7 +48,7 @@ _resolve_target_live() {
         printf '%s/%s.md\n' "$vault" "$stem"
       else
         local found count
-        found="$(find "$vault" -type f -name "${stem}.md" ! -path '*/.vaultkeeper-quarantine/*' 2>/dev/null)" || found=""
+        found="$(find "$vault" -type f -name "${stem}.md" ! -path '*/.vaultkeeper-quarantine/*' 2>/dev/null || true)"
         if [ -n "$found" ]; then
           count="$(printf '%s\n' "$found" | grep -c .)"
           if [ "$count" -gt 1 ]; then
