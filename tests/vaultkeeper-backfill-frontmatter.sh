@@ -170,4 +170,14 @@ FENCE_OUT="$("$SCRIPT" --vault "$FV" --apply 2>&1)" && fail "apply should fail o
 grep -qF "[failed] Fence.md" <<<"$FENCE_OUT" || fail "apply did not fail the whitespace fence: $FENCE_OUT"
 cmp -s "$FV/Fence.md" "$TMP/_fence_init" || fail "whitespace-fence note was rewritten: $(cat "$FV/Fence.md")"
 
+# 9. Dry-run never writes to the vault, so a read-only vault root still previews
+RO="$TMP/rovault"; mkdir -p "$RO"
+printf '# RO\n\nbody\n' > "$RO/ro.md"
+chmod 555 "$RO"
+RO_RC=0
+RO_OUT="$("$SCRIPT" --vault "$RO" --dry-run 2>&1)" || RO_RC=$?
+chmod 755 "$RO"
+[ "$RO_RC" -eq 0 ] || fail "dry-run failed on a read-only vault (rc=$RO_RC): $RO_OUT"
+grep -qF "[dry-run] ro.md" <<<"$RO_OUT" || fail "dry-run did not preview the read-only vault's note: $RO_OUT"
+
 echo "PASS: vaultkeeper-backfill-frontmatter"

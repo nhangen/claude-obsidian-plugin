@@ -152,7 +152,9 @@ main() {
   printf 'vaultkeeper-backfill: scanning for notes missing tags (mode=%s, limit=%s)\n' "$mode" "$limit"
 
   local gaps_found=0 updated=0 failed=0
-  local f rel missing tags tmp
+  local f rel missing tags tmp="" stage_dir="$vault"
+  [ "$mode" = "dry-run" ] && stage_dir="${TMPDIR:-/tmp}"
+  trap 'rm -f "${tmp:-}"; exit 130' INT TERM
 
   while IFS= read -r f; do
     missing="$(frontmatter_missing "$f" "tags")"
@@ -162,45 +164,32 @@ main() {
         rel="${f#"$vault"/}"
         tags="$(_infer_tags "$vault" "$f")"
 
+        # Both modes stage and verify the same patch, so dry-run reports [failed] for
+        # exactly the notes --apply would refuse (#190). Only --apply swaps, and only
+        # the swap needs the temp on the vault's filesystem.
+        tmp="$(mktemp "$stage_dir/.backfill-XXXXXX")" || {
+          printf 'error: cannot create temp file for %s\n' "$rel" >&2
+          failed=$(( failed + 1 ))
+          continue
+        }
+        if ! _patch_frontmatter "$f" "$tags" "$tmp" \
+          || [ -n "$(frontmatter_missing "$tmp" "tags")" ] \
+          || { [ "$mode" = "apply" ] && {
+                 ! keeper_preserve_mode "$tmp" "$f" \
+                 || ! touch -r "$f" "$tmp" \
+                 || ! keeper_swap_or_clean "$tmp" "$f"; }; }; then
+          rm -f "$tmp"
+          printf '  [failed] %s (frontmatter could not be patched; note left unchanged)\n' "$rel" >&2
+          failed=$(( failed + 1 ))
+          continue
+        fi
         if [ "$mode" = "dry-run" ]; then
-          # Dry-run parity (#190): stage the same patch into a temp file and run the
-          # same verification as --apply, then discard it. A note that cannot be
-          # patched (e.g. unclosed frontmatter) reports [failed] here too, instead of
-          # promising a change that --apply would refuse to make.
-          tmp="$(mktemp "$vault/.backfill-XXXXXX")" || {
-            printf 'error: cannot create temp file\n' >&2
-            failed=$(( failed + 1 ))
-            continue
-          }
-          if ! _patch_frontmatter "$f" "$tags" "$tmp" \
-            || [ -n "$(frontmatter_missing "$tmp" "tags")" ]; then
-            rm -f "$tmp"
-            printf '  [failed] %s (frontmatter could not be patched; note left unchanged)\n' "$rel" >&2
-            failed=$(( failed + 1 ))
-            continue
-          fi
           rm -f "$tmp"
           printf '  [dry-run] %s -> tags: [%s]\n' "$rel" "$tags"
-          updated=$(( updated + 1 ))
         else
-          tmp="$(mktemp "$vault/.backfill-XXXXXX")" || {
-            printf 'error: cannot create temp file\n' >&2
-            failed=$(( failed + 1 ))
-            continue
-          }
-          if ! _patch_frontmatter "$f" "$tags" "$tmp" \
-            || [ -n "$(frontmatter_missing "$tmp" "tags")" ] \
-            || ! keeper_preserve_mode "$tmp" "$f" \
-            || ! touch -r "$f" "$tmp" \
-            || ! keeper_swap_or_clean "$tmp" "$f"; then
-            rm -f "$tmp"
-            printf '  [failed] %s (frontmatter could not be patched; note left unchanged)\n' "$rel" >&2
-            failed=$(( failed + 1 ))
-            continue
-          fi
           printf '  [applied] %s -> tags: [%s] (mtime preserved)\n' "$rel" "$tags"
-          updated=$(( updated + 1 ))
         fi
+        updated=$(( updated + 1 ))
       fi
     fi
   done < <(_scan_find_md "$vault")
