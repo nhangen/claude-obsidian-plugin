@@ -84,7 +84,7 @@ _patch_frontmatter() {
     local closing
     closing="$(awk 'NR>1 && $0=="---" { print NR; exit }' "$file")"
     if [ -z "$closing" ]; then
-      return 2
+      return 3
     fi
     # Has frontmatter: check if tags: already present
     local has_tags=0
@@ -150,7 +150,8 @@ main() {
   local gaps_found=0 updated=0 failed=0
   local f rel missing tags reason prc tmp="" stage_dir="$vault"
   [ "$mode" = "dry-run" ] && stage_dir="${TMPDIR:-/tmp}"
-  trap 'rm -f "${tmp:-}"; exit 130' INT TERM
+  trap 'rm -f "${tmp:-}"; exit 130' INT
+  trap 'rm -f "${tmp:-}"; exit 143' TERM
 
   while IFS= read -r f; do
     missing="$(frontmatter_missing "$f" "tags")"
@@ -170,7 +171,7 @@ main() {
         }
         reason="frontmatter could not be patched"
         if _patch_frontmatter "$f" "$tags" "$tmp"; then prc=0; else prc=$?; fi
-        [ "$prc" -eq 2 ] && reason="unclosed frontmatter"
+        [ "$prc" -eq 3 ] && reason="unclosed frontmatter"
         if [ "$prc" -ne 0 ] \
           || [ -n "$(frontmatter_missing "$tmp" "tags")" ] \
           || { [ "$mode" = "apply" ] && {
