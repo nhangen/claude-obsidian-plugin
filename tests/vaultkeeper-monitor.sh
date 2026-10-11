@@ -59,4 +59,26 @@ keeper_monitor_tick "$V" "$CAND_GAPS" "test-host"
 GAP_INBOX_COUNT="$(grep -c "Frontmatter gaps grew" "$V/CEO/inbox.md")"
 [ "$GAP_INBOX_COUNT" -eq 1 ] || fail "unchanged gap tick duplicated inbox task"
 
+# 5. A faulted (quarantine-only) tick must not move the gap baseline, so the next healthy tick raises no false alert
+V2="$TMP/vault2"; mkdir -p "$V2/.vaultkeeper-quarantine" "$V2/CEO/alerts"; touch "$V2/CEO/inbox.md"
+HUNDRED="$(printf 'GAP\t%s\ttags\n' $(seq 1 100))"
+keeper_monitor_tick "$V2" "$HUNDRED" "test-host"
+keeper_monitor_tick "$V2" "" "test-host" quarantine-only
+keeper_monitor_tick "$V2" "$HUNDRED" "test-host"
+[ ! -f "$V2/CEO/alerts/vaultkeeper-gaps.md" ] || fail "fault tick poisoned the gap baseline: $(cat "$V2/CEO/alerts/vaultkeeper-gaps.md")"
+grep -q "Frontmatter gaps grew" "$V2/CEO/inbox.md" && fail "false gap-growth task after a faulted tick"
+# quarantine is still monitored on the faulted tick
+echo "c" > "$V2/.vaultkeeper-quarantine/1700000000-Pending.sync-conflict-20261010-010101-MBP.md"
+keeper_monitor_tick "$V2" "" "test-host" quarantine-only
+grep -q "status: firing" "$V2/CEO/alerts/vaultkeeper-quarantine.md" || fail "quarantine not monitored on a faulted tick"
+
+# 6. A later clear -> firing transition escalates again once the earlier task was ticked off
+V3="$TMP/vault3"; mkdir -p "$V3/.vaultkeeper-quarantine" "$V3/CEO/alerts"; touch "$V3/CEO/inbox.md"
+QF3="$V3/.vaultkeeper-quarantine/1700000000-Pending.sync-conflict-20261010-010101-MBP.md"
+echo c > "$QF3"; keeper_monitor_tick "$V3" "" "test-host"
+sed -i.bak 's/^- \[ \] Resolve/- [x] Resolve/' "$V3/CEO/inbox.md"; rm -f "$V3/CEO/inbox.md.bak"
+rm -f "$QF3"; keeper_monitor_tick "$V3" "" "test-host"
+echo c > "$QF3"; keeper_monitor_tick "$V3" "" "test-host"
+[ "$(grep -c -- '^- \[ \] Resolve' "$V3/CEO/inbox.md")" -eq 1 ] || fail "second transition did not re-escalate; inbox: $(cat "$V3/CEO/inbox.md")"
+
 echo "PASS: vaultkeeper-monitor"

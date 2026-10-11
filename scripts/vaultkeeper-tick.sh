@@ -199,7 +199,8 @@ if [ -n "$SCAN_FAULT" ]; then
   if [ -n "$QUARANTINE_ROWS" ]; then
     printf '%s\n' "$QUARANTINE_ROWS" | surfacing_pending_append "$VAULT"
   fi
-  keeper_monitor_tick "$VAULT" "$CAND" "$HOST"
+  keeper_monitor_tick "$VAULT" "$CAND" "$HOST" quarantine-only \
+    || printf 'vaultkeeper: monitor tick failed\n' >&2
   printf 'vaultkeeper: scan INCOMPLETE on %s — snapshot untouched%s; scanners said: %s\n' \
     "$HOST" "${QUARANTINE_ROWS:+, quarantine receipts appended to Pending.md}" "$SCAN_FAULT" >&2
   exit 0
@@ -215,5 +216,6 @@ printf '%s\n' "$CAND" | surfacing_pending_transition "$VAULT"
 if ! keeper_record_scan "$VAULT"; then
   printf 'vaultkeeper: scan complete but last_scan could not be recorded (cache dir unwritable)\n' >&2
 fi
-keeper_monitor_tick "$VAULT" "$CAND" "$HOST"
+keeper_monitor_tick "$VAULT" "$CAND" "$HOST" \
+  || printf 'vaultkeeper: monitor tick failed\n' >&2
 echo "vaultkeeper: scan complete ($HOST)"

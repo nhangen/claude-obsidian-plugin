@@ -16,12 +16,17 @@ _km_iso8601() {
   date -u +"%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || date +"%Y-%m-%dT%H:%M:%SZ"
 }
 
-# keeper_monitor_tick <vault> <candidates_string> [host]
+# keeper_monitor_tick <vault> <candidates_string> [host] [quarantine-only]
+# quarantine-only is for a faulted scan: $cand is truncated, so the gap metrics are
+# left exactly as the last healthy tick saved them. Quarantine reads the directory
+# and is unaffected.
 keeper_monitor_tick() {
-  local vault="$1" cand="$2" host="${3:-$(hostname -s)}"
+  local vault="$1" cand="$2" host="${3:-$(hostname -s)}" scope="${4:-all}"
   local cache_dir state_file now now_iso
-  cache_dir="$(keeper_cache_dir "$vault")" || return 0
-  mkdir -p "$cache_dir" || return 0
+  cache_dir="$(keeper_cache_dir "$vault")" || {
+    printf 'vaultkeeper: monitor skipped: no cache dir\n' >&2; return 0; }
+  mkdir -p "$cache_dir" || {
+    printf 'vaultkeeper: monitor skipped: cannot create %s\n' "$cache_dir" >&2; return 0; }
   state_file="$cache_dir/monitor.state"
   now="$(now_epoch)"
   now_iso="$(_km_iso8601)"
@@ -69,8 +74,14 @@ keeper_monitor_tick() {
 
   # 4. Determine new gap status & transition (firing if growth >= 5)
   local new_gap_status="clear" gap_transition=0 gap_delta=0
+  if [ "$scope" = "quarantine-only" ]; then
+    cur_gap_count="$prev_gap_count"
+    new_gap_status="$prev_gap_status"
+  fi
   gap_delta=$(( cur_gap_count - prev_gap_count ))
-  if [ "$gap_delta" -ge 5 ]; then
+  if [ "$scope" = "quarantine-only" ]; then
+    :
+  elif [ "$gap_delta" -ge 5 ]; then
     new_gap_status="firing"
     if [ "$prev_gap_status" != "firing" ]; then
       gap_transition=1
@@ -112,7 +123,7 @@ EOF
             printf 'Quarantined sync conflict copies awaiting resolution (%s):\n' "$cur_q_count"
             while IFS= read -r f; do
               [ -n "$f" ] || continue
-              printf '  - `%s`\n' "$(basename "$f")"
+              printf '  - `%s`\n' "$(basename "$f" | LC_ALL=C tr -d '`[:cntrl:]')"
             done <<<"$q_files"
             printf '\nRun `scripts/vaultkeeper-resolve-quarantine.sh` to review, diff, or discard.\n'
           else
@@ -125,14 +136,14 @@ EOF
       # Escalate to inbox.md strictly on clear -> firing transition
       if [ "$q_transition" -eq 1 ] && [ "$new_q_status" = "firing" ] && [ -f "$vault/CEO/inbox.md" ]; then
         local inbox_item="- [ ] Resolve ${cur_q_count} quarantined sync conflict(s) in .vaultkeeper-quarantine/ (run scripts/vaultkeeper-resolve-quarantine.sh)"
-        if ! grep -qF "Resolve" "$vault/CEO/inbox.md" 2>/dev/null || ! grep -qF "quarantined sync conflict" "$vault/CEO/inbox.md" 2>/dev/null; then
+        if ! grep -qE '^- \[ \] Resolve [0-9]+ quarantined sync conflict' "$vault/CEO/inbox.md" 2>/dev/null; then
           printf '\n%s\n' "$inbox_item" >> "$vault/CEO/inbox.md"
         fi
       fi
     fi
 
     # Gaps alert (written if firing or if transitioning)
-    if [ "$gap_transition" -eq 1 ] || [ "$new_gap_status" = "firing" ]; then
+    if [ "$scope" != "quarantine-only" ] && { [ "$gap_transition" -eq 1 ] || [ "$new_gap_status" = "firing" ]; }; then
       local gap_alert_file="$vault/CEO/alerts/vaultkeeper-gaps.md"
       local g_tmp
       g_tmp="$(mktemp "$vault/CEO/alerts/.galert-XXXXXX" 2>/dev/null)" || g_tmp=""
@@ -166,7 +177,7 @@ EOF
       # Escalate to inbox.md strictly on clear -> firing transition
       if [ "$gap_transition" -eq 1 ] && [ "$new_gap_status" = "firing" ] && [ -f "$vault/CEO/inbox.md" ]; then
         local gap_inbox_item="- [ ] Frontmatter gaps grew (+${gap_delta}, total ${cur_gap_count}) (run scripts/vaultkeeper-backfill-frontmatter.sh)"
-        if ! grep -qF "Frontmatter gaps grew" "$vault/CEO/inbox.md" 2>/dev/null; then
+        if ! grep -qE '^- \[ \] Frontmatter gaps grew' "$vault/CEO/inbox.md" 2>/dev/null; then
           printf '\n%s\n' "$gap_inbox_item" >> "$vault/CEO/inbox.md"
         fi
       fi
@@ -175,7 +186,8 @@ EOF
 
   # 6. Save state in cache
   local s_tmp
-  s_tmp="$(mktemp "$cache_dir/.state-XXXXXX" 2>/dev/null)" || return 0
+  s_tmp="$(mktemp "$cache_dir/.state-XXXXXX" 2>/dev/null)" || {
+    printf 'vaultkeeper: monitor state not saved: cannot write %s\n' "$cache_dir" >&2; return 0; }
   {
     printf 'quarantine_status=%s\n' "$new_q_status"
     printf 'quarantine_count=%s\n' "$cur_q_count"
