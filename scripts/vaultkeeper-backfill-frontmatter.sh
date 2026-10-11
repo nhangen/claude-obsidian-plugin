@@ -63,10 +63,6 @@ _infer_tags() {
   printf '%s\n' "$tags"
 }
 
-_file_mode() {
-  stat -c %a "$1" 2>/dev/null || stat -f %Lp "$1"
-}
-
 _patch_frontmatter() {
   local file="$1" tags="$2" tmp="$3"
   local has_fm=0
