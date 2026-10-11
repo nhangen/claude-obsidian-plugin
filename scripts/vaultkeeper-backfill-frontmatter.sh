@@ -88,7 +88,7 @@ _patch_frontmatter() {
     local closing
     closing="$(awk 'NR>1 && $0=="---" { print NR; exit }' "$file")"
     if [ -z "$closing" ]; then
-      return 1
+      return 2
     fi
     # Has frontmatter: check if tags: already present
     local has_tags=0
@@ -152,7 +152,7 @@ main() {
   printf 'vaultkeeper-backfill: scanning for notes missing tags (mode=%s, limit=%s)\n' "$mode" "$limit"
 
   local gaps_found=0 updated=0 failed=0
-  local f rel missing tags tmp="" stage_dir="$vault"
+  local f rel missing tags reason prc tmp="" stage_dir="$vault"
   [ "$mode" = "dry-run" ] && stage_dir="${TMPDIR:-/tmp}"
   trap 'rm -f "${tmp:-}"; exit 130' INT TERM
 
@@ -172,14 +172,17 @@ main() {
           failed=$(( failed + 1 ))
           continue
         }
-        if ! _patch_frontmatter "$f" "$tags" "$tmp" \
+        reason="frontmatter could not be patched"
+        if _patch_frontmatter "$f" "$tags" "$tmp"; then prc=0; else prc=$?; fi
+        [ "$prc" -eq 2 ] && reason="unclosed frontmatter"
+        if [ "$prc" -ne 0 ] \
           || [ -n "$(frontmatter_missing "$tmp" "tags")" ] \
           || { [ "$mode" = "apply" ] && {
                  ! keeper_preserve_mode "$tmp" "$f" \
                  || ! touch -r "$f" "$tmp" \
                  || ! keeper_swap_or_clean "$tmp" "$f"; }; }; then
           rm -f "$tmp"
-          printf '  [failed] %s (frontmatter could not be patched; note left unchanged)\n' "$rel" >&2
+          printf '  [failed] %s (%s; note left unchanged)\n' "$rel" "$reason" >&2
           failed=$(( failed + 1 ))
           continue
         fi
