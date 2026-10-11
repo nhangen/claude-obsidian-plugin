@@ -132,8 +132,11 @@ EOF
           fi
         } > "$q_tmp"
         # mktemp stages 0600; restore the alert's own mode so a swap cannot tighten it (#190).
-        keeper_preserve_mode "$q_tmp" "$q_alert_file"
-        keeper_swap_or_clean "$q_tmp" "$q_alert_file" || rc=1
+        if keeper_preserve_mode "$q_tmp" "$q_alert_file"; then
+          keeper_swap_or_clean "$q_tmp" "$q_alert_file" || rc=1
+        else
+          rm -f "$q_tmp"; rc=1
+        fi
       fi
 
       # Escalate to inbox.md strictly on clear -> firing transition.
@@ -190,8 +193,11 @@ EOF
           fi
         } > "$g_tmp"
         # mktemp stages 0600; restore the alert's own mode so a swap cannot tighten it (#190).
-        keeper_preserve_mode "$g_tmp" "$gap_alert_file"
-        keeper_swap_or_clean "$g_tmp" "$gap_alert_file" || rc=1
+        if keeper_preserve_mode "$g_tmp" "$gap_alert_file"; then
+          keeper_swap_or_clean "$g_tmp" "$gap_alert_file" || rc=1
+        else
+          rm -f "$g_tmp"; rc=1
+        fi
       fi
 
       # Escalate to inbox.md strictly on clear -> firing transition.

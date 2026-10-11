@@ -87,5 +87,10 @@ keeper_preserve_mode "$PT" "$PM/live.md" || fail "keeper_preserve_mode failed on
 PT2="$(mktemp "$PM/.t-XXXXXX")"
 keeper_preserve_mode "$PT2" "$PM/absent.md" || fail "a missing target should be a no-op, not a failure"
 [ "$(stat -c %a "$PT2" 2>/dev/null || stat -f %Lp "$PT2")" = "600" ] || fail "a missing target changed the temp's mode"
+PT3="$(mktemp "$PM/.t-XXXXXX")"
+stat() { return 1; }
+if PM_ERR="$(keeper_preserve_mode "$PT3" "$PM/live.md" 2>&1)"; then unset -f stat; fail "keeper_preserve_mode should fail when stat cannot read the mode"; fi
+unset -f stat
+grep -qF "could not read mode" <<<"$PM_ERR" || fail "stat failure was silent; got: $PM_ERR"
 
 echo "PASS: temp-swap"

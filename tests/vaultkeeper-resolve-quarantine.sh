@@ -132,4 +132,26 @@ grep -q -- "^--- live: .*/vault/A/Dup.md$" <<<"$DIFF_OUT" || fail "nested pick s
 grep -qF -- "2 notes named Dup.md" "$DIFF_ERR" || fail "nested collision not warned; got: $(cat "$DIFF_ERR")"
 rm -f "$Q/$QF"
 
+# 15. merge: when Pending.md's mode cannot be read, the merge stops and keeps the copy
+REAL_STAT="$(command -v stat)"
+mkdir -p "$TMP/stub"
+cat > "$TMP/stub/stat" <<STUB
+#!/usr/bin/env bash
+case "\$*" in
+  *%a*|*%Lp*) exit 1 ;;
+  *) exec "$REAL_STAT" "\$@" ;;
+esac
+STUB
+chmod +x "$TMP/stub/stat"
+printf -- '- [ ] a\n' > "$V/Pending.md"; chmod 644 "$V/Pending.md"
+QF="1700000007-Pending.sync-conflict-20261010-080808-MBP.md"
+printf -- '- [ ] mode probe\n' > "$Q/$QF"
+if ERR="$(PATH="$TMP/stub:$PATH" "$SCRIPT" merge "$QF" --vault "$V" 2>&1 >/dev/null)"; then
+  fail "merge should fail when Pending.md's mode cannot be read"
+fi
+[ -f "$Q/$QF" ] || fail "quarantine copy deleted although the merge was not applied"
+grep -qF -- "mode probe" "$V/Pending.md" && fail "Pending.md swapped without its mode"
+grep -qF -- "could not read mode" <<<"$ERR" || fail "mode failure not reported; got: $ERR"
+rm -f "$Q/$QF"
+
 echo "PASS: vaultkeeper-resolve-quarantine"

@@ -250,7 +250,10 @@ keeper_fault() {
 keeper_preserve_mode() {
   local tmp="$1" target="$2" mode
   [ -f "$target" ] || return 0
-  mode="$(stat -c %a "$target" 2>/dev/null || stat -f %Lp "$target" 2>/dev/null)" || return 1
+  mode="$(stat -c %a "$target" 2>/dev/null || stat -f %Lp "$target" 2>/dev/null)" || {
+    printf 'keeper: could not read mode of %s\n' "$target" >&2
+    return 1
+  }
   chmod "$mode" "$tmp"
 }
 
