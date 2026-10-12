@@ -119,7 +119,7 @@ PT4="$(mktemp "$PM/.t-XXXXXX")"
 chmod() { return 1; }
 if CHMOD_ERR="$(keeper_swap_or_clean "$PT4" "$PM/live.md" 2>&1)"; then unset -f chmod; fail "swap should fail when chmod fails"; fi
 unset -f chmod
-grep -qF "could not apply mode" <<<"$CHMOD_ERR" || fail "chmod failure was silent; got: $CHMOD_ERR"
+grep -qF "could not apply mode 640 for $PM/live.md" <<<"$CHMOD_ERR" || fail "chmod failure was silent; got: $CHMOD_ERR"
 [ ! -e "$PT4" ] || fail "staged temp was not discarded on chmod failure"
 
 # Unreadable umask aborts a new-target swap, removes temp, and logs error

@@ -284,8 +284,8 @@ keeper_swap_or_clean() {
     esac
   fi
 
-  if ! chmod "$mode" "$tmp" 2>/dev/null; then
-    printf 'keeper: could not apply mode %s to %s\n' "$mode" "$tmp" >&2
+  if ! chmod "$mode" "$tmp"; then
+    printf 'keeper: could not apply mode %s for %s\n' "$mode" "$target" >&2
     rm -f "$tmp" 2>/dev/null || true
     return 1
   fi
