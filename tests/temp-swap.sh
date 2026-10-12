@@ -3,7 +3,7 @@
 # is discarded and the caller hears about it. One of these sites stages into the vault
 # root, so a leak is visible in Obsidian and Syncthing replicates it to every host.
 #
-# Each arm makes the *swap* fail while mktemp still succeeds, because a failed mktemp
+# Arms 1–3 make the *swap* fail while mktemp still succeeds, because a failed mktemp
 # returns before there is anything to leak, which is a different (already handled) path.
 # Arms 1–2 aim at a directory target, which keeper_swap_or_clean rejects before any mv;
 # arm 3 is the one that reaches a refused mv.
