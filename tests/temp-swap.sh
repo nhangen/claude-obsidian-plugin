@@ -86,6 +86,13 @@ PT="$(mktemp "$PM/.t-XXXXXX")"
 keeper_swap_or_clean "$PT" "$PM/live.md" || fail "keeper_swap_or_clean failed on a readable target"
 [ "$(stat -c %a "$PM/live.md" 2>/dev/null || stat -L -f %Lp "$PM/live.md")" = "644" ] || fail "target did not preserve 644 mode"
 
+# A symlinked target takes its referent's mode, not the link's own (0777 under GNU stat
+# on Linux, 0755 under BSD stat), which would leave the note world-writable.
+printf 'real\n' > "$PM/real.md"; chmod 640 "$PM/real.md"; ln -s real.md "$PM/link.md"
+PT6="$(mktemp "$PM/.t-XXXXXX")"
+keeper_swap_or_clean "$PT6" "$PM/link.md" || fail "keeper_swap_or_clean failed on a symlinked target"
+[ "$(stat -L -c %a "$PM/link.md" 2>/dev/null || stat -L -f %Lp "$PM/link.md")" = "640" ] || fail "symlinked target took the link's mode, not its referent's 640"
+
 # Absent target takes 0666 & ~umask, not mktemp's 0600
 EXP_MODE="$(printf '%o' "$(( 8#666 & ~ 8#$(umask) ))")"
 PT2="$(mktemp "$PM/.t-XXXXXX")"

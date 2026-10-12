@@ -259,7 +259,7 @@ keeper_swap_or_clean() {
   fi
 
   if [ -f "$target" ]; then
-    for m in "$(stat -c %a "$target" 2>/dev/null)" "$(stat -L -f %Lp "$target" 2>/dev/null)"; do
+    for m in "$(stat -L -c %a "$target" 2>/dev/null)" "$(stat -L -f %Lp "$target" 2>/dev/null)"; do
       case "$m" in
         ''|*[!0-7]*) continue ;;
         *) mode="$m"; break ;;
