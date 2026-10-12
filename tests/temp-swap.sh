@@ -3,11 +3,10 @@
 # is discarded and the caller hears about it. One of these sites stages into the vault
 # root, so a leak is visible in Obsidian and Syncthing replicates it to every host.
 #
-# Each arm makes the *swap* fail while mktemp still succeeds — the target is a
-# directory the process cannot write into, so `mv file dir/file` is refused — because a
-# failed mktemp returns before there is anything to leak, which is a different (already
-# handled) path. Note a *writable* directory is no good: `mv f d` succeeds by moving f
-# into d.
+# Each arm makes the *swap* fail while mktemp still succeeds, because a failed mktemp
+# returns before there is anything to leak, which is a different (already handled) path.
+# Arms 1–2 aim at a directory target, which keeper_swap_or_clean rejects before any mv;
+# arm 3 is the one that reaches a refused mv.
 set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 . "${ROOT_DIR}/scripts/lib/note-hash.sh"
