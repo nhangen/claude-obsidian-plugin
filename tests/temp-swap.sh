@@ -81,10 +81,14 @@ DUPS="$(grep '^- \[ \]' "$V/Pending.md" | sort | uniq -d | wc -l | tr -d ' ')"
 # 5. keeper_swap_or_clean mode enforcement: existing target preserves mode, absent target
 #    applies 0666 & ~umask (not mktemp's 0600), and stat/chmod failures discard temp.
 PM="$TMP/pm"; mkdir -p "$PM"
-printf 'live\n' > "$PM/live.md"; chmod 644 "$PM/live.md"
-PT="$(mktemp "$PM/.t-XXXXXX")"
-keeper_swap_or_clean "$PT" "$PM/live.md" || fail "keeper_swap_or_clean failed on a readable target"
-[ "$(stat -c %a "$PM/live.md" 2>/dev/null || stat -L -f %Lp "$PM/live.md")" = "644" ] || fail "target did not preserve 644 mode"
+# 640 under umask 022: the new-file default would be 644, so only preservation yields 640.
+(
+  umask 022
+  printf 'live\n' > "$PM/live.md"; chmod 640 "$PM/live.md"
+  PT="$(mktemp "$PM/.t-XXXXXX")"
+  keeper_swap_or_clean "$PT" "$PM/live.md" || fail "keeper_swap_or_clean failed on a readable target"
+  [ "$(stat -c %a "$PM/live.md" 2>/dev/null || stat -L -f %Lp "$PM/live.md")" = "640" ] || fail "target did not preserve 640 mode"
+)
 
 # A symlinked target takes its referent's mode, not the link's own (0777 under GNU stat
 # on Linux, 0755 under BSD stat), which would leave the note world-writable.
