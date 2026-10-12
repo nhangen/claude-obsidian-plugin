@@ -97,11 +97,14 @@ PT6="$(mktemp "$PM/.t-XXXXXX")"
 keeper_swap_or_clean "$PT6" "$PM/link.md" || fail "keeper_swap_or_clean failed on a symlinked target"
 [ "$(stat -L -c %a "$PM/link.md" 2>/dev/null || stat -L -f %Lp "$PM/link.md")" = "640" ] || fail "symlinked target took the link's mode, not its referent's 640"
 
-# Absent target takes 0666 & ~umask, not mktemp's 0600
-EXP_MODE="$(printf '%o' "$(( 8#666 & ~ 8#$(umask) ))")"
-PT2="$(mktemp "$PM/.t-XXXXXX")"
-keeper_swap_or_clean "$PT2" "$PM/absent.md" || fail "keeper_swap_or_clean failed for new target"
-[ "$(stat -c %a "$PM/absent.md" 2>/dev/null || stat -L -f %Lp "$PM/absent.md")" = "$EXP_MODE" ] || fail "new target did not get umask default $EXP_MODE"
+# Absent target takes 0666 & ~umask, not mktemp's 0600. Pinned so a host umask of 077,
+# where the default equals 0600, cannot make this pass with the fix reverted.
+(
+  umask 027
+  PT2="$(mktemp "$PM/.t-XXXXXX")"
+  keeper_swap_or_clean "$PT2" "$PM/absent.md" || fail "keeper_swap_or_clean failed for new target"
+  [ "$(stat -c %a "$PM/absent.md" 2>/dev/null || stat -L -f %Lp "$PM/absent.md")" = "640" ] || fail "new target did not get umask default 640"
+)
 
 # Target stat failure aborts swap, removes temp, and logs error
 PT3="$(mktemp "$PM/.t-XXXXXX")"
