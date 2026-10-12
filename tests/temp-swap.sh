@@ -122,6 +122,15 @@ unset -f chmod
 grep -qF "could not apply mode" <<<"$CHMOD_ERR" || fail "chmod failure was silent; got: $CHMOD_ERR"
 [ ! -e "$PT4" ] || fail "staged temp was not discarded on chmod failure"
 
+# Unreadable umask aborts a new-target swap, removes temp, and logs error
+PT7="$(mktemp "$PM/.t-XXXXXX")"
+umask() { echo bad; }
+if UMASK_ERR="$(keeper_swap_or_clean "$PT7" "$PM/absent2.md" 2>&1)"; then unset -f umask; fail "swap should fail when umask cannot be read"; fi
+unset -f umask
+grep -qF "could not read umask" <<<"$UMASK_ERR" || fail "umask failure was silent; got: $UMASK_ERR"
+[ ! -e "$PT7" ] || fail "staged temp was not discarded on umask failure"
+[ ! -e "$PM/absent2.md" ] || fail "target was created despite the umask failure"
+
 # Directory target aborts swap, removes temp, and does not move temp into directory
 mkdir -p "$PM/dir_target"
 PT5="$(mktemp "$PM/.t-XXXXXX")"
