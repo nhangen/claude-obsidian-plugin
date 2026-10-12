@@ -250,7 +250,7 @@ keeper_fault() {
 # mv's own stderr is left alone: it names the reason (permissions, full disk, cross
 # device), and this adds which file was being replaced rather than replacing that.
 keeper_swap_or_clean() {
-  local tmp="$1" target="$2" mode m u
+  local tmp="$1" target="$2" mode u
 
   if [ -d "$target" ]; then
     rm -f "$tmp" 2>/dev/null || true
@@ -259,17 +259,17 @@ keeper_swap_or_clean() {
   fi
 
   if [ -f "$target" ]; then
-    for m in "$(stat -L -c %a "$target" 2>/dev/null)" "$(stat -L -f %Lp "$target" 2>/dev/null)"; do
-      case "$m" in
-        ''|*[!0-7]*) continue ;;
-        *) mode="$m"; break ;;
-      esac
-    done
-    if [ -z "${mode:-}" ]; then
-      printf 'keeper: could not read mode of %s\n' "$target" >&2
-      rm -f "$tmp" 2>/dev/null || true
-      return 1
-    fi
+    mode="$(stat -L -c %a "$target" 2>/dev/null)" || mode=""
+    case "$mode" in
+      ''|*[!0-7]*) mode="$(stat -L -f %Lp "$target" 2>/dev/null)" || mode="" ;;
+    esac
+    case "$mode" in
+      ''|*[!0-7]*)
+        printf 'keeper: could not read mode of %s\n' "$target" >&2
+        rm -f "$tmp" 2>/dev/null || true
+        return 1
+        ;;
+    esac
   else
     u="$(umask 2>/dev/null)" || u=""
     case "$u" in
