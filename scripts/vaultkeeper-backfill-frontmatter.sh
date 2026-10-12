@@ -175,8 +175,7 @@ main() {
         if [ "$prc" -ne 0 ] \
           || [ -n "$(frontmatter_missing "$tmp" "tags")" ] \
           || { [ "$mode" = "apply" ] && {
-                 ! keeper_preserve_mode "$tmp" "$f" \
-                 || ! touch -r "$f" "$tmp" \
+                 ! touch -r "$f" "$tmp" \
                  || ! keeper_swap_or_clean "$tmp" "$f"; }; }; then
           rm -f "$tmp"
           printf '  [failed] %s (%s; note left unchanged)\n' "$rel" "$reason" >&2

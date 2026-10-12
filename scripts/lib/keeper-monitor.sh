@@ -156,11 +156,7 @@ EOF
             printf 'Quarantine is clear (no conflicting note copies).\n'
           fi
         } > "$q_tmp"
-        if keeper_preserve_mode "$q_tmp" "$q_alert_file"; then
-          keeper_swap_or_clean "$q_tmp" "$q_alert_file" || rc=1
-        else
-          rm -f "$q_tmp"; rc=1
-        fi
+        keeper_swap_or_clean "$q_tmp" "$q_alert_file" || rc=1
       fi
 
       # Escalate to inbox.md strictly on clear -> firing transition
@@ -200,11 +196,7 @@ EOF
             printf 'Frontmatter gaps are stable or trending down.\n'
           fi
         } > "$g_tmp"
-        if keeper_preserve_mode "$g_tmp" "$gap_alert_file"; then
-          keeper_swap_or_clean "$g_tmp" "$gap_alert_file" || rc=1
-        else
-          rm -f "$g_tmp"; rc=1
-        fi
+        keeper_swap_or_clean "$g_tmp" "$gap_alert_file" || rc=1
       fi
 
       # Escalate to inbox.md strictly on clear -> firing transition

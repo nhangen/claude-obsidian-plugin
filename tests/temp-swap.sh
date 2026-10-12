@@ -78,19 +78,42 @@ DUPS="$(grep '^- \[ \]' "$V/Pending.md" | sort | uniq -d | wc -l | tr -d ' ')"
 [ "$DUPS" = "0" ] \
   || fail "a stuck snapshot duplicated $DUPS Pending.md line(s) over four ticks:"$'\n'"$(cat "$V/Pending.md")"
 
-# keeper_preserve_mode: the staged temp takes the live file's mode, and a missing target leaves it alone
+# 5. keeper_swap_or_clean mode enforcement: existing target preserves mode, absent target
+#    applies 0666 & ~umask (not mktemp's 0600), and stat/chmod failures discard temp.
 PM="$TMP/pm"; mkdir -p "$PM"
 printf 'live\n' > "$PM/live.md"; chmod 644 "$PM/live.md"
 PT="$(mktemp "$PM/.t-XXXXXX")"
-keeper_preserve_mode "$PT" "$PM/live.md" || fail "keeper_preserve_mode failed on a readable target"
-[ "$(stat -c %a "$PT" 2>/dev/null || stat -f %Lp "$PT")" = "644" ] || fail "temp did not take the target's 644 mode"
+keeper_swap_or_clean "$PT" "$PM/live.md" || fail "keeper_swap_or_clean failed on a readable target"
+[ "$(stat -c %a "$PM/live.md" 2>/dev/null || stat -L -f %Lp "$PM/live.md")" = "644" ] || fail "target did not preserve 644 mode"
+
+# Absent target takes 0666 & ~umask, not mktemp's 0600
+EXP_MODE="$(printf '%o' "$(( 8#666 & ~ 8#$(umask) ))")"
 PT2="$(mktemp "$PM/.t-XXXXXX")"
-keeper_preserve_mode "$PT2" "$PM/absent.md" || fail "a missing target should be a no-op, not a failure"
-[ "$(stat -c %a "$PT2" 2>/dev/null || stat -f %Lp "$PT2")" = "600" ] || fail "a missing target changed the temp's mode"
+keeper_swap_or_clean "$PT2" "$PM/absent.md" || fail "keeper_swap_or_clean failed for new target"
+[ "$(stat -c %a "$PM/absent.md" 2>/dev/null || stat -L -f %Lp "$PM/absent.md")" = "$EXP_MODE" ] || fail "new target did not get umask default $EXP_MODE"
+
+# Target stat failure aborts swap, removes temp, and logs error
 PT3="$(mktemp "$PM/.t-XXXXXX")"
 stat() { return 1; }
-if PM_ERR="$(keeper_preserve_mode "$PT3" "$PM/live.md" 2>&1)"; then unset -f stat; fail "keeper_preserve_mode should fail when stat cannot read the mode"; fi
+if PM_ERR="$(keeper_swap_or_clean "$PT3" "$PM/live.md" 2>&1)"; then unset -f stat; fail "swap should fail when stat cannot read mode"; fi
 unset -f stat
 grep -qF "could not read mode" <<<"$PM_ERR" || fail "stat failure was silent; got: $PM_ERR"
+[ ! -e "$PT3" ] || fail "staged temp was not discarded on stat failure"
+
+# Chmod failure aborts swap, removes temp, and logs error
+PT4="$(mktemp "$PM/.t-XXXXXX")"
+chmod() { return 1; }
+if CHMOD_ERR="$(keeper_swap_or_clean "$PT4" "$PM/live.md" 2>&1)"; then unset -f chmod; fail "swap should fail when chmod fails"; fi
+unset -f chmod
+grep -qF "could not apply mode" <<<"$CHMOD_ERR" || fail "chmod failure was silent; got: $CHMOD_ERR"
+[ ! -e "$PT4" ] || fail "staged temp was not discarded on chmod failure"
+
+# Directory target aborts swap, removes temp, and does not move temp into directory
+mkdir -p "$PM/dir_target"
+PT5="$(mktemp "$PM/.t-XXXXXX")"
+if DIR_ERR="$(keeper_swap_or_clean "$PT5" "$PM/dir_target" 2>&1)"; then fail "swap should fail when target is directory"; fi
+grep -qF "target is a directory" <<<"$DIR_ERR" || fail "directory error not reported; got: $DIR_ERR"
+[ ! -e "$PT5" ] || fail "staged temp was not discarded on directory target"
+[ ! -e "$PM/dir_target/$(basename "$PT5")" ] || fail "temp leaked into directory target"
 
 echo "PASS: temp-swap"

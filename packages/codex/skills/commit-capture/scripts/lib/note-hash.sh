@@ -242,29 +242,58 @@ keeper_fault() {
 # Lives in note-hash.sh because it is the one lib every consumer of this pattern
 # already sources first (the tick, and each affected lib's own suite).
 #
+# mktemp stages 0600; swapping it over a 0644 user note silently tightens the
+# permission and Syncthing replicates that mode to every host (#190). Enforce the
+# target's mode when it exists and 0666 & ~umask when it does not (#192), failing
+# the swap and cleaning up the staged temp if the mode cannot be read or applied.
+#
 # mv's own stderr is left alone: it names the reason (permissions, full disk, cross
 # device), and this adds which file was being replaced rather than replacing that.
 keeper_swap_or_clean() {
-  local tmp="$1" target="$2"
+  local tmp="$1" target="$2" mode m u
+
+  if [ -d "$target" ]; then
+    rm -f "$tmp" 2>/dev/null || true
+    printf 'keeper: could not replace %s; target is a directory\n' "$target" >&2
+    return 1
+  fi
+
+  if [ -f "$target" ]; then
+    for m in "$(stat -c %a "$target" 2>/dev/null)" "$(stat -L -f %Lp "$target" 2>/dev/null)"; do
+      case "$m" in
+        ''|*[!0-7]*) continue ;;
+        *) mode="$m"; break ;;
+      esac
+    done
+    if [ -z "${mode:-}" ]; then
+      printf 'keeper: could not read mode of %s\n' "$target" >&2
+      rm -f "$tmp" 2>/dev/null || true
+      return 1
+    fi
+  else
+    u="$(umask 2>/dev/null)" || u=""
+    case "$u" in
+      ''|*[!0-7]*)
+        printf 'keeper: could not read umask for %s\n' "$target" >&2
+        rm -f "$tmp" 2>/dev/null || true
+        return 1
+        ;;
+      *)
+        mode="$(printf '%o' "$(( 8#666 & ~ 8#$u ))")"
+        ;;
+    esac
+  fi
+
+  if ! chmod "$mode" "$tmp" 2>/dev/null; then
+    printf 'keeper: could not apply mode %s to %s\n' "$mode" "$tmp" >&2
+    rm -f "$tmp" 2>/dev/null || true
+    return 1
+  fi
+
   if mv "$tmp" "$target"; then
     return 0
   fi
   rm -f "$tmp" 2>/dev/null || true
   printf 'keeper: could not replace %s; the staged temp file was discarded\n' "$target" >&2
   return 1
-}
-
-# chmod the replacement to the live file's mode before the swap. mktemp always
-# stages 0600, so swapping it over a 0644 user note silently tightens the permission
-# the vault already carried — and Syncthing replicates that mode to every host (#190).
-# It is the one step keeper_swap_or_clean cannot repair: after the mv the original
-# mode is gone. Call it just before the swap.
-keeper_preserve_mode() {
-  local tmp="$1" target="$2" mode
-  [ -f "$target" ] || return 0
-  mode="$(stat -c %a "$target" 2>/dev/null || stat -f %Lp "$target" 2>/dev/null)" || {
-    printf 'keeper: could not read mode of %s\n' "$target" >&2
-    return 1
-  }
-  chmod "$mode" "$tmp"
 }
