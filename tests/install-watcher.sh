@@ -123,7 +123,9 @@ trap 'rm -rf "$HOMEDIR" "$CRONDIR"' EXIT
 mkdir -p "$HOMEDIR/Library/LaunchAgents" "$HOMEDIR/bin"
 PL="$HOMEDIR/Library/LaunchAgents/com.nhangen.obsidian-vaultkeeper.plist"
 # A launchctl that always succeeds, so the only thing under test is the refusal.
-printf '#!/usr/bin/env bash\nexit 0\n' > "$HOMEDIR/bin/launchctl"; chmod +x "$HOMEDIR/bin/launchctl"
+printf '#!/usr/bin/env bash\nexit 0\n' > "$HOMEDIR/bin/launchctl"
+printf '#!/usr/bin/env bash\necho Darwin\n' > "$HOMEDIR/bin/uname"
+chmod +x "$HOMEDIR/bin/launchctl" "$HOMEDIR/bin/uname"
 
 write_delegator_plist() {
   cat > "$PL" <<EOF
