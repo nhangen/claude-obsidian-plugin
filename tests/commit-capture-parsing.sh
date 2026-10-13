@@ -28,6 +28,12 @@ trap cleanup EXIT
 
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/cc-parse-XXXXXX")"
 STATE_HOME="$(mktemp -d "${TMPDIR:-/tmp}/cc-parse-state-XXXXXX")"
+CFG_FILE="$WORK/obsidian.local.md"
+VAULT_DIR="$WORK/vault"
+EMPTY_HOME="$WORK/empty-home"
+EMPTY_XDG="$WORK/empty-xdg"
+mkdir -p "$VAULT_DIR" "$EMPTY_HOME" "$EMPTY_XDG"
+printf -- '---\nvault_path: %s\n---\n' "$VAULT_DIR" > "$CFG_FILE"
 
 # A repo with one fresh commit and a known remote.
 mkrepo() {
@@ -88,7 +94,7 @@ run_from() {
   local from="$1" payload="$2"
   rm -rf "${STATE_HOME:?}/claude-obsidian"
   snapshot_for "$payload" "" "$(resolved_root_for "$from" "$payload")"
-  ( cd "$from" && printf '%s' "$payload" | XDG_STATE_HOME="$STATE_HOME" bash "$SCRIPT" 2>/dev/null ) || true
+  ( cd "$from" && printf '%s' "$payload" | OBSIDIAN_LOCAL_MD="$CFG_FILE" XDG_STATE_HOME="$STATE_HOME" bash "$SCRIPT" 2>/dev/null ) || true
 }
 
 # Build a payload with a JSON-escaped command, an optional cwd, and optional
@@ -235,7 +241,7 @@ SNAP_ROOT="$(git -C "$REAL" rev-parse --show-toplevel)"
 DRY_PAYLOAD="$(payload 'git commit --dry-run' "$REAL")"
 rm -rf "${STATE_HOME:?}/claude-obsidian"
 snapshot_for "$DRY_PAYLOAD" "$SNAP_HEAD" "$SNAP_ROOT"
-OUT="$( cd "$REAL" && printf '%s' "$DRY_PAYLOAD" | XDG_STATE_HOME="$STATE_HOME" bash "$SCRIPT" 2>/dev/null )" || true
+OUT="$( cd "$REAL" && printf '%s' "$DRY_PAYLOAD" | OBSIDIAN_LOCAL_MD="$CFG_FILE" XDG_STATE_HOME="$STATE_HOME" bash "$SCRIPT" 2>/dev/null )" || true
 [ -z "$OUT" ] || fail "--dry-run was captured"$'\n'"got: $OUT"
 
 # --- 4. repo resolution addresses the right repository ----------------------
@@ -291,7 +297,7 @@ esac
 # key: it is consumed on use, so no later call can re-capture the same commit
 # however it addresses the repo.
 mkdir -p "$REAL/sub"
-keep() { printf '%s' "$1" | XDG_STATE_HOME="$STATE_HOME" bash "$SCRIPT" 2>/dev/null || true; }
+keep() { printf '%s' "$1" | OBSIDIAN_LOCAL_MD="$CFG_FILE" XDG_STATE_HOME="$STATE_HOME" bash "$SCRIPT" 2>/dev/null || true; }
 rm -rf "${STATE_HOME:?}/claude-obsidian"
 snapshot_for "$(payload 'git commit -q -m x' "$REAL")" "" "$(git -C "$REAL" rev-parse --show-toplevel)"
 FIRST="$(keep "$(payload 'git commit -q -m x' "$REAL")")"
@@ -356,7 +362,7 @@ DEEP_PAYLOAD="$(payload 'git commit -q -m x' "$DEEP")"
 rm -rf "${STATE_HOME:?}/claude-obsidian"
 snapshot_for "$DEEP_PAYLOAD" "" "$(git -C "$DEEP" rev-parse --show-toplevel)"
 ERR="$(mktemp)"
-OUT="$( cd "$DEEP" && printf '%s' "$DEEP_PAYLOAD" | XDG_STATE_HOME="$STATE_HOME" bash "$SCRIPT" 2>"$ERR" )" || true
+OUT="$( cd "$DEEP" && printf '%s' "$DEEP_PAYLOAD" | OBSIDIAN_LOCAL_MD="$CFG_FILE" XDG_STATE_HOME="$STATE_HOME" bash "$SCRIPT" 2>"$ERR" )" || true
 case "$OUT" in *hash=*) : ;; *) fail "deep-path repo was not captured"$'\n'"got: ${OUT:-<empty>}" ;; esac
 grep -q 'File name too long' "$ERR" && { rm -f "$ERR"; fail "state key is unbounded; the hook printed a shell error"; }
 rm -f "$ERR"
@@ -374,7 +380,7 @@ COPY_PAYLOAD="$(payload 'git commit -q -m x' "$REAL")"
 rm -rf "${STATE_HOME:?}/claude-obsidian"
 snapshot_for "$COPY_PAYLOAD" "" "$(git -C "$REAL" rev-parse --show-toplevel)"
 ERR="$(mktemp)"
-OUT="$( cd "$REAL" && printf '%s' "$COPY_PAYLOAD" | XDG_STATE_HOME="$STATE_HOME" bash "$COPY/scripts/commit-capture.sh" 2>"$ERR" )" || true
+OUT="$( cd "$REAL" && printf '%s' "$COPY_PAYLOAD" | HOME="$EMPTY_HOME" XDG_CONFIG_HOME="$EMPTY_XDG" OBSIDIAN_LOCAL_MD="" XDG_STATE_HOME="$STATE_HOME" bash "$COPY/scripts/commit-capture.sh" 2>"$ERR" )" || true
 case "$OUT" in
   *hash=*) rm -f "$ERR"; fail "hook emitted a record with no config library present"$'\n'"got: $OUT" ;;
 esac
@@ -392,7 +398,7 @@ BARE="$WORK/barecopy"
 mkdir -p "$BARE/scripts"
 cp "$SCRIPT" "$BARE/scripts/commit-capture.sh"
 ERR="$(mktemp)"
-OUT="$( cd "$REAL" && printf '%s' "$COPY_PAYLOAD" | XDG_STATE_HOME="$STATE_HOME" bash "$BARE/scripts/commit-capture.sh" 2>"$ERR" )" || true
+OUT="$( cd "$REAL" && printf '%s' "$COPY_PAYLOAD" | HOME="$EMPTY_HOME" XDG_CONFIG_HOME="$EMPTY_XDG" OBSIDIAN_LOCAL_MD="" XDG_STATE_HOME="$STATE_HOME" bash "$BARE/scripts/commit-capture.sh" 2>"$ERR" )" || true
 case "$OUT" in
   *hash=*) rm -f "$ERR"; fail "hook emitted a record with no parsing library"$'\n'"got: $OUT" ;;
 esac
@@ -407,7 +413,7 @@ BROKEN="$WORK/brokencopy"
 mkdir -p "$BROKEN/scripts/lib"
 cp "$SCRIPT" "$BROKEN/scripts/commit-capture.sh"
 printf 'this is not valid shell (\n' > "$BROKEN/scripts/lib/commit-capture-parse.sh"
-OUT="$( cd "$REAL" && printf '%s' "$COPY_PAYLOAD" | XDG_STATE_HOME="$STATE_HOME" bash "$BROKEN/scripts/commit-capture.sh" 2>/dev/null )" || true
+OUT="$( cd "$REAL" && printf '%s' "$COPY_PAYLOAD" | HOME="$EMPTY_HOME" XDG_CONFIG_HOME="$EMPTY_XDG" OBSIDIAN_LOCAL_MD="" XDG_STATE_HOME="$STATE_HOME" bash "$BROKEN/scripts/commit-capture.sh" 2>/dev/null )" || true
 case "$OUT" in
   *hash=*) fail "hook emitted a record with a broken parsing library"$'\n'"got: $OUT" ;;
   *'failed to load'*) : ;;
