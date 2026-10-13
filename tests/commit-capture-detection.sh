@@ -32,6 +32,8 @@ cleanup() {
   [ -n "$GIT_BIN_DIR" ] && rm -rf "$GIT_BIN_DIR"
   [ -n "${STATE_HOME:-}" ] && rm -rf "$STATE_HOME"
   [ -n "${TRACE_FILE:-}" ] && rm -f "$TRACE_FILE"
+  [ -n "${CFG_FILE:-}" ] && rm -f "$CFG_FILE"
+  [ -n "${VAULT_DIR:-}" ] && rm -rf "$VAULT_DIR"
 }
 trap cleanup EXIT
 
@@ -96,6 +98,9 @@ STUB
 }
 
 STATE_HOME="$(mktemp -d "${TMPDIR:-/tmp}/cc-det-state-XXXXXX")"
+CFG_FILE="$(mktemp "${TMPDIR:-/tmp}/cc-det-config-XXXXXX")"
+VAULT_DIR="$(mktemp -d "${TMPDIR:-/tmp}/cc-det-vault-XXXXXX")"
+printf -- '---\nvault_path: %s\n---\n' "$VAULT_DIR" > "$CFG_FILE"
 
 # The post-hook captures only when a PreToolUse snapshot shows HEAD moved. These
 # cases are about what happens once it has: the snapshot sha is one no HEAD can
@@ -132,7 +137,7 @@ run_hook() {
   rm -rf "${STATE_HOME:?}/claude-obsidian"
   : > "$TRACE_FILE"
   seed_snapshot "$payload"
-  printf '%s' "$payload" | PATH="${GIT_BIN_DIR}:$PATH" XDG_STATE_HOME="$STATE_HOME" bash "$SCRIPT" 2>/dev/null || true
+  printf '%s' "$payload" | PATH="${GIT_BIN_DIR}:$PATH" OBSIDIAN_LOCAL_MD="$CFG_FILE" XDG_STATE_HOME="$STATE_HOME" bash "$SCRIPT" 2>/dev/null || true
 }
 
 run_hook_blind() {
@@ -140,7 +145,7 @@ run_hook_blind() {
   rm -rf "${STATE_HOME:?}/claude-obsidian"
   : > "$TRACE_FILE"
   seed_blind_snapshot "$payload"
-  printf '%s' "$payload" | PATH="${GIT_BIN_DIR}:$PATH" XDG_STATE_HOME="$STATE_HOME" bash "$SCRIPT" 2>/dev/null || true
+  printf '%s' "$payload" | PATH="${GIT_BIN_DIR}:$PATH" OBSIDIAN_LOCAL_MD="$CFG_FILE" XDG_STATE_HOME="$STATE_HOME" bash "$SCRIPT" 2>/dev/null || true
 }
 
 # Did the hook ask git this, exactly? Compares the argv column only, so it is
@@ -164,7 +169,7 @@ expect_skip() {
 run_hook_strict() {
   local payload="$1" err rc
   err="$(mktemp)"
-  printf '%s' "$payload" | PATH="${GIT_BIN_DIR}:$PATH" XDG_STATE_HOME="$STATE_HOME" bash "$SCRIPT" 2>"$err"
+  printf '%s' "$payload" | PATH="${GIT_BIN_DIR}:$PATH" OBSIDIAN_LOCAL_MD="$CFG_FILE" XDG_STATE_HOME="$STATE_HOME" bash "$SCRIPT" 2>"$err"
   rc=$?
   [ "$rc" -eq 0 ] || { rm -f "$err"; fail "hook exited $rc (expected 0)"; }
   [ -s "$err" ] && { local e; e="$(cat "$err")"; rm -f "$err"; fail "hook wrote to stderr: $e"; }
@@ -210,10 +215,10 @@ OUT="$(run_hook '{"tool_input":{"command":"git status"},"tool_response":{"stdout
 
 # --- 5. recency boundary (blind path) ----------------------------------------
 make_git_stub 60 "git@github.com:nhangen/test.git"
-OUT="$(printf '%s' "$QUIET" | { rm -rf "${STATE_HOME:?}/claude-obsidian"; seed_blind_snapshot "$QUIET"; PATH="${GIT_BIN_DIR}:$PATH" XDG_STATE_HOME="$STATE_HOME" OBSIDIAN_COMMIT_RECENT_WINDOW=60 bash "$SCRIPT" 2>/dev/null; } || true)"
+OUT="$(printf '%s' "$QUIET" | { rm -rf "${STATE_HOME:?}/claude-obsidian"; seed_blind_snapshot "$QUIET"; PATH="${GIT_BIN_DIR}:$PATH" OBSIDIAN_LOCAL_MD="$CFG_FILE" XDG_STATE_HOME="$STATE_HOME" OBSIDIAN_COMMIT_RECENT_WINDOW=60 bash "$SCRIPT" 2>/dev/null; } || true)"
 case "$OUT" in *hash=*) : ;; *) fail "AGE == window must capture"$'\n'"got: ${OUT:-<empty>}" ;; esac
 make_git_stub 61 "git@github.com:nhangen/test.git"
-OUT="$(printf '%s' "$QUIET" | { rm -rf "${STATE_HOME:?}/claude-obsidian"; : > "$TRACE_FILE"; seed_blind_snapshot "$QUIET"; PATH="${GIT_BIN_DIR}:$PATH" XDG_STATE_HOME="$STATE_HOME" OBSIDIAN_COMMIT_RECENT_WINDOW=60 bash "$SCRIPT" 2>/dev/null; } || true)"
+OUT="$(printf '%s' "$QUIET" | { rm -rf "${STATE_HOME:?}/claude-obsidian"; : > "$TRACE_FILE"; seed_blind_snapshot "$QUIET"; PATH="${GIT_BIN_DIR}:$PATH" OBSIDIAN_LOCAL_MD="$CFG_FILE" XDG_STATE_HOME="$STATE_HOME" OBSIDIAN_COMMIT_RECENT_WINDOW=60 bash "$SCRIPT" 2>/dev/null; } || true)"
 expect_skip "AGE == window+1 must skip" "$OUT" "log -1 --format=%ct" "log -1 --pretty=format:%s"
 
 # A trusted before-image is NOT subject to the clock: the same 4000s-old tip that
