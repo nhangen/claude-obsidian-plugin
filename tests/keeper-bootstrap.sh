@@ -25,7 +25,8 @@ cat > "$WORK/bin/launchctl" <<'EOF'
 [ "$1" = "list" ] || exit 0
 cat "${LAUNCHCTL_STATE:-/dev/null}" 2>/dev/null || true
 EOF
-chmod +x "$WORK/bin/launchctl"
+printf '#!/usr/bin/env bash\necho Darwin\n' > "$WORK/bin/uname"
+chmod +x "$WORK/bin/launchctl" "$WORK/bin/uname"
 export PATH="$WORK/bin:$PATH"
 STATE="$WORK/lc-state"; : > "$STATE"; export LAUNCHCTL_STATE="$STATE"
 
