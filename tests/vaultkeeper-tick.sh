@@ -227,23 +227,691 @@ _fdclusters="$(grep -c '^- ' "$FDV/Librarian.md" || true)"
 [ "$_fdclusters" -ge 240 ] \
   || fail "the digest lists only $_fdclusters rows under ulimit -n 64; the candidate set was truncated"
 
-# 2. Pre-#49 scanner, same limit: the tick must NOT record the scan as complete.
+# 2. Pre-#49 scanner, same limit. The historical fd leak is reproducible
+# with macOS's Bash 3.2, but not with the Bash 5.2 shipped on Ubuntu 24.04:
+# modern Bash closes those process-substitution descriptors. Run the historical
+# implementation everywhere, then validate the observed platform-specific result
+# rather than claiming Linux reproduced a bug its Bash no longer has.
 FDLIB="$TMP/fdticklib"; mkdir -p "$FDLIB"; cp "${ROOT_DIR}"/scripts/lib/*.sh "$FDLIB/"
+OLD_SCAN="$TMP/pre-49-scan-clusters.sh"
 git -C "$ROOT_DIR" show f670411^:scripts/lib/vault-scan.sh \
-  | sed -n '/^scan_clusters/,/^}/p' >> "$FDLIB/vault-scan.sh" \
+  | sed -n '/^scan_clusters() {/,/^}/p' > "$OLD_SCAN" \
   || fail "could not recover the pre-#49 scan_clusters from git history"
+[ -s "$OLD_SCAN" ] || fail "the historical scan_clusters extraction was empty"
+grep -q '^scan_clusters() {' "$OLD_SCAN" || fail "the historical scan_clusters definition was not recovered"
+[ "$(tail -n 1 "$OLD_SCAN")" = "}" ] || fail "the historical scan_clusters function was incomplete"
+"$_FDBASH" -n "$OLD_SCAN" || fail "the historical scan_clusters function is not valid Bash"
+cat "$OLD_SCAN" >> "$FDLIB/vault-scan.sh"
 FDS="$TMP/fdtickscripts"; mkdir -p "$FDS"; cp "${ROOT_DIR}"/scripts/*.sh "$FDS/" 2>/dev/null || true
 cp -R "$FDLIB" "$FDS/lib"
+# Confirm the sourced library's final definition is the historical nested
+# process-substitution implementation, not merely the current scanner copied above.
+"$_FDBASH" -c '. "$1"; declare -f scan_clusters' _ "$FDLIB/vault-scan.sh" > "$TMP/loaded-old-scan.sh" \
+  || fail "could not load the historical scan_clusters definition"
+grep -q 'while read -r cnt tok;' "$TMP/loaded-old-scan.sh" \
+  || fail "the historical scan_clusters definition was not the one loaded"
 FDV2="$TMP/fdtickvault2"; cp -R "$FDV" "$FDV2"; rm -f "$FDV2/Librarian.md" "$FDV2/Pending.md"
 FDCFG2="$TMP/fdtick2.local.md"; sed "s|^vault_path: .*|vault_path: $FDV2|" "$CFG" > "$FDCFG2"
+[ ! -f "$(keeper_last_scan_file "$FDV2")" ] || fail "the historical scan fixture already has last_scan"
+[ ! -f "$(keeper_last_attempt_file "$FDV2")" ] || fail "the historical scan fixture already has last_attempt"
+keeper_has_snapshot "$FDV2" && fail "the historical scan fixture already has a snapshot"
 FD2="$TMP/fdtick-old.out"
 ( ulimit -n 64; OBSIDIAN_LOCAL_MD="$FDCFG2" VAULTKEEPER_HOST="ml-1" \
     "$_FDBASH" "$FDS/vaultkeeper-tick.sh" >"$FD2" 2>&1 ) \
-  || fail "the reverted-scanner tick aborted rather than reporting; got: $(cat "$FD2")"
-grep -q 'scan INCOMPLETE' "$FD2" \
-  || fail "the pre-#49 scanner exhausted fds and the tick still called the scan complete — the gate does not see it: $(cat "$FD2")"
-[ -f "$(keeper_last_scan_file "$FDV2")" ] \
-  && fail "the reverted-scanner tick recorded last_scan on a truncated scan"
+  || fail "the historical-scanner tick aborted rather than reporting; got: $(cat "$FD2")"
+_FDBASH_VERSION="$("$_FDBASH" -c 'printf "%s" "$BASH_VERSION"')"
+if grep -q '^vaultkeeper: scan INCOMPLETE ' "$FD2"; then
+  grep -qi 'too many open files' "$FD2" \
+    || fail "the historical scanner was incomplete for a reason other than fd exhaustion: $(cat "$FD2")"
+  grep -q '^vaultkeeper: scan complete ' "$FD2" \
+    && fail "the historical scan reported both complete and incomplete: $(cat "$FD2")"
+  grep -q '^scan_status: INCOMPLETE
+# --- a failed quarantine move is a fault too (#53) ---------------------------
+# `CONFLICTS="$(keeper_quarantine_conflicts … || true)"` ran above the buffer, so a
+# failed `mv` printed `failed to quarantine …` straight past the gate and `|| true`
+# threw away the status: the QUARANTINE list came back short and the tick recorded
+# the scan as complete. Same invariant as the scanners, one function over.
+if [ "$(id -u)" = "0" ]; then
+  echo "note: running as root, skipping the failed-quarantine arm" >&2
+else
+  QV="$TMP/quarantinevault"; mkdir -p "$QV/Inbox"
+  printf -- '---\ntags: [x]\n---\nbody\n' > "$QV/n.md"
+  # A real Syncthing conflict name, so the quarantine matcher fires on it.
+  printf 'conflicted\n' > "$QV/Pending.sync-conflict-20260730-120000-ABCDEFG.md"
+  # Pre-create the destination read-only: mkdir -p succeeds, the mv into it does not.
+  mkdir -p "$QV/.vaultkeeper-quarantine"
+  chmod 555 "$QV/.vaultkeeper-quarantine"
+  QCFG="$TMP/quarantine.local.md"; sed "s|^vault_path: .*|vault_path: $QV|" "$CFG" > "$QCFG"
+  QOUT="$TMP/quarantine.out"
+  OBSIDIAN_LOCAL_MD="$QCFG" VAULTKEEPER_HOST="ml-1" \
+    bash "${ROOT_DIR}/scripts/vaultkeeper-tick.sh" >"$QOUT" 2>&1 \
+    || { chmod 755 "$QV/.vaultkeeper-quarantine"; fail "a failed quarantine must not abort the tick; got: $(cat "$QOUT")"; }
+  chmod 755 "$QV/.vaultkeeper-quarantine"
+  grep -q 'scan INCOMPLETE' "$QOUT" \
+    || fail "a failed quarantine move was recorded as a complete scan; got: $(cat "$QOUT")"
+  grep -q 'quarantine' "$QOUT" \
+    || fail "the quarantine failure's own words never reached the report; got: $(cat "$QOUT")"
+  [ -f "$(keeper_last_scan_file "$QV")" ] \
+    && fail "a tick whose quarantine failed still recorded last_scan"
+
+  # And a SUCCESSFUL quarantine must run before the scanners, not merely inside the
+  # same capture: run after them, the conflict file is still in place when they walk
+  # the vault, so a file that was correctly quarantined also gets reported as a
+  # frontmatter gap that no longer exists.
+  QV2="$TMP/quarantineok"; mkdir -p "$QV2/Inbox"
+  printf -- '---\ntags: [x]\ntype: a\n---\nbody\n' > "$QV2/n.md"
+  printf 'conflicted\n' > "$QV2/Pending.sync-conflict-20260730-120000-HIJKLMN.md"
+  Q2CFG="$TMP/quarantineok.local.md"; sed "s|^vault_path: .*|vault_path: $QV2|" "$CFG" > "$Q2CFG"
+  Q2OUT="$TMP/quarantineok.out"
+  OBSIDIAN_LOCAL_MD="$Q2CFG" VAULTKEEPER_HOST="ml-1" \
+    bash "${ROOT_DIR}/scripts/vaultkeeper-tick.sh" >"$Q2OUT" 2>&1 \
+    || fail "a successful quarantine aborted the tick; got: $(cat "$Q2OUT")"
+  grep -q 'scan complete' "$Q2OUT" \
+    || fail "a successful quarantine was reported as a fault; got: $(cat "$Q2OUT")"
+  grep -q '^- Pending.sync-conflict-20260730-120000-HIJKLMN.md$' "$QV2/Librarian.md" \
+    || fail "the quarantined conflict was not listed in the digest: $(cat "$QV2/Librarian.md")"
+  grep -qE '^- Pending\.sync-conflict-20260730-120000-HIJKLMN\.md\s' "$QV2/Librarian.md" \
+    && fail "the quarantined file was ALSO scanned as a gap, so quarantine ran after the scanners: $(cat "$QV2/Librarian.md")"
+fi
+
+# --- an unreadable directory must not latch the gate (#51) -------------------
+# One `chmod 000` directory made find print `Permission denied`, and the gate — which
+# could only see bytes on stderr — reported INCOMPLETE on every tick from then on and
+# never recorded last_scan. No tick can fix a permission, so there was no recovery:
+# a vault whose every readable note WAS scanned looked permanently broken. Four
+# agents reproduced it across consecutive ticks.
+if [ "$(id -u)" = "0" ]; then
+  echo "note: running as root, skipping the unreadable-directory tick arm" >&2
+else
+  PTV="$TMP/permtickvault"; mkdir -p "$PTV/Inbox" "$PTV/locked"
+  printf -- '---\ntags: [x]\n---\nbody\n' > "$PTV/n.md"
+  printf -- '---\ntags: [x]\n---\nbody\n' > "$PTV/locked/hidden.md"
+  chmod 000 "$PTV/locked"
+  PTCFG="$TMP/permtick.local.md"; sed "s|^vault_path: .*|vault_path: $PTV|" "$CFG" > "$PTCFG"
+  PTOUT="$TMP/permtick.out"
+  # Twice: the latch only showed up as "and it never recovers", so one tick cannot
+  # tell a latch from a first fault.
+  for _r in 1 2; do
+    OBSIDIAN_LOCAL_MD="$PTCFG" VAULTKEEPER_HOST="ml-1" \
+      bash "${ROOT_DIR}/scripts/vaultkeeper-tick.sh" >"$PTOUT" 2>&1 \
+      || { chmod 755 "$PTV/locked"; fail "an unreadable directory aborted the tick; got: $(cat "$PTOUT")"; }
+  done
+  if grep -q 'scan INCOMPLETE' "$PTOUT"; then
+    chmod 755 "$PTV/locked"
+    fail "an unreadable directory still reports INCOMPLETE, so the gate latches with no recovery path; got: $(cat "$PTOUT")"
+  fi
+  grep -q 'scan complete' "$PTOUT" \
+    || { chmod 755 "$PTV/locked"; fail "the scan of every readable note was not reported complete; got: $(cat "$PTOUT")"; }
+  [ -f "$(keeper_last_scan_file "$PTV")" ] \
+    || { chmod 755 "$PTV/locked"; fail "last_scan was withheld, so the staleness banner will nag forever about a healthy vault"; }
+  # Suppressed is not the same as ignored: the condition has to be visible, by count.
+  grep -q 'unreadable' "$PTOUT" \
+    || { chmod 755 "$PTV/locked"; fail "the unreadable path was never mentioned — that is silence, not classification; got: $(cat "$PTOUT")"; }
+  grep -q '^paths_unreadable: 1' "$PTV/Librarian.md" \
+    || { chmod 755 "$PTV/locked"; fail "the digest does not record the unreadable count: $(head -6 "$PTV/Librarian.md")"; }
+  # …and the count must not carry the absolute host path into the synced digest.
+  case "$(cat "$PTV/Librarian.md")" in
+    *"$PTV/locked"*) chmod 755 "$PTV/locked"; fail "the digest leaked the unreadable path itself" ;;
+  esac
+  chmod 755 "$PTV/locked"
+fi
+
+# --- one repeated benign error must not crowd out a serious one (#54) --------
+# `_scan_find_md` backs three scanners, so a single unreadable directory puts the
+# same `find: … Permission denied` line in the buffer three times. The 300-char
+# clamp then spent its whole budget on the repetition and cut off mid-word, so the
+# fault the user actually needed to see never got reported. The buffer is the only
+# description of the fault they get.
+RV="$TMP/repeatvault"; mkdir -p "$RV/Inbox"
+printf -- '---\ntags: [x]\n---\nbody\n' > "$RV/n.md"
+RCFG="$TMP/repeat.local.md"; sed "s|^vault_path: .*|vault_path: $RV|" "$CFG" > "$RCFG"
+RLIB="$TMP/repeatlib"; mkdir -p "$RLIB"; cp "${ROOT_DIR}"/scripts/lib/*.sh "$RLIB/"
+cat >> "$RLIB/vault-scan.sh" <<'EOF'
+scan_open_asks() {
+  local i
+  # Identical every time, exactly as one chmod 000 directory reaches the buffer
+  # through three callers — only more of them, so the clamp is unambiguous.
+  for i in $(seq 1 40); do
+    printf 'find: /vault/some/deep/unreadable/directory/path: Permission denied\n' >&2
+  done
+  printf 'find: CRITICAL-LATE-FAULT too many open files\n' >&2
+  return 0
+}
+EOF
+RS="$TMP/repeatscripts"; mkdir -p "$RS"; cp "${ROOT_DIR}"/scripts/*.sh "$RS/" 2>/dev/null || true
+cp -R "$RLIB" "$RS/lib"
+ROUT="$TMP/repeat.out"
+OBSIDIAN_LOCAL_MD="$RCFG" VAULTKEEPER_HOST="ml-1" \
+  bash "$RS/vaultkeeper-tick.sh" >"$ROUT" 2>&1 \
+  || fail "a repeated scanner fault must not abort the tick; got: $(cat "$ROUT")"
+grep -q 'scan INCOMPLETE' "$ROUT" \
+  || fail "the repeated-fault tick was not named incomplete; got: $(cat "$ROUT")"
+grep -q 'CRITICAL-LATE-FAULT' "$ROUT" \
+  || fail "the serious fault was truncated away by 40 copies of a benign one; got: $(cat "$ROUT")"
+# The tick reports the buffer twice (once raw, once in the INCOMPLETE line), so a
+# deduplicated buffer shows the repeated message twice in total. Without the dedup
+# the clamp packs several copies into each of those lines.
+_reps="$(grep -o 'Permission denied' "$ROUT" | wc -l | tr -d ' ')"
+[ "$_reps" -le 2 ] \
+  || fail "the repeated message appears $_reps times, so it is still eating the 300-char budget"
+
+# --- a gate that cannot arm must not wave the tick through (#42, panel) ---
+# `SCAN_ERR="$(mktemp …)" || SCAN_ERR=""` failed open: with no buffer the fault
+# check could never fire, so the tick recorded a partial scan as complete — the
+# exact behavior this gate exists to remove. And mktemp is among the first things
+# to fail under the fd/disk exhaustion the gate is watching for, so the guard went
+# missing precisely when it was needed.
+MV="$TMP/mktempvault"; mkdir -p "$MV/Inbox"
+printf -- '---\ntags: [x]\n---\nbody\n' > "$MV/n.md"
+MCFG="$TMP/mktemp.local.md"; sed "s|^vault_path: .*|vault_path: $MV|" "$CFG" > "$MCFG"
+mkdir -p "$TMP/mbin"
+cat > "$TMP/mbin/mktemp" <<'EOF'
+#!/usr/bin/env bash
+case "$*" in *kbscan*) exit 1 ;; esac
+exec /usr/bin/mktemp "$@"
+EOF
+chmod +x "$TMP/mbin/mktemp"
+MOUT="$TMP/mktemp.out"
+PATH="$TMP/mbin:$PATH" OBSIDIAN_LOCAL_MD="$MCFG" VAULTKEEPER_HOST="ml-1" \
+  bash "${ROOT_DIR}/scripts/vaultkeeper-tick.sh" >"$MOUT" 2>&1 \
+  || fail "a failed mktemp must not abort the tick; got: $(cat "$MOUT")"
+grep -q 'scan INCOMPLETE' "$MOUT" \
+  || fail "gate could not arm and the tick did not say so; got: $(cat "$MOUT")"
+grep -q 'scan complete' "$MOUT" \
+  && fail "a tick with no fault buffer reported itself complete: $(cat "$MOUT")"
+[ -f "$(keeper_last_scan_file "$MV")" ] \
+  && fail "a tick with no fault buffer recorded last_scan"
+
+# --- an unwritable cache dir degrades the tick, it does not abort it ---
+# keeper_record_attempt is the first write after the ownership gate, so calling it
+# unchecked under `set -e` would kill the run there — above the scan, the base view AND
+# the digest — and a host with a full or unwritable cache dir would lose the
+# Librarian.md it can still produce. ENOSPC is the same correlated failure class as the
+# mktemp case above, so it takes the same route: fold into SCAN_FAULT, say so, keep the
+# digest, withhold last_scan.
+UV="$TMP/unwritablevault"; mkdir -p "$UV/Inbox"
+printf -- '---\ntags: [x]\n---\nbody\n' > "$UV/n.md"
+UCFG="$TMP/unwritable.local.md"; sed "s|^vault_path: .*|vault_path: $UV|" "$CFG" > "$UCFG"
+UCACHE="$(keeper_cache_dir "$UV")"; mkdir -p "$UCACHE"; chmod 555 "$UCACHE"
+UOUT="$TMP/unwritable.out"
+set +e
+OBSIDIAN_LOCAL_MD="$UCFG" VAULTKEEPER_HOST="ml-1" \
+  bash "${ROOT_DIR}/scripts/vaultkeeper-tick.sh" >"$UOUT" 2>&1
+URC=$?
+set -e
+chmod 755 "$UCACHE"
+[ "$URC" -eq 0 ] || fail "an unwritable cache dir aborted the tick (rc=$URC); got: $(cat "$UOUT")"
+[ -f "$UV/Librarian.md" ] \
+  || fail "the digest was lost when the cache dir was unwritable; got: $(cat "$UOUT")"
+grep -q 'scan INCOMPLETE' "$UOUT" \
+  || fail "an unaccountable scan did not name itself incomplete; got: $(cat "$UOUT")"
+grep -q 'scan complete' "$UOUT" \
+  && fail "a scan it could not account for reported itself complete: $(cat "$UOUT")"
+
+# --- frontmatter_required defaults to tags when absent (#143) ---
+DV="$TMP/defaultreqvault"; mkdir -p "$DV/Inbox"
+printf -- '---\ntags: [x]\n---\nbody\n' > "$DV/onlytags.md"
+printf -- '---\ntype: note\n---\nbody\n' > "$DV/onlytype.md"
+DCFG="$TMP/defaultreq.local.md"
+cat > "$DCFG" <<EOF
+---
+vault_path: $DV
+keeper_host_priority: ml-1
+keeper_interval_secs: 900
+---
+EOF
+OBSIDIAN_LOCAL_MD="$DCFG" VAULTKEEPER_HOST="ml-1" \
+  bash "${ROOT_DIR}/scripts/vaultkeeper-tick.sh" >/dev/null 2>&1
+if grep -q 'onlytags.md' "$DV/Librarian.md"; then
+  fail "onlytags.md was reported as a gap when required keys defaulted to tags"
+fi
+if ! grep -q 'onlytype.md' "$DV/Librarian.md"; then
+  fail "onlytype.md was not reported as a gap when required keys defaulted to tags"
+fi
+
+echo "PASS: vaultkeeper-tick"
+ "$FDV2/Librarian.md" \
+    || fail "the fd-faulted digest did not declare scan_status: INCOMPLETE"
+  [ ! -f "$(keeper_last_scan_file "$FDV2")" ] \
+    || fail "the faulted historical scan recorded last_scan"
+  keeper_has_snapshot "$FDV2" && fail "the faulted historical scan wrote a truncated snapshot"
+  printf 'note: Bash %s reproduced the pre-#49 fd exhaustion; the tick marked the scan incomplete\n' "$_FDBASH_VERSION" >&2
+else
+  grep -q '^vaultkeeper: scan complete ' "$FD2" \
+    || fail "the historical scan produced neither a complete nor an incomplete result: $(cat "$FD2")"
+  grep -q '^vaultkeeper: scan INCOMPLETE ' "$FD2" \
+    && fail "the historical scan reported both complete and incomplete: $(cat "$FD2")"
+  grep -qi 'too many open files' "$FD2" \
+    && fail "the historical scan reported fd exhaustion but was marked complete: $(cat "$FD2")"
+  ! grep -q '^scan_status: INCOMPLETE
+# --- a failed quarantine move is a fault too (#53) ---------------------------
+# `CONFLICTS="$(keeper_quarantine_conflicts … || true)"` ran above the buffer, so a
+# failed `mv` printed `failed to quarantine …` straight past the gate and `|| true`
+# threw away the status: the QUARANTINE list came back short and the tick recorded
+# the scan as complete. Same invariant as the scanners, one function over.
+if [ "$(id -u)" = "0" ]; then
+  echo "note: running as root, skipping the failed-quarantine arm" >&2
+else
+  QV="$TMP/quarantinevault"; mkdir -p "$QV/Inbox"
+  printf -- '---\ntags: [x]\n---\nbody\n' > "$QV/n.md"
+  # A real Syncthing conflict name, so the quarantine matcher fires on it.
+  printf 'conflicted\n' > "$QV/Pending.sync-conflict-20260730-120000-ABCDEFG.md"
+  # Pre-create the destination read-only: mkdir -p succeeds, the mv into it does not.
+  mkdir -p "$QV/.vaultkeeper-quarantine"
+  chmod 555 "$QV/.vaultkeeper-quarantine"
+  QCFG="$TMP/quarantine.local.md"; sed "s|^vault_path: .*|vault_path: $QV|" "$CFG" > "$QCFG"
+  QOUT="$TMP/quarantine.out"
+  OBSIDIAN_LOCAL_MD="$QCFG" VAULTKEEPER_HOST="ml-1" \
+    bash "${ROOT_DIR}/scripts/vaultkeeper-tick.sh" >"$QOUT" 2>&1 \
+    || { chmod 755 "$QV/.vaultkeeper-quarantine"; fail "a failed quarantine must not abort the tick; got: $(cat "$QOUT")"; }
+  chmod 755 "$QV/.vaultkeeper-quarantine"
+  grep -q 'scan INCOMPLETE' "$QOUT" \
+    || fail "a failed quarantine move was recorded as a complete scan; got: $(cat "$QOUT")"
+  grep -q 'quarantine' "$QOUT" \
+    || fail "the quarantine failure's own words never reached the report; got: $(cat "$QOUT")"
+  [ -f "$(keeper_last_scan_file "$QV")" ] \
+    && fail "a tick whose quarantine failed still recorded last_scan"
+
+  # And a SUCCESSFUL quarantine must run before the scanners, not merely inside the
+  # same capture: run after them, the conflict file is still in place when they walk
+  # the vault, so a file that was correctly quarantined also gets reported as a
+  # frontmatter gap that no longer exists.
+  QV2="$TMP/quarantineok"; mkdir -p "$QV2/Inbox"
+  printf -- '---\ntags: [x]\ntype: a\n---\nbody\n' > "$QV2/n.md"
+  printf 'conflicted\n' > "$QV2/Pending.sync-conflict-20260730-120000-HIJKLMN.md"
+  Q2CFG="$TMP/quarantineok.local.md"; sed "s|^vault_path: .*|vault_path: $QV2|" "$CFG" > "$Q2CFG"
+  Q2OUT="$TMP/quarantineok.out"
+  OBSIDIAN_LOCAL_MD="$Q2CFG" VAULTKEEPER_HOST="ml-1" \
+    bash "${ROOT_DIR}/scripts/vaultkeeper-tick.sh" >"$Q2OUT" 2>&1 \
+    || fail "a successful quarantine aborted the tick; got: $(cat "$Q2OUT")"
+  grep -q 'scan complete' "$Q2OUT" \
+    || fail "a successful quarantine was reported as a fault; got: $(cat "$Q2OUT")"
+  grep -q '^- Pending.sync-conflict-20260730-120000-HIJKLMN.md$' "$QV2/Librarian.md" \
+    || fail "the quarantined conflict was not listed in the digest: $(cat "$QV2/Librarian.md")"
+  grep -qE '^- Pending\.sync-conflict-20260730-120000-HIJKLMN\.md\s' "$QV2/Librarian.md" \
+    && fail "the quarantined file was ALSO scanned as a gap, so quarantine ran after the scanners: $(cat "$QV2/Librarian.md")"
+fi
+
+# --- an unreadable directory must not latch the gate (#51) -------------------
+# One `chmod 000` directory made find print `Permission denied`, and the gate — which
+# could only see bytes on stderr — reported INCOMPLETE on every tick from then on and
+# never recorded last_scan. No tick can fix a permission, so there was no recovery:
+# a vault whose every readable note WAS scanned looked permanently broken. Four
+# agents reproduced it across consecutive ticks.
+if [ "$(id -u)" = "0" ]; then
+  echo "note: running as root, skipping the unreadable-directory tick arm" >&2
+else
+  PTV="$TMP/permtickvault"; mkdir -p "$PTV/Inbox" "$PTV/locked"
+  printf -- '---\ntags: [x]\n---\nbody\n' > "$PTV/n.md"
+  printf -- '---\ntags: [x]\n---\nbody\n' > "$PTV/locked/hidden.md"
+  chmod 000 "$PTV/locked"
+  PTCFG="$TMP/permtick.local.md"; sed "s|^vault_path: .*|vault_path: $PTV|" "$CFG" > "$PTCFG"
+  PTOUT="$TMP/permtick.out"
+  # Twice: the latch only showed up as "and it never recovers", so one tick cannot
+  # tell a latch from a first fault.
+  for _r in 1 2; do
+    OBSIDIAN_LOCAL_MD="$PTCFG" VAULTKEEPER_HOST="ml-1" \
+      bash "${ROOT_DIR}/scripts/vaultkeeper-tick.sh" >"$PTOUT" 2>&1 \
+      || { chmod 755 "$PTV/locked"; fail "an unreadable directory aborted the tick; got: $(cat "$PTOUT")"; }
+  done
+  if grep -q 'scan INCOMPLETE' "$PTOUT"; then
+    chmod 755 "$PTV/locked"
+    fail "an unreadable directory still reports INCOMPLETE, so the gate latches with no recovery path; got: $(cat "$PTOUT")"
+  fi
+  grep -q 'scan complete' "$PTOUT" \
+    || { chmod 755 "$PTV/locked"; fail "the scan of every readable note was not reported complete; got: $(cat "$PTOUT")"; }
+  [ -f "$(keeper_last_scan_file "$PTV")" ] \
+    || { chmod 755 "$PTV/locked"; fail "last_scan was withheld, so the staleness banner will nag forever about a healthy vault"; }
+  # Suppressed is not the same as ignored: the condition has to be visible, by count.
+  grep -q 'unreadable' "$PTOUT" \
+    || { chmod 755 "$PTV/locked"; fail "the unreadable path was never mentioned — that is silence, not classification; got: $(cat "$PTOUT")"; }
+  grep -q '^paths_unreadable: 1' "$PTV/Librarian.md" \
+    || { chmod 755 "$PTV/locked"; fail "the digest does not record the unreadable count: $(head -6 "$PTV/Librarian.md")"; }
+  # …and the count must not carry the absolute host path into the synced digest.
+  case "$(cat "$PTV/Librarian.md")" in
+    *"$PTV/locked"*) chmod 755 "$PTV/locked"; fail "the digest leaked the unreadable path itself" ;;
+  esac
+  chmod 755 "$PTV/locked"
+fi
+
+# --- one repeated benign error must not crowd out a serious one (#54) --------
+# `_scan_find_md` backs three scanners, so a single unreadable directory puts the
+# same `find: … Permission denied` line in the buffer three times. The 300-char
+# clamp then spent its whole budget on the repetition and cut off mid-word, so the
+# fault the user actually needed to see never got reported. The buffer is the only
+# description of the fault they get.
+RV="$TMP/repeatvault"; mkdir -p "$RV/Inbox"
+printf -- '---\ntags: [x]\n---\nbody\n' > "$RV/n.md"
+RCFG="$TMP/repeat.local.md"; sed "s|^vault_path: .*|vault_path: $RV|" "$CFG" > "$RCFG"
+RLIB="$TMP/repeatlib"; mkdir -p "$RLIB"; cp "${ROOT_DIR}"/scripts/lib/*.sh "$RLIB/"
+cat >> "$RLIB/vault-scan.sh" <<'EOF'
+scan_open_asks() {
+  local i
+  # Identical every time, exactly as one chmod 000 directory reaches the buffer
+  # through three callers — only more of them, so the clamp is unambiguous.
+  for i in $(seq 1 40); do
+    printf 'find: /vault/some/deep/unreadable/directory/path: Permission denied\n' >&2
+  done
+  printf 'find: CRITICAL-LATE-FAULT too many open files\n' >&2
+  return 0
+}
+EOF
+RS="$TMP/repeatscripts"; mkdir -p "$RS"; cp "${ROOT_DIR}"/scripts/*.sh "$RS/" 2>/dev/null || true
+cp -R "$RLIB" "$RS/lib"
+ROUT="$TMP/repeat.out"
+OBSIDIAN_LOCAL_MD="$RCFG" VAULTKEEPER_HOST="ml-1" \
+  bash "$RS/vaultkeeper-tick.sh" >"$ROUT" 2>&1 \
+  || fail "a repeated scanner fault must not abort the tick; got: $(cat "$ROUT")"
+grep -q 'scan INCOMPLETE' "$ROUT" \
+  || fail "the repeated-fault tick was not named incomplete; got: $(cat "$ROUT")"
+grep -q 'CRITICAL-LATE-FAULT' "$ROUT" \
+  || fail "the serious fault was truncated away by 40 copies of a benign one; got: $(cat "$ROUT")"
+# The tick reports the buffer twice (once raw, once in the INCOMPLETE line), so a
+# deduplicated buffer shows the repeated message twice in total. Without the dedup
+# the clamp packs several copies into each of those lines.
+_reps="$(grep -o 'Permission denied' "$ROUT" | wc -l | tr -d ' ')"
+[ "$_reps" -le 2 ] \
+  || fail "the repeated message appears $_reps times, so it is still eating the 300-char budget"
+
+# --- a gate that cannot arm must not wave the tick through (#42, panel) ---
+# `SCAN_ERR="$(mktemp …)" || SCAN_ERR=""` failed open: with no buffer the fault
+# check could never fire, so the tick recorded a partial scan as complete — the
+# exact behavior this gate exists to remove. And mktemp is among the first things
+# to fail under the fd/disk exhaustion the gate is watching for, so the guard went
+# missing precisely when it was needed.
+MV="$TMP/mktempvault"; mkdir -p "$MV/Inbox"
+printf -- '---\ntags: [x]\n---\nbody\n' > "$MV/n.md"
+MCFG="$TMP/mktemp.local.md"; sed "s|^vault_path: .*|vault_path: $MV|" "$CFG" > "$MCFG"
+mkdir -p "$TMP/mbin"
+cat > "$TMP/mbin/mktemp" <<'EOF'
+#!/usr/bin/env bash
+case "$*" in *kbscan*) exit 1 ;; esac
+exec /usr/bin/mktemp "$@"
+EOF
+chmod +x "$TMP/mbin/mktemp"
+MOUT="$TMP/mktemp.out"
+PATH="$TMP/mbin:$PATH" OBSIDIAN_LOCAL_MD="$MCFG" VAULTKEEPER_HOST="ml-1" \
+  bash "${ROOT_DIR}/scripts/vaultkeeper-tick.sh" >"$MOUT" 2>&1 \
+  || fail "a failed mktemp must not abort the tick; got: $(cat "$MOUT")"
+grep -q 'scan INCOMPLETE' "$MOUT" \
+  || fail "gate could not arm and the tick did not say so; got: $(cat "$MOUT")"
+grep -q 'scan complete' "$MOUT" \
+  && fail "a tick with no fault buffer reported itself complete: $(cat "$MOUT")"
+[ -f "$(keeper_last_scan_file "$MV")" ] \
+  && fail "a tick with no fault buffer recorded last_scan"
+
+# --- an unwritable cache dir degrades the tick, it does not abort it ---
+# keeper_record_attempt is the first write after the ownership gate, so calling it
+# unchecked under `set -e` would kill the run there — above the scan, the base view AND
+# the digest — and a host with a full or unwritable cache dir would lose the
+# Librarian.md it can still produce. ENOSPC is the same correlated failure class as the
+# mktemp case above, so it takes the same route: fold into SCAN_FAULT, say so, keep the
+# digest, withhold last_scan.
+UV="$TMP/unwritablevault"; mkdir -p "$UV/Inbox"
+printf -- '---\ntags: [x]\n---\nbody\n' > "$UV/n.md"
+UCFG="$TMP/unwritable.local.md"; sed "s|^vault_path: .*|vault_path: $UV|" "$CFG" > "$UCFG"
+UCACHE="$(keeper_cache_dir "$UV")"; mkdir -p "$UCACHE"; chmod 555 "$UCACHE"
+UOUT="$TMP/unwritable.out"
+set +e
+OBSIDIAN_LOCAL_MD="$UCFG" VAULTKEEPER_HOST="ml-1" \
+  bash "${ROOT_DIR}/scripts/vaultkeeper-tick.sh" >"$UOUT" 2>&1
+URC=$?
+set -e
+chmod 755 "$UCACHE"
+[ "$URC" -eq 0 ] || fail "an unwritable cache dir aborted the tick (rc=$URC); got: $(cat "$UOUT")"
+[ -f "$UV/Librarian.md" ] \
+  || fail "the digest was lost when the cache dir was unwritable; got: $(cat "$UOUT")"
+grep -q 'scan INCOMPLETE' "$UOUT" \
+  || fail "an unaccountable scan did not name itself incomplete; got: $(cat "$UOUT")"
+grep -q 'scan complete' "$UOUT" \
+  && fail "a scan it could not account for reported itself complete: $(cat "$UOUT")"
+
+# --- frontmatter_required defaults to tags when absent (#143) ---
+DV="$TMP/defaultreqvault"; mkdir -p "$DV/Inbox"
+printf -- '---\ntags: [x]\n---\nbody\n' > "$DV/onlytags.md"
+printf -- '---\ntype: note\n---\nbody\n' > "$DV/onlytype.md"
+DCFG="$TMP/defaultreq.local.md"
+cat > "$DCFG" <<EOF
+---
+vault_path: $DV
+keeper_host_priority: ml-1
+keeper_interval_secs: 900
+---
+EOF
+OBSIDIAN_LOCAL_MD="$DCFG" VAULTKEEPER_HOST="ml-1" \
+  bash "${ROOT_DIR}/scripts/vaultkeeper-tick.sh" >/dev/null 2>&1
+if grep -q 'onlytags.md' "$DV/Librarian.md"; then
+  fail "onlytags.md was reported as a gap when required keys defaulted to tags"
+fi
+if ! grep -q 'onlytype.md' "$DV/Librarian.md"; then
+  fail "onlytype.md was not reported as a gap when required keys defaulted to tags"
+fi
+
+echo "PASS: vaultkeeper-tick"
+ "$FDV2/Librarian.md" \
+    || fail "a complete historical scan left an incomplete marker in the digest"
+  [ -f "$(keeper_last_scan_file "$FDV2")" ] \
+    || fail "the complete historical scan did not record last_scan"
+  keeper_has_snapshot "$FDV2" \
+    || fail "the complete historical scan did not write its candidate snapshot"
+  grep -q '^## Promotable clusters (240)
+# --- a failed quarantine move is a fault too (#53) ---------------------------
+# `CONFLICTS="$(keeper_quarantine_conflicts … || true)"` ran above the buffer, so a
+# failed `mv` printed `failed to quarantine …` straight past the gate and `|| true`
+# threw away the status: the QUARANTINE list came back short and the tick recorded
+# the scan as complete. Same invariant as the scanners, one function over.
+if [ "$(id -u)" = "0" ]; then
+  echo "note: running as root, skipping the failed-quarantine arm" >&2
+else
+  QV="$TMP/quarantinevault"; mkdir -p "$QV/Inbox"
+  printf -- '---\ntags: [x]\n---\nbody\n' > "$QV/n.md"
+  # A real Syncthing conflict name, so the quarantine matcher fires on it.
+  printf 'conflicted\n' > "$QV/Pending.sync-conflict-20260730-120000-ABCDEFG.md"
+  # Pre-create the destination read-only: mkdir -p succeeds, the mv into it does not.
+  mkdir -p "$QV/.vaultkeeper-quarantine"
+  chmod 555 "$QV/.vaultkeeper-quarantine"
+  QCFG="$TMP/quarantine.local.md"; sed "s|^vault_path: .*|vault_path: $QV|" "$CFG" > "$QCFG"
+  QOUT="$TMP/quarantine.out"
+  OBSIDIAN_LOCAL_MD="$QCFG" VAULTKEEPER_HOST="ml-1" \
+    bash "${ROOT_DIR}/scripts/vaultkeeper-tick.sh" >"$QOUT" 2>&1 \
+    || { chmod 755 "$QV/.vaultkeeper-quarantine"; fail "a failed quarantine must not abort the tick; got: $(cat "$QOUT")"; }
+  chmod 755 "$QV/.vaultkeeper-quarantine"
+  grep -q 'scan INCOMPLETE' "$QOUT" \
+    || fail "a failed quarantine move was recorded as a complete scan; got: $(cat "$QOUT")"
+  grep -q 'quarantine' "$QOUT" \
+    || fail "the quarantine failure's own words never reached the report; got: $(cat "$QOUT")"
+  [ -f "$(keeper_last_scan_file "$QV")" ] \
+    && fail "a tick whose quarantine failed still recorded last_scan"
+
+  # And a SUCCESSFUL quarantine must run before the scanners, not merely inside the
+  # same capture: run after them, the conflict file is still in place when they walk
+  # the vault, so a file that was correctly quarantined also gets reported as a
+  # frontmatter gap that no longer exists.
+  QV2="$TMP/quarantineok"; mkdir -p "$QV2/Inbox"
+  printf -- '---\ntags: [x]\ntype: a\n---\nbody\n' > "$QV2/n.md"
+  printf 'conflicted\n' > "$QV2/Pending.sync-conflict-20260730-120000-HIJKLMN.md"
+  Q2CFG="$TMP/quarantineok.local.md"; sed "s|^vault_path: .*|vault_path: $QV2|" "$CFG" > "$Q2CFG"
+  Q2OUT="$TMP/quarantineok.out"
+  OBSIDIAN_LOCAL_MD="$Q2CFG" VAULTKEEPER_HOST="ml-1" \
+    bash "${ROOT_DIR}/scripts/vaultkeeper-tick.sh" >"$Q2OUT" 2>&1 \
+    || fail "a successful quarantine aborted the tick; got: $(cat "$Q2OUT")"
+  grep -q 'scan complete' "$Q2OUT" \
+    || fail "a successful quarantine was reported as a fault; got: $(cat "$Q2OUT")"
+  grep -q '^- Pending.sync-conflict-20260730-120000-HIJKLMN.md$' "$QV2/Librarian.md" \
+    || fail "the quarantined conflict was not listed in the digest: $(cat "$QV2/Librarian.md")"
+  grep -qE '^- Pending\.sync-conflict-20260730-120000-HIJKLMN\.md\s' "$QV2/Librarian.md" \
+    && fail "the quarantined file was ALSO scanned as a gap, so quarantine ran after the scanners: $(cat "$QV2/Librarian.md")"
+fi
+
+# --- an unreadable directory must not latch the gate (#51) -------------------
+# One `chmod 000` directory made find print `Permission denied`, and the gate — which
+# could only see bytes on stderr — reported INCOMPLETE on every tick from then on and
+# never recorded last_scan. No tick can fix a permission, so there was no recovery:
+# a vault whose every readable note WAS scanned looked permanently broken. Four
+# agents reproduced it across consecutive ticks.
+if [ "$(id -u)" = "0" ]; then
+  echo "note: running as root, skipping the unreadable-directory tick arm" >&2
+else
+  PTV="$TMP/permtickvault"; mkdir -p "$PTV/Inbox" "$PTV/locked"
+  printf -- '---\ntags: [x]\n---\nbody\n' > "$PTV/n.md"
+  printf -- '---\ntags: [x]\n---\nbody\n' > "$PTV/locked/hidden.md"
+  chmod 000 "$PTV/locked"
+  PTCFG="$TMP/permtick.local.md"; sed "s|^vault_path: .*|vault_path: $PTV|" "$CFG" > "$PTCFG"
+  PTOUT="$TMP/permtick.out"
+  # Twice: the latch only showed up as "and it never recovers", so one tick cannot
+  # tell a latch from a first fault.
+  for _r in 1 2; do
+    OBSIDIAN_LOCAL_MD="$PTCFG" VAULTKEEPER_HOST="ml-1" \
+      bash "${ROOT_DIR}/scripts/vaultkeeper-tick.sh" >"$PTOUT" 2>&1 \
+      || { chmod 755 "$PTV/locked"; fail "an unreadable directory aborted the tick; got: $(cat "$PTOUT")"; }
+  done
+  if grep -q 'scan INCOMPLETE' "$PTOUT"; then
+    chmod 755 "$PTV/locked"
+    fail "an unreadable directory still reports INCOMPLETE, so the gate latches with no recovery path; got: $(cat "$PTOUT")"
+  fi
+  grep -q 'scan complete' "$PTOUT" \
+    || { chmod 755 "$PTV/locked"; fail "the scan of every readable note was not reported complete; got: $(cat "$PTOUT")"; }
+  [ -f "$(keeper_last_scan_file "$PTV")" ] \
+    || { chmod 755 "$PTV/locked"; fail "last_scan was withheld, so the staleness banner will nag forever about a healthy vault"; }
+  # Suppressed is not the same as ignored: the condition has to be visible, by count.
+  grep -q 'unreadable' "$PTOUT" \
+    || { chmod 755 "$PTV/locked"; fail "the unreadable path was never mentioned — that is silence, not classification; got: $(cat "$PTOUT")"; }
+  grep -q '^paths_unreadable: 1' "$PTV/Librarian.md" \
+    || { chmod 755 "$PTV/locked"; fail "the digest does not record the unreadable count: $(head -6 "$PTV/Librarian.md")"; }
+  # …and the count must not carry the absolute host path into the synced digest.
+  case "$(cat "$PTV/Librarian.md")" in
+    *"$PTV/locked"*) chmod 755 "$PTV/locked"; fail "the digest leaked the unreadable path itself" ;;
+  esac
+  chmod 755 "$PTV/locked"
+fi
+
+# --- one repeated benign error must not crowd out a serious one (#54) --------
+# `_scan_find_md` backs three scanners, so a single unreadable directory puts the
+# same `find: … Permission denied` line in the buffer three times. The 300-char
+# clamp then spent its whole budget on the repetition and cut off mid-word, so the
+# fault the user actually needed to see never got reported. The buffer is the only
+# description of the fault they get.
+RV="$TMP/repeatvault"; mkdir -p "$RV/Inbox"
+printf -- '---\ntags: [x]\n---\nbody\n' > "$RV/n.md"
+RCFG="$TMP/repeat.local.md"; sed "s|^vault_path: .*|vault_path: $RV|" "$CFG" > "$RCFG"
+RLIB="$TMP/repeatlib"; mkdir -p "$RLIB"; cp "${ROOT_DIR}"/scripts/lib/*.sh "$RLIB/"
+cat >> "$RLIB/vault-scan.sh" <<'EOF'
+scan_open_asks() {
+  local i
+  # Identical every time, exactly as one chmod 000 directory reaches the buffer
+  # through three callers — only more of them, so the clamp is unambiguous.
+  for i in $(seq 1 40); do
+    printf 'find: /vault/some/deep/unreadable/directory/path: Permission denied\n' >&2
+  done
+  printf 'find: CRITICAL-LATE-FAULT too many open files\n' >&2
+  return 0
+}
+EOF
+RS="$TMP/repeatscripts"; mkdir -p "$RS"; cp "${ROOT_DIR}"/scripts/*.sh "$RS/" 2>/dev/null || true
+cp -R "$RLIB" "$RS/lib"
+ROUT="$TMP/repeat.out"
+OBSIDIAN_LOCAL_MD="$RCFG" VAULTKEEPER_HOST="ml-1" \
+  bash "$RS/vaultkeeper-tick.sh" >"$ROUT" 2>&1 \
+  || fail "a repeated scanner fault must not abort the tick; got: $(cat "$ROUT")"
+grep -q 'scan INCOMPLETE' "$ROUT" \
+  || fail "the repeated-fault tick was not named incomplete; got: $(cat "$ROUT")"
+grep -q 'CRITICAL-LATE-FAULT' "$ROUT" \
+  || fail "the serious fault was truncated away by 40 copies of a benign one; got: $(cat "$ROUT")"
+# The tick reports the buffer twice (once raw, once in the INCOMPLETE line), so a
+# deduplicated buffer shows the repeated message twice in total. Without the dedup
+# the clamp packs several copies into each of those lines.
+_reps="$(grep -o 'Permission denied' "$ROUT" | wc -l | tr -d ' ')"
+[ "$_reps" -le 2 ] \
+  || fail "the repeated message appears $_reps times, so it is still eating the 300-char budget"
+
+# --- a gate that cannot arm must not wave the tick through (#42, panel) ---
+# `SCAN_ERR="$(mktemp …)" || SCAN_ERR=""` failed open: with no buffer the fault
+# check could never fire, so the tick recorded a partial scan as complete — the
+# exact behavior this gate exists to remove. And mktemp is among the first things
+# to fail under the fd/disk exhaustion the gate is watching for, so the guard went
+# missing precisely when it was needed.
+MV="$TMP/mktempvault"; mkdir -p "$MV/Inbox"
+printf -- '---\ntags: [x]\n---\nbody\n' > "$MV/n.md"
+MCFG="$TMP/mktemp.local.md"; sed "s|^vault_path: .*|vault_path: $MV|" "$CFG" > "$MCFG"
+mkdir -p "$TMP/mbin"
+cat > "$TMP/mbin/mktemp" <<'EOF'
+#!/usr/bin/env bash
+case "$*" in *kbscan*) exit 1 ;; esac
+exec /usr/bin/mktemp "$@"
+EOF
+chmod +x "$TMP/mbin/mktemp"
+MOUT="$TMP/mktemp.out"
+PATH="$TMP/mbin:$PATH" OBSIDIAN_LOCAL_MD="$MCFG" VAULTKEEPER_HOST="ml-1" \
+  bash "${ROOT_DIR}/scripts/vaultkeeper-tick.sh" >"$MOUT" 2>&1 \
+  || fail "a failed mktemp must not abort the tick; got: $(cat "$MOUT")"
+grep -q 'scan INCOMPLETE' "$MOUT" \
+  || fail "gate could not arm and the tick did not say so; got: $(cat "$MOUT")"
+grep -q 'scan complete' "$MOUT" \
+  && fail "a tick with no fault buffer reported itself complete: $(cat "$MOUT")"
+[ -f "$(keeper_last_scan_file "$MV")" ] \
+  && fail "a tick with no fault buffer recorded last_scan"
+
+# --- an unwritable cache dir degrades the tick, it does not abort it ---
+# keeper_record_attempt is the first write after the ownership gate, so calling it
+# unchecked under `set -e` would kill the run there — above the scan, the base view AND
+# the digest — and a host with a full or unwritable cache dir would lose the
+# Librarian.md it can still produce. ENOSPC is the same correlated failure class as the
+# mktemp case above, so it takes the same route: fold into SCAN_FAULT, say so, keep the
+# digest, withhold last_scan.
+UV="$TMP/unwritablevault"; mkdir -p "$UV/Inbox"
+printf -- '---\ntags: [x]\n---\nbody\n' > "$UV/n.md"
+UCFG="$TMP/unwritable.local.md"; sed "s|^vault_path: .*|vault_path: $UV|" "$CFG" > "$UCFG"
+UCACHE="$(keeper_cache_dir "$UV")"; mkdir -p "$UCACHE"; chmod 555 "$UCACHE"
+UOUT="$TMP/unwritable.out"
+set +e
+OBSIDIAN_LOCAL_MD="$UCFG" VAULTKEEPER_HOST="ml-1" \
+  bash "${ROOT_DIR}/scripts/vaultkeeper-tick.sh" >"$UOUT" 2>&1
+URC=$?
+set -e
+chmod 755 "$UCACHE"
+[ "$URC" -eq 0 ] || fail "an unwritable cache dir aborted the tick (rc=$URC); got: $(cat "$UOUT")"
+[ -f "$UV/Librarian.md" ] \
+  || fail "the digest was lost when the cache dir was unwritable; got: $(cat "$UOUT")"
+grep -q 'scan INCOMPLETE' "$UOUT" \
+  || fail "an unaccountable scan did not name itself incomplete; got: $(cat "$UOUT")"
+grep -q 'scan complete' "$UOUT" \
+  && fail "a scan it could not account for reported itself complete: $(cat "$UOUT")"
+
+# --- frontmatter_required defaults to tags when absent (#143) ---
+DV="$TMP/defaultreqvault"; mkdir -p "$DV/Inbox"
+printf -- '---\ntags: [x]\n---\nbody\n' > "$DV/onlytags.md"
+printf -- '---\ntype: note\n---\nbody\n' > "$DV/onlytype.md"
+DCFG="$TMP/defaultreq.local.md"
+cat > "$DCFG" <<EOF
+---
+vault_path: $DV
+keeper_host_priority: ml-1
+keeper_interval_secs: 900
+---
+EOF
+OBSIDIAN_LOCAL_MD="$DCFG" VAULTKEEPER_HOST="ml-1" \
+  bash "${ROOT_DIR}/scripts/vaultkeeper-tick.sh" >/dev/null 2>&1
+if grep -q 'onlytags.md' "$DV/Librarian.md"; then
+  fail "onlytags.md was reported as a gap when required keys defaulted to tags"
+fi
+if ! grep -q 'onlytype.md' "$DV/Librarian.md"; then
+  fail "onlytype.md was not reported as a gap when required keys defaulted to tags"
+fi
+
+echo "PASS: vaultkeeper-tick"
+ "$FDV2/Librarian.md" \
+    || fail "the complete historical digest did not report all 240 clusters: $(grep '^## Promotable clusters' "$FDV2/Librarian.md" || true)"
+  EXPECTED_CLUSTERS="$TMP/expected-clusters.tsv"
+  ACTUAL_CLUSTERS="$TMP/actual-clusters.tsv"
+  for _i in $(seq 1 120); do
+    printf 'CLUSTER\tFolder %s\tnote\t3\n' "$_i"
+    printf 'CLUSTER\tFolder %s\ttopic%s\t3\n' "$_i" "$_i"
+  done | LC_ALL=C sort > "$EXPECTED_CLUSTERS"
+  keeper_read_snapshot "$FDV2" | LC_ALL=C sort > "$ACTUAL_CLUSTERS"
+  cmp -s "$EXPECTED_CLUSTERS" "$ACTUAL_CLUSTERS" \
+    || { diff -u "$EXPECTED_CLUSTERS" "$ACTUAL_CLUSTERS" >&2 || true; fail "the complete historical snapshot did not contain exactly the 240 expected clusters"; }
+  printf 'note: Bash %s did not reproduce the pre-#49 fd exhaustion; the historical scan produced all 240 clusters\n' "$_FDBASH_VERSION" >&2
+fi
 
 # --- a failed quarantine move is a fault too (#53) ---------------------------
 # `CONFLICTS="$(keeper_quarantine_conflicts … || true)"` ran above the buffer, so a
