@@ -75,12 +75,18 @@ keeper_scheduler_installed() {
 _kb_cfg_ensure() {
   local key="$1" val="$2" cfg="$3" tmp
   grep -q "^${key}:" "$cfg" && return 0
-  tmp="$(mktemp "${TMPDIR:-/tmp}/kbcfg-XXXXXX")" || return 1
+  # Load only on the write path; installed hosts never need the swap helper.
+  if ! type keeper_swap_or_clean >/dev/null 2>&1; then
+    [ -n "$_kb_lib_dir" ] || return 1
+    . "$_kb_lib_dir/note-hash.sh" || return 1
+  fi
+  # A sibling temp keeps the replacement on the config's filesystem.
+  tmp="$(mktemp "$(dirname "$cfg")/kbcfg-XXXXXX")" || return 1
   awk -v line="${key}: ${val}" '
     NR==1 && $0=="---" { print; print line; inserted=1; next }
     { print }
     END { if (!inserted) print line }
-  ' "$cfg" > "$tmp" && mv "$tmp" "$cfg" || { rm -f "$tmp"; return 1; }
+  ' "$cfg" > "$tmp" && keeper_swap_or_clean "$tmp" "$cfg" || { rm -f "$tmp"; return 1; }
 }
 
 # keeper_ensure_active <config_file> <vault_path> [interval_secs]

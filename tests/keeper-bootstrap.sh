@@ -11,6 +11,27 @@ WORK="$(mktemp -d "${TMPDIR:-/tmp}/kb-XXXXXX")"
 # this teardown should not depend on to avoid stranding a dir in the real TMPDIR.
 trap 'chmod -R u+w "$WORK" 2>/dev/null; rm -rf "$WORK"' EXIT
 
+# Config updates preserve an existing mode, including when the swap helper has
+# not been sourced by the caller (#195). Pin the umask so 0640 cannot pass by
+# accidentally matching a new-file default or mktemp's 0600.
+MCFG="$WORK/mode.local.md"
+printf -- '---\nauto_save: true\n---\n' > "$MCFG"
+chmod 640 "$MCFG"
+(
+  umask 022
+  _kb_cfg_ensure keeper_autostart true "$MCFG" \
+    || fail "_kb_cfg_ensure could not load the swap helper and add keeper_autostart"
+  _kb_cfg_ensure keeper_interval_secs 900 "$MCFG" \
+    || fail "_kb_cfg_ensure could not add keeper_interval_secs"
+)
+grep -q '^keeper_autostart: true$' "$MCFG" || fail "mode test did not update keeper_autostart"
+grep -q '^keeper_interval_secs: 900$' "$MCFG" || fail "mode test did not update keeper_interval_secs"
+[ "$(stat -c %a "$MCFG" 2>/dev/null || stat -f %Lp "$MCFG")" = "640" ] \
+  || fail "config updates did not preserve the existing 0640 mode"
+cp "$MCFG" "$WORK/mode-before.local.md"
+_kb_cfg_ensure keeper_interval_secs 123 "$MCFG" || fail "an existing key made _kb_cfg_ensure fail"
+cmp -s "$MCFG" "$WORK/mode-before.local.md" || fail "an existing config key was changed or duplicated"
+
 # install-watcher.sh exposes the namespace label, and the bootstrap lib reads
 # from it — one source of truth, no drift between the two files.
 LABEL="$(bash "$INSTALLER" label)"
@@ -101,7 +122,7 @@ ERR="$(KEEPER_OS="Darwin" keeper_ensure_active "$CFGF" "$VAULTF" 900 2>&1 >/dev/
 grep -qi 'FAILED' <<<"$ERR" || fail "failed install was silent — no diagnostic emitted: '$ERR'"
 
 # --- a failed config write leaves a trace (#40) ---
-# A read-only parent dir makes _kb_cfg_ensure's `mv` fail the way a full or
+# A read-only parent dir makes _kb_cfg_ensure's sibling staging fail the way a full or
 # permission-denied filesystem does. Staying non-fatal is correct — a Stop hook
 # must not abort — but the config then never gains keeper_interval_secs and the
 # keeper runs at the compiled-in default forever, so it cannot be silent. Note
@@ -112,11 +133,11 @@ RCFG="$ROD/obsidian.local.md"; RVAULT="$WORK/vaultro"
 printf -- '---\nvault_path: %s\n---\n' "$RVAULT" > "$RCFG"
 mk_vault "$RVAULT"
 export VAULTKEEPER_INSTALL="$WORK/stub-install.sh"
-# Root writes straight through a read-only directory, so under root this arm and the
-# one below it would assert on a write that SUCCEEDED and pass without testing
+# Root writes straight through a read-only directory, so under root this arm
+# would assert on a write that SUCCEEDED and pass without testing
 # anything (#47). Skipped loudly rather than left to pass vacuously.
 if [ "$(id -u)" = "0" ]; then
-  echo "note: running as root, skipping the read-only-config arms" >&2
+  echo "note: running as root, skipping the read-only-config arm" >&2
 else
 chmod a-w "$ROD"
 RERR="$(KEEPER_OS="Darwin" keeper_ensure_active "$RCFG" "$RVAULT" 900 2>&1 >/dev/null)" \
@@ -126,39 +147,41 @@ grep -q 'keeper_autostart' <<<"$RERR" \
   || fail "failed keeper_autostart write was silent: [$RERR]"
 grep -q 'keeper_interval_secs' <<<"$RERR" \
   || fail "failed keeper_interval_secs write was silent: [$RERR]"
-
-# --- _kb_cfg_ensure cleans up its temp file when the swap fails (#40) ---
-# awk succeeds, `mv` fails, and the rendered config sits in TMPDIR forever. The
-# Stop hook runs this on every session, so the leak accumulates one file per
-# session for as long as the config stays unwritable. Subshell so the temporary
-# TMPDIR cannot outlive the call.
-LEAK="$WORK/leaktmp"; mkdir -p "$LEAK"
-chmod a-w "$ROD"
-if ( TMPDIR="$LEAK"; _kb_cfg_ensure leak_probe 1 "$RCFG" ); then
-  chmod u+w "$ROD"; fail "_kb_cfg_ensure reported success when mv could not write the config"
-fi
-chmod u+w "$ROD"
-LEFT="$(find "$LEAK" -name 'kbcfg-*' -type f | wc -l | tr -d ' ')"
-[ "$LEFT" = "0" ] || fail "_kb_cfg_ensure leaked $LEFT temp file(s) into $LEAK"
 fi
 
-# --- _kb_cfg_ensure when mktemp itself cannot resolve TMPDIR (#47) ---
-# The other half of the same failure, and the genuinely silent one: with an
-# unresolvable TMPDIR there is no temp to leak and no `mv` to fail, so the write
-# simply does not happen. Root-safe — no permission bit is involved — which is why
-# this arm carries the invariant on hosts where the two above are skipped.
+# --- a failed swap discards the same-directory temp (#40, #195) ---
+# Stub mv rather than making the directory unwritable: sibling staging must
+# succeed first, and this arm must also prove cleanup when run as root.
+SWAPLOG="$WORK/failed-swap.log"
+cp "$RCFG" "$WORK/failed-swap-before.local.md"
+if (
+  mv() { printf '%s\n' "$1" "$2" > "$SWAPLOG"; return 1; }
+  _kb_cfg_ensure leak_probe 1 "$RCFG"
+); then
+  fail "_kb_cfg_ensure reported success when mv failed"
+fi
+[ -s "$SWAPLOG" ] || fail "the failed-swap arm never reached mv"
+STAGED="$(sed -n '1p' "$SWAPLOG")"
+TARGET="$(sed -n '2p' "$SWAPLOG")"
+[ "$(dirname "$STAGED")" = "$ROD" ] || fail "config temp was not staged beside the config: $STAGED"
+[ "$TARGET" = "$RCFG" ] || fail "config swap targeted the wrong path: $TARGET"
+[ ! -e "$STAGED" ] || fail "_kb_cfg_ensure leaked its staged temp: $STAGED"
+cmp -s "$RCFG" "$WORK/failed-swap-before.local.md" || fail "a failed swap changed the config"
+
+# --- config updates do not depend on TMPDIR (#195) ---
+# A seeded schema keeps this about _kb_cfg_ensure: schema seeding has its own
+# TMPDIR staging, which is outside this regression.
 UCFG="$WORK/unresolvable.local.md"; UVAULT="$WORK/vaultunres"
-printf -- '---\nvault_path: %s\n---\n' "$UVAULT" > "$UCFG"
+printf -- '---\nvault_path: %s\nfrontmatter_required: tags type\n---\n' "$UVAULT" > "$UCFG"
 mk_vault "$UVAULT"
-if ( TMPDIR="$WORK/no/such/dir"; _kb_cfg_ensure unres_probe 1 "$UCFG" ); then
-  fail "_kb_cfg_ensure reported success when mktemp could not resolve TMPDIR"
-fi
-grep -q 'unres_probe' "$UCFG" \
-  && fail "_kb_cfg_ensure claims to have failed but the key is in the config: $(cat "$UCFG")"
+( TMPDIR="$WORK/no/such/dir"; _kb_cfg_ensure unres_probe 1 "$UCFG" ) \
+  || fail "_kb_cfg_ensure still depends on a usable TMPDIR"
+grep -q '^unres_probe: 1$' "$UCFG" || fail "config was not updated with an invalid TMPDIR"
 UERR="$( TMPDIR="$WORK/no/such/dir" KEEPER_OS="Darwin" keeper_ensure_active "$UCFG" "$UVAULT" 900 2>&1 >/dev/null )" \
-  || fail "ensure_active must stay non-zero-free when mktemp fails; a Stop hook cannot abort"
-grep -q 'keeper_interval_secs' <<<"$UERR" \
-  || fail "an unwritable-because-no-TMPDIR config write was silent: [$UERR]"
+  || fail "ensure_active returned non-zero with an invalid TMPDIR"
+grep -q '^keeper_autostart: true$' "$UCFG" || fail "invalid TMPDIR prevented the autostart default"
+grep -q '^keeper_interval_secs: 900$' "$UCFG" || fail "invalid TMPDIR prevented the interval default"
+grep -q 'could not write' <<<"$UERR" && fail "successful config writes were reported as failed: [$UERR]"
 
 # --- opt-out: keeper_autostart: false skips install entirely ---
 CFG2="$WORK/optout.local.md"; VAULT2="$WORK/vault2"
@@ -358,6 +381,15 @@ for sh in bash zsh; do
   command -v "$sh" >/dev/null 2>&1 || continue
   GOT="$("$sh" -c "cd / && . '${ROOT_DIR}/scripts/lib/keeper-bootstrap.sh'; _kb_scripts" 2>/dev/null)"
   [ "$GOT" = "$EXPECT" ] || fail "$sh + foreign cwd: _kb_scripts gave [$GOT], want [$EXPECT]"
+  # The lazy helper load must use that captured lib dir too, even when the
+  # config's parent path has spaces and the caller starts outside the plugin.
+  SHCFG="$WORK/$sh config.local.md"
+  printf -- '---\nauto_save: true\n---\n' > "$SHCFG"; chmod 640 "$SHCFG"
+  "$sh" -c "cd / && . '${ROOT_DIR}/scripts/lib/keeper-bootstrap.sh'; _kb_cfg_ensure shell_probe '$sh' '$SHCFG'" \
+    || fail "$sh + foreign cwd: _kb_cfg_ensure could not load the swap helper"
+  grep -q "^shell_probe: $sh\$" "$SHCFG" || fail "$sh + foreign cwd: config was not updated"
+  [ "$(stat -c %a "$SHCFG" 2>/dev/null || stat -f %Lp "$SHCFG")" = "640" ] \
+    || fail "$sh + foreign cwd: config update did not preserve 0640"
 done
 
 # A lib that cannot find its siblings must say so, not print an empty path and
@@ -382,7 +414,7 @@ grep -q 'install-watcher.sh broken' <<<"$OERR" \
 # the only thing separating a syntax error from a missing dependency, and
 # `2>/dev/null` threw it away, leaving the refusal to guess "broken?".
 BRK="$WORK/broken/scripts"; mkdir -p "$BRK/lib"
-cp "${ROOT_DIR}/scripts/lib/keeper-bootstrap.sh" "$BRK/lib/"
+cp "${ROOT_DIR}/scripts/lib/keeper-bootstrap.sh" "${ROOT_DIR}/scripts/lib/note-hash.sh" "$BRK/lib/"
 cat > "$BRK/install-watcher.sh" <<'EOF'
 #!/usr/bin/env bash
 echo "BOOM-INSTALLER-DIAGNOSTIC" >&2
@@ -414,7 +446,7 @@ grep -qF "$BRKREAL/install-watcher.sh" <<<"$BERR" \
 # subject (a diagnostic the shell throws away) reintroduced by its bound.
 # 300 KB, and control bytes that must not reach the hook's stderr live.
 LOUD="$WORK/loud/scripts"; mkdir -p "$LOUD/lib"
-cp "${ROOT_DIR}/scripts/lib/keeper-bootstrap.sh" "$LOUD/lib/"
+cp "${ROOT_DIR}/scripts/lib/keeper-bootstrap.sh" "${ROOT_DIR}/scripts/lib/note-hash.sh" "$LOUD/lib/"
 cat > "$LOUD/install-watcher.sh" <<'EOF'
 #!/usr/bin/env bash
 { printf 'LOUD-HEAD\033[31m\r\a'; head -c 300000 /dev/zero | tr '\0' 'X'; printf 'LOUD-TAIL\n'; } >&2
@@ -439,7 +471,7 @@ done
 # host's Stop hook, alongside a mktemp/rm pair capturing stderr from an installer
 # that had nothing to say. This is the dominant path: every session, forever.
 CNT="$WORK/counted/scripts"; mkdir -p "$CNT/lib"
-cp "${ROOT_DIR}/scripts/lib/keeper-bootstrap.sh" "$CNT/lib/"
+cp "${ROOT_DIR}/scripts/lib/keeper-bootstrap.sh" "${ROOT_DIR}/scripts/lib/note-hash.sh" "$CNT/lib/"
 SPAWNS="$WORK/label-spawns.log"; : > "$SPAWNS"
 cat > "$CNT/install-watcher.sh" <<EOF
 #!/usr/bin/env bash
