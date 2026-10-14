@@ -89,6 +89,8 @@ PM="$TMP/pm"; mkdir -p "$PM"
   [ "$(stat -c %a "$PM/live.md" 2>/dev/null || stat -L -f %Lp "$PM/live.md")" = "640" ] || fail "target did not preserve 640 mode"
 )
 
+# A symlinked target (file, dangling, directory) is refused before any mode read or mv; the
+# link and its referent are left untouched and the staged temp is discarded (#194).
 for LIB in "$ROOT_DIR/scripts/lib/note-hash.sh" "$ROOT_DIR/packages/codex/skills/commit-capture/scripts/lib/note-hash.sh"; do
   (
     # shellcheck source=scripts/lib/note-hash.sh
