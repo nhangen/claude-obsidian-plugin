@@ -249,6 +249,9 @@ keeper_fault() {
 #
 # mv's own stderr is left alone: it names the reason (permissions, full disk, cross
 # device), and this adds which file was being replaced rather than replacing that.
+#
+# A symlinked target is refused rather than replaced or followed (#194): the swap would
+# otherwise either clobber the link or write through it to a file the caller never named.
 keeper_swap_or_clean() {
   local tmp="$1" target="$2" mode u
 
