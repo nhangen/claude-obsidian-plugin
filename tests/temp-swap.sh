@@ -89,12 +89,31 @@ PM="$TMP/pm"; mkdir -p "$PM"
   [ "$(stat -c %a "$PM/live.md" 2>/dev/null || stat -L -f %Lp "$PM/live.md")" = "640" ] || fail "target did not preserve 640 mode"
 )
 
-# A symlinked target takes its referent's mode, not the link's own (0777 under GNU stat
-# on Linux, 0755 under BSD stat), which would leave the note world-writable.
-printf 'real\n' > "$PM/real.md"; chmod 640 "$PM/real.md"; ln -s real.md "$PM/link.md"
-PT6="$(mktemp "$PM/.t-XXXXXX")"
-keeper_swap_or_clean "$PT6" "$PM/link.md" || fail "keeper_swap_or_clean failed on a symlinked target"
-[ "$(stat -L -c %a "$PM/link.md" 2>/dev/null || stat -L -f %Lp "$PM/link.md")" = "640" ] || fail "symlinked target took the link's mode, not its referent's 640"
+for LIB in "$ROOT_DIR/scripts/lib/note-hash.sh" "$ROOT_DIR/packages/codex/skills/commit-capture/scripts/lib/note-hash.sh"; do
+  (
+    # shellcheck source=scripts/lib/note-hash.sh
+    . "$LIB"
+    printf 'real\n' > "$PM/real.md"; chmod 640 "$PM/real.md"
+    mkdir -p "$PM/real-dir"
+    for REFERENT in real.md missing.md real-dir; do
+      ln -s "$REFERENT" "$PM/link.md"
+      PT6="$(mktemp "$PM/.t-XXXXXX")"
+      printf 'replacement\n' > "$PT6"
+      if LINK_ERR="$(keeper_swap_or_clean "$PT6" "$PM/link.md" 2>&1)"; then
+        fail "swap accepted symlink to $REFERENT ($LIB)"
+      fi
+      grep -qF "target is a symlink" <<<"$LINK_ERR" || fail "symlink rejection was silent: $LINK_ERR"
+      [ -L "$PM/link.md" ] || fail "swap replaced the symlink"
+      [ "$(readlink "$PM/link.md")" = "$REFERENT" ] || fail "swap changed the link destination"
+      [ ! -e "$PT6" ] || fail "staged temp was not discarded on symlink rejection"
+      [ "$(cat "$PM/real.md")" = real ] || fail "swap changed the referent content"
+      [ "$(stat -c %a "$PM/real.md" 2>/dev/null || stat -f %Lp "$PM/real.md")" = 640 ] || fail "swap changed the referent mode"
+      [ ! -e "$PM/missing.md" ] || fail "swap created a dangling referent"
+      [ -z "$(find "$PM/real-dir" -mindepth 1 -print -quit)" ] || fail "swap leaked a temp into the referent directory"
+      rm "$PM/link.md"
+    done
+  )
+done
 
 # Absent target takes 0666 & ~umask, not mktemp's 0600. Pinned so a host umask of 077,
 # where the default equals 0600, cannot make this pass with the fix reverted.

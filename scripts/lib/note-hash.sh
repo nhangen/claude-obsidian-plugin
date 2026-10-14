@@ -252,6 +252,12 @@ keeper_fault() {
 keeper_swap_or_clean() {
   local tmp="$1" target="$2" mode u
 
+  if [ -L "$target" ]; then
+    rm -f "$tmp" 2>/dev/null || true
+    printf 'keeper: could not replace %s; target is a symlink\n' "$target" >&2
+    return 1
+  fi
+
   if [ -d "$target" ]; then
     rm -f "$tmp" 2>/dev/null || true
     printf 'keeper: could not replace %s; target is a directory\n' "$target" >&2
