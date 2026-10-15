@@ -91,19 +91,47 @@ The plugin includes a two-layer background maintenance system that keeps the vau
 
 `Librarian.md` is written exclusively by the keeper tick. Manual edits do not persist — the next tick overwrites it atomically. Read it as a live dashboard; don't edit it.
 
-### Activation (automatic)
+### Activation choices
 
-The keeper activates itself. The first time the session-end hook (`session-save.sh`) runs on a host where the keeper isn't scheduled yet, it seeds the frontmatter schema, writes default keeper config, and installs the namespaced scheduler — no command to run. Once installed it's a cheap no-op on every later session end.
+New setup asks once for independent `auto_save` and `keeper_autostart` choices
+and persists both; each defaults to `false`. With both enabled, the session-end
+hook can seed the schema and bootstrap the selected maintenance scheduler. With
+autosave enabled and the scheduler disabled, only session capture runs. With
+both disabled, session capture is manual and setup installs no scheduler.
 
-Because Syncthing carries the vault but not a launchd plist / crontab line, each host self-activates the first time you work on it. Opt out with `keeper_autostart: false` in `obsidian.local.md`.
+When the scheduler is selected but autosave is disabled, the hook exits before
+bootstrap: install explicitly after persisting the config. Run the following
+only on a host with the local vault or server-side vault mount. MCP-only clients
+skip local vault/watcher setup and use the thin-client connection instructions
+in [the MCP server guide](packages/mcp-server/README.md).
 
-To install manually (or on a host you never run a session on), the engine is still directly invokable:
+For a selected scheduler, from the installed plugin environment:
 
 ```bash
-bash scripts/install-watcher.sh install "$(pwd)/scripts/vaultkeeper-tick.sh"
+set -euo pipefail
+: "${CLAUDE_PLUGIN_ROOT:?plugin root required}"
+. "${CLAUDE_PLUGIN_ROOT}/scripts/lib/resolve-config.sh"
+CONFIG="$(resolve_obsidian_config "$CLAUDE_PLUGIN_ROOT")" || exit 1
+VAULT="$(OBSIDIAN_LOCAL_MD="$CONFIG" obsidian_config_value vault_path)" || exit 1
+[ -n "$VAULT" ] && [ -d "$VAULT" ] || exit 1
+SELECTED="$(OBSIDIAN_LOCAL_MD="$CONFIG" obsidian_config_value keeper_autostart)" || exit 1
+[ "$SELECTED" = true ] || exit 1
+case "$(uname -s)" in
+  Darwin)
+    : "${HOME:?HOME required for launchd installation}"
+    mkdir -p "$HOME/Library/LaunchAgents"
+    ;;
+esac
+bash "${CLAUDE_PLUGIN_ROOT}/scripts/install-watcher.sh" install \
+  "${CLAUDE_PLUGIN_ROOT}/scripts/vaultkeeper-tick.sh" 900
 ```
 
 Either way the keeper registers under the `com.nhangen.obsidian-vaultkeeper` namespace — visible in `crontab -l` (Linux) or `launchctl list | grep obsidian-vaultkeeper` (macOS) for audits.
+
+For multiple vault hosts, configure `keeper_host_priority` with the same ordered
+list of their actual host identifiers in every host's config before activation.
+Existing missing-key runtime behavior remains unchanged; these new setup choices
+do not migrate live configs or disable an installed scheduler.
 
 ### Quarantine resolution and frontmatter backfill
 
@@ -171,7 +199,7 @@ With only the PostToolUse half wired up there is no "before". The hook says so, 
 After a `git commit`:
 
 ```
-Captured a1b2c3d → Awesome Motive/sessions/2026-05-12-optin-monster-app.md
+Captured a1b2c3d → Projects/Development/sessions/2026-05-12-example-project.md
 ```
 
 ## Install
@@ -181,7 +209,10 @@ claude plugin install nhangen/obsidian
 /obsidian:setup
 ```
 
-The setup wizard prompts for vault path, domain names, keywords per domain, and daily/inbox paths, then writes `obsidian.local.md` to the stable config location (see below).
+The local setup wizard prompts for vault path, domains, keywords, daily/inbox
+paths, and independent autosave/scheduler choices, then writes
+`obsidian.local.md` to the stable config location (see below). MCP-only clients
+use [the MCP server guide](packages/mcp-server/README.md) instead.
 
 For Codex commit capture:
 
@@ -213,7 +244,8 @@ Key frontmatter fields:
 vault_path: /absolute/path/to/your/vault
 vault_name: Obsidian          # must match the vault name in the Obsidian app
 daily_path: Daily/            # relative to vault root
-auto_save: true               # disable session autosave
+auto_save: false              # opt in to automatic session capture
+keeper_autostart: false       # independent opt-in to scheduler bootstrap
 auto_open: false              # open note in GUI after writing (opt-in)
 strict_domains: true          # refuse to create folders outside the taxonomy
 moc_promotion: true           # promote recurring topics to Maps of Content
@@ -227,7 +259,7 @@ The body of `obsidian.local.md` defines two things the skills read directly:
 - **`## Project Taxonomy`** — table mapping each domain to a vault path. This is the canonical allow-list; with `strict_domains: true`, saves to any other top-level folder are refused.
 - **`## Routing Rules`** — plain-English keyword lists that decide which domain a session or note belongs to. Ambiguous content falls back to `Inbox/` with a `#needs-filing` tag.
 - **Session intent inference** — capture now records `session_intent`, `capture_action`, confidence scores, and evidence bullets. Folder routing still uses the taxonomy; intent decides whether the session is execution, research, planning, reflection, operations, or scratch, and whether it warrants no capture, daily-only capture, a project note, a research-substrate update, or a decision record.
-- **Research substrate contract** — capture also records `research_state_change` and `substrate_object`. Agents should use this to create or update one small object under `Projects/Physics-AI-ML/Research-Substrate/` whenever a session creates, weakens, supports, or tests a research claim.
+- **Research substrate contract** — capture records `research_state_change` and `substrate_object`. Resolve research objects only from the configured taxonomy/routing rules and validate the destination. Without a research destination, retain the findings and actual state change in the ordinary project or configured daily note, leave `substrate_object` empty, and use `project_note` or `daily_only` instead of `substrate_update`. Missing research routing never invents a folder or blocks ordinary capture.
 
 Per-repo commit-capture overrides go in the same file under a `## Commit Capture Overrides` section.
 

@@ -2,7 +2,7 @@
 vault_path: /Users/yourname/Documents/Obsidian
 vault_name: Obsidian
 daily_path: Daily/
-auto_save: true
+auto_save: false
 auto_open: false
 time_gap_minutes: 30
 smart_detect: true
@@ -12,9 +12,8 @@ moc_promotion: true
 moc_promotion_threshold: 3
 moc_promotion_fix_links: true
 frontmatter_required: tags
-keeper_host_priority: ml-1 mbp
 keeper_interval_secs: 900
-keeper_autostart: true
+keeper_autostart: false
 intent_high_score: 0.70
 intent_margin: 0.15
 capture_high_score: 0.70
@@ -63,28 +62,37 @@ When `strict_domains: true` (default), the save/create skills:
 2. Before writing, verify the resolved target's top-level folder is in the allow-list. Dated subfolders and per-repo namespacing *under* an allow-listed root are fine.
 3. On miss: refuse to write, surface the closest matching allow-listed folder, and tell the user to either correct the topic hint or add the folder to `## Project Taxonomy` via `/obsidian:setup`.
 
-This prevents silent alias folders (`AM/` alongside `Awesome Motive/`, `Obsidian Daily/` alongside `Daily/`). Failure-mode reference: the `enum-config-typo-fallback` pattern — string fields selecting a code path must reject unknown values, not coerce to a default.
+This prevents silent alias folders (`Dev/` alongside `Projects/Development/`, `Journal/` alongside `Daily/`). Failure-mode reference: the `enum-config-typo-fallback` pattern — string fields selecting a code path must reject unknown values, not coerce to a default.
 
 To opt out (not recommended), set `strict_domains: false`.
 
 ## vaultkeeper (the watcher)
 
 A deterministic substrate tick (no LLM) runs on cron (Linux) / launchd (macOS),
-namespaced `com.nhangen.obsidian-vaultkeeper`, on every host that writes the
-vault. It validates frontmatter against `frontmatter_required`, surfaces gaps /
+namespaced `com.nhangen.obsidian-vaultkeeper`, on selected hosts with the local
+vault or server-side vault mount. MCP-only clients do not install a local
+watcher. It validates frontmatter against `frontmatter_required`, surfaces gaps /
 unfiled notes / open `[ask]`s / promotable clusters into the machine-owned
 `Librarian.md`, appends only genuinely-new items to `Pending.md`, and maintains
 `_vaultkeeper.base` (a write-only GUI view — never read to answer queries).
 
-- `keeper_autostart` — when not `false`, the session-end hook self-installs the
-  keeper scheduler on this host the first time it runs (seeds the schema, writes
-  these defaults, installs the namespaced launchd/cron job). Set `false` to keep
-  activation fully manual.
+- `auto_save` and `keeper_autostart` are independent choices; this new-config
+  example defaults both to `false`. Setup asks once and persists both answers.
+  `auto_save: true` enables automatic session capture; `keeper_autostart: true`
+  permits the session-end hook to bootstrap the maintenance scheduler only when
+  autosave also runs. With autosave off and the scheduler selected, install it
+  explicitly after saving the stable config, following `skills/setup/SKILL.md`
+  Step 8 or README's activation command. Do not wait for the autosave hook.
+  Existing missing-key runtime behavior is unchanged. Setting these fields does
+  not uninstall an already installed scheduler.
 - `frontmatter_required` — keys every note should carry. Seeded automatically on
   first activation (or manually via `scripts/seed-frontmatter-schema.sh`). The
   tick only *surfaces* gaps; it never auto-writes frontmatter.
 - `keeper_host_priority` — host election order over Syncthing (highest-priority
-  live host owns shared writes; others defer). `.sync-conflict-*` files on
+  live host owns shared writes; others defer). For multiple vault hosts, add the
+  same ordered, space-separated list of their actual host identifiers to every
+  host's config before activation. No machine names are supplied by this example.
+  `.sync-conflict-*` files on
   keeper-owned files are quarantined under `.vaultkeeper-quarantine/`, never
   deleted.
 - `keeper_interval_secs` — tick cadence; the `/obsidian:ask` staleness banner
@@ -103,8 +111,14 @@ Session capture infers both what happened and what durable action is warranted:
 - `session_intent`: `execution`, `research`, `planning`, `reflection`, `operations`, or `scratch`
 - `capture_action`: `none`, `daily_only`, `project_note`, `substrate_update`, or `decision_record`
 - `research_state_change`: `none`, `supports_claim`, `weakens_claim`, `new_claim`, `new_experiment`, or `new_evidence`
-- `substrate_object`: an Obsidian wikilink to the Research Substrate object to create/update, or `""` when no research state changed
+- `substrate_object`: an Obsidian wikilink to the configured research object to create/update, or `""` when no research state changed or no research destination is configured
 
 The confidence thresholds above tune when the inference is treated as high confidence. Manual save paths should ask only when ambiguity changes the durable action. Non-interactive autosave records `capture_needs_confirmation: true` when a safer fallback was chosen.
 
-For research-adjacent sessions, agents should ask whether the session created, weakened, supported, or tested a research claim. When it did, create or update one small object under `Projects/Physics-AI-ML/Research-Substrate/` and link it from the session note.
+For research-adjacent sessions, determine whether the session created, weakened,
+supported, or tested a research claim. Resolve a research destination only from
+the taxonomy and routing rules, and validate it with `allowlist_validate`. If no
+research destination is configured, retain the findings and actual
+`research_state_change` in the ordinary routed project or daily note, set
+`substrate_object: ""`, and use `project_note` or `daily_only` instead of
+`substrate_update`. Do not invent a research folder or block ordinary capture.

@@ -255,6 +255,9 @@ test("stdio server preserves the session summary provider contract via prompts/g
   assert.equal(promptGet.result.messages.length, 1);
   const text = promptGet.result.messages[0].content.text;
   for (const expected of promptFixtures.summarizeSession.requiredText) assert.match(text, new RegExp(expected.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i"));
+  assert.doesNotMatch(text, /Projects\/Physics-AI-ML\/Research-Substrate/);
+  assert.match(text, /substrate_object under a research destination defined by the configured taxonomy and routing rules/);
+  assert.match(text, /no research destination is configured[\s\S]*project_note or daily_only[\s\S]*leave substrate_object empty/);
   assert.match(text, /<transcript>[\s\S]*<\/transcript>$/);
 });
 

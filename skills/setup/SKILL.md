@@ -16,6 +16,14 @@ Interactive first-run wizard. Writes `obsidian.local.md` from user answers so ro
 
 ## Steps
 
+### 0. Choose the Host Role
+
+If this is an MCP-only client using a vault on another host, skip the local
+vault and watcher wizard. Follow the thin-client connection instructions in
+`packages/mcp-server/README.md` instead. Configure the vault and any watcher on
+the host with the local vault or server-side vault mount; never run a local
+watcher installer on a client that cannot access that vault.
+
 ### 1. Check for Existing Config
 
 Resolve any existing config (checks the stable path and legacy locations):
@@ -103,6 +111,19 @@ Ask:
 
 Store this as INBOX_PATH (default `Inbox/`).
 
+### 6b. Ask for Independent Automation Choices
+
+Ask once, together:
+
+> Enable automatic session capture on this host? (yes/no, default no)
+> Enable the vaultkeeper maintenance scheduler on this vault host? (yes/no, default no)
+
+Store the autosave answer as `AUTO_SAVE` and the scheduler answer as
+`KEEPER_AUTOSTART`. Map each answer independently: yes → unquoted YAML `true`,
+no or an unanswered/default choice → unquoted YAML `false`. Reject other answers
+instead of guessing. Keep these answers for the rest of setup; do not ask again
+at installation. Neither choice implies the other.
+
 ### 7. Write obsidian.local.md
 
 Build the config file by replacing each ALL_CAPS placeholder below with the user's actual values, then write it to the **stable, version-independent** location so plugin updates never strand it:
@@ -126,13 +147,17 @@ Replace:
 - `ROUTING_RULE_LINES` → one routing line per domain: `- Keywords "kw1, kw2" → Projects/DomainName/`
 - `DAILY_PATH` → value from Step 5
 - `INBOX_PATH` → value from Step 6
+- `AUTO_SAVE` → boolean from the autosave answer in Step 6b
+- `KEEPER_AUTOSTART` → boolean from the scheduler answer in Step 6b
 
 ```
 ---
 vault_path: VAULT_ABSOLUTE_PATH
 vault_name: VAULT_FOLDER_NAME
 daily_path: DAILY_PATH
-auto_save: true
+auto_save: AUTO_SAVE
+keeper_autostart: KEEPER_AUTOSTART
+keeper_interval_secs: 900
 auto_open: false
 time_gap_minutes: 30
 smart_detect: true
@@ -166,7 +191,7 @@ If a `Precedence` column is present, lower number wins when keywords from multip
 
 Session capture infers `session_intent` (`execution`, `research`, `planning`, `reflection`, `operations`, `scratch`) separately from `capture_action` (`none`, `daily_only`, `project_note`, `substrate_update`, `decision_record`). The confidence thresholds in frontmatter control when the inference is treated as high confidence.
 
-It also records `research_state_change` (`none`, `supports_claim`, `weakens_claim`, `new_claim`, `new_experiment`, `new_evidence`) and `substrate_object`. For research-adjacent sessions, agents should ask whether the session created, weakened, supported, or tested a research claim. When it did, create or update one small object under `Projects/Physics-AI-ML/Research-Substrate/` and link it from the session note.
+It also records `research_state_change` (`none`, `supports_claim`, `weakens_claim`, `new_claim`, `new_experiment`, `new_evidence`) and `substrate_object`. Use a research destination only when the taxonomy and routing rules define one; validate it with `allowlist_validate`. If none is configured, keep research findings in the ordinary routed project or daily note, preserve the actual `research_state_change`, set `substrate_object: ""`, and choose `project_note` or `daily_only` instead of `substrate_update`. Do not invent a research tree or block ordinary capture because that destination is absent.
 
 ## Routing Rules
 
@@ -175,7 +200,51 @@ ROUTING_RULE_LINES
 - Ambiguous → INBOX_PATH (with #needs-filing tag)
 ```
 
-### 8. Confirm
+### 8. Explain the Selected Automation
+
+Read back the persisted config before reporting success. Report both choices:
+
+| AUTO_SAVE | KEEPER_AUTOSTART | Result |
+|-----------|------------------|--------|
+| false | false | Manual session capture; no new scheduler installation. |
+| true | false | Automatic session capture; no new scheduler installation. |
+| false | true | Manual session capture; install the selected scheduler explicitly using the command below. The autosave hook exits before bootstrap in this combination. |
+| true | true | Automatic session capture; the session-end hook can bootstrap the selected scheduler, or use the command below to install it now. |
+
+For a selected scheduler, show this exact manual installation command after the
+config has been persisted to its stable location. Run it only on the vault host
+if executing the user's selected installation as part of setup; otherwise leave
+it for the user and report installation as pending:
+
+```bash
+set -euo pipefail
+: "${CLAUDE_PLUGIN_ROOT:?plugin root required}"
+. "${CLAUDE_PLUGIN_ROOT}/scripts/lib/resolve-config.sh"
+CONFIG="$(resolve_obsidian_config "$CLAUDE_PLUGIN_ROOT")" || exit 1
+VAULT="$(OBSIDIAN_LOCAL_MD="$CONFIG" obsidian_config_value vault_path)" || exit 1
+[ -n "$VAULT" ] && [ -d "$VAULT" ] || exit 1
+SELECTED="$(OBSIDIAN_LOCAL_MD="$CONFIG" obsidian_config_value keeper_autostart)" || exit 1
+[ "$SELECTED" = true ] || exit 1
+case "$(uname -s)" in
+  Darwin)
+    : "${HOME:?HOME required for launchd installation}"
+    mkdir -p "$HOME/Library/LaunchAgents"
+    ;;
+esac
+bash "${CLAUDE_PLUGIN_ROOT}/scripts/install-watcher.sh" install \
+  "${CLAUDE_PLUGIN_ROOT}/scripts/vaultkeeper-tick.sh" 900
+```
+
+For multiple vault hosts, set `keeper_host_priority` to the same ordered list of
+their actual host identifiers in each host's config before activating watchers.
+Do not copy another person's machine names. A single vault host needs no sample
+priority list.
+
+These explicit choices apply to newly rendered configs only. Do not reinterpret
+missing keys in existing configs, disable an installed scheduler, or migrate live
+configuration as part of this wizard.
+
+### 9. Confirm
 
 Tell the user:
 
@@ -185,6 +254,8 @@ Tell the user:
 > **Domains:** Domain1 → `Projects/Domain1/`, Domain2 → `Projects/Domain2/`, ...
 > **Daily notes:** `DAILY_PATH`
 > **Fallback (ambiguous):** `INBOX_PATH`
+> **Automatic session capture:** `AUTO_SAVE`
+> **Maintenance scheduler:** `KEEPER_AUTOSTART` (report installed or pending separately)
 >
 > GUI open (`auto_open`) works on macOS and Windows. On Windows/WSL, Obsidian must be running.
 >
