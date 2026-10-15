@@ -95,12 +95,10 @@ keeper_has_snapshot "$CV" && fail "failed cold start must not record a snapshot"
 # --- Pending transition append failure must propagate and preserve snapshot (#200) ---
 AV="$TMP/appendfail"; mkdir -p "$AV"
 keeper_state_init "$AV" >/dev/null
-# Seed the initial snapshot
 printf 'GAP\told.md\n' | surfacing_pending_transition "$AV" \
   || fail "could not seed initial snapshot for append failure test"
 keeper_has_snapshot "$AV" || fail "seeded snapshot was not written"
 
-# Symlink Pending.md to trigger append failure
 ln -s "/dev/null" "$AV/Pending.md"
 
 # When called in a conditional context (if/||), errexit is suppressed.
@@ -113,7 +111,6 @@ SNAP_DURING="$(keeper_read_snapshot "$AV")"
 grep -q 'new.md' <<<"$SNAP_DURING" \
   && fail "snapshot advanced despite append failure:"$'\n'"$SNAP_DURING"
 
-# Remove the symlink and retry the exact same candidate set
 rm -f "$AV/Pending.md"
 printf 'GAP\told.md\nGAP\tnew.md\n' | surfacing_pending_transition "$AV" \
   || fail "retry after clearing append failure returned non-zero"
