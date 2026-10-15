@@ -99,10 +99,10 @@ surfacing_pending_append() {
 }
 
 surfacing_pending_transition() {
-  local vault="$1" cur snap new pending="$1/Pending.md"
+  local vault="$1" cur snap new
   cur="$(sort -u)"
   if ! keeper_has_snapshot "$vault"; then
-    printf '%s\n' "$cur" | keeper_write_snapshot "$vault"
+    printf '%s\n' "$cur" | keeper_write_snapshot "$vault" || return 1
     return 0
   fi
   snap="$(keeper_read_snapshot "$vault")"
@@ -114,8 +114,13 @@ surfacing_pending_transition() {
   # a plain `>>` it grew Pending.md without bound, three lines a tick, in a file the
   # user hand-edits and Syncthing replicates (#43). Deduping makes the stuck state
   # idempotent instead; the stalled keeper still shows up through the staleness banner.
+  #
+  # When called in a conditional context (if/||), bash suppresses errexit throughout the
+  # function. An append failure must be propagated explicitly: preserve the prior snapshot,
+  # abort the transition, and return non-zero so the candidate can be recovered on retry (#200).
   if [ -n "$new" ]; then
-    printf '%s\n' "$new" | surfacing_pending_append "$vault"
+    printf '%s\n' "$new" | surfacing_pending_append "$vault" || return 1
   fi
-  printf '%s\n' "$cur" | keeper_write_snapshot "$vault"
+  printf '%s\n' "$cur" | keeper_write_snapshot "$vault" || return 1
+  return 0
 }

@@ -6,7 +6,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 . "${ROOT_DIR}/scripts/lib/surfacing.sh"
 _mode() { stat -c %a "$1" 2>/dev/null || stat -f %Lp "$1"; }
 fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
-TMP="$(mktemp -d "${TMPDIR:-/tmp}/surfacing-XXXXXX")"; trap 'rm -rf "$TMP"' EXIT
+TMP="$(mktemp -d "${TMPDIR:-/tmp}/surfacing-XXXXXX")"; trap 'chmod -R u+w "$TMP" 2>/dev/null; rm -rf "$TMP"' EXIT
 export XDG_CACHE_HOME="$TMP/cache"
 V="$TMP/vault"; mkdir -p "$V"; keeper_state_init "$V" >/dev/null
 
@@ -79,5 +79,53 @@ t $'UNFILED\tInbox/b.md\n'
 [ "$(_mode "$RV/Pending.md")" = "644" ] || fail "Pending.md append changed its mode to $(_mode "$RV/Pending.md")"
 grep -qxF -- '- [ ] UNFILED: Inbox/b.md' "$RV/Pending.md" \
   || fail "a new candidate was suppressed by the dedup:"$'\n'"$(cat "$RV/Pending.md")"
+
+# --- Cold-start snapshot write failure must propagate non-zero (#200) ---
+CV="$TMP/coldfail"; mkdir -p "$CV"
+CCDIR="$(keeper_cache_dir "$CV")"
+mkdir -p "$CCDIR"
+chmod 500 "$CCDIR"
+if printf '%s\n' "$C1" | surfacing_pending_transition "$CV" 2>/dev/null; then
+  chmod 700 "$CCDIR"
+  fail "cold start succeeded despite unwritable snapshot directory"
+fi
+chmod 700 "$CCDIR"
+keeper_has_snapshot "$CV" && fail "failed cold start must not record a snapshot"
+
+# --- Pending transition append failure must propagate and preserve snapshot (#200) ---
+AV="$TMP/appendfail"; mkdir -p "$AV"
+keeper_state_init "$AV" >/dev/null
+# Seed the initial snapshot
+printf 'GAP\told.md\n' | surfacing_pending_transition "$AV" \
+  || fail "could not seed initial snapshot for append failure test"
+keeper_has_snapshot "$AV" || fail "seeded snapshot was not written"
+
+# Symlink Pending.md to trigger append failure
+ln -s "/dev/null" "$AV/Pending.md"
+
+# When called in a conditional context (if/||), errexit is suppressed.
+# The transition failure must propagate and not advance the snapshot.
+if printf 'GAP\told.md\nGAP\tnew.md\n' | surfacing_pending_transition "$AV" 2>/dev/null; then
+  fail "transition reported success despite symlinked Pending.md in conditional context"
+fi
+
+SNAP_DURING="$(keeper_read_snapshot "$AV")"
+grep -q 'new.md' <<<"$SNAP_DURING" \
+  && fail "snapshot advanced despite append failure:"$'\n'"$SNAP_DURING"
+
+# Remove the symlink and retry the exact same candidate set
+rm -f "$AV/Pending.md"
+printf 'GAP\told.md\nGAP\tnew.md\n' | surfacing_pending_transition "$AV" \
+  || fail "retry after clearing append failure returned non-zero"
+
+[ -f "$AV/Pending.md" ] || fail "retry did not create Pending.md"
+grep -qxF -- '- [ ] GAP: new.md' "$AV/Pending.md" \
+  || fail "retry candidate was lost:"$'\n'"$(cat "$AV/Pending.md")"
+grep -q 'old.md' "$AV/Pending.md" \
+  && fail "old seed row was re-appended beside retry row:"$'\n'"$(cat "$AV/Pending.md")"
+
+SNAP_AFTER="$(keeper_read_snapshot "$AV")"
+grep -q 'new.md' <<<"$SNAP_AFTER" \
+  || fail "snapshot was not updated on successful retry:"$'\n'"$SNAP_AFTER"
 
 echo "PASS: surfacing"
