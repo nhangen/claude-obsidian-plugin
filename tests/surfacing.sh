@@ -85,12 +85,14 @@ CV="$TMP/coldfail"; mkdir -p "$CV"
 CCDIR="$(keeper_cache_dir "$CV")"
 mkdir -p "$CCDIR"
 chmod 500 "$CCDIR"
+if [ "$(id -u)" != "0" ]; then
 if printf '%s\n' "$C1" | surfacing_pending_transition "$CV" 2>/dev/null; then
   chmod 700 "$CCDIR"
   fail "cold start succeeded despite unwritable snapshot directory"
 fi
 chmod 700 "$CCDIR"
 keeper_has_snapshot "$CV" && fail "failed cold start must not record a snapshot"
+fi
 
 # --- Pending transition append failure must propagate and preserve snapshot (#200) ---
 AV="$TMP/appendfail"; mkdir -p "$AV"
@@ -124,5 +126,22 @@ grep -q 'old.md' "$AV/Pending.md" \
 SNAP_AFTER="$(keeper_read_snapshot "$AV")"
 grep -q 'new.md' <<<"$SNAP_AFTER" \
   || fail "snapshot was not updated on successful retry:"$'\n'"$SNAP_AFTER"
+
+# --- Final snapshot write failure after a successful append must propagate (#200) ---
+if [ "$(id -u)" != "0" ]; then
+  SV="$TMP/snapfail"; mkdir -p "$SV"
+  keeper_state_init "$SV" >/dev/null
+  printf 'GAP\told.md\n' | surfacing_pending_transition "$SV" \
+    || fail "could not seed initial snapshot for snapshot failure test"
+  SCDIR="$(keeper_cache_dir "$SV")"
+  chmod 500 "$SCDIR"
+  if printf 'GAP\told.md\nGAP\tnew.md\n' | surfacing_pending_transition "$SV" 2>/dev/null; then
+    chmod 700 "$SCDIR"
+    fail "transition reported success despite unwritable snapshot directory in conditional context"
+  fi
+  chmod 700 "$SCDIR"
+  grep -qxF -- '- [ ] GAP: new.md' "$SV/Pending.md" \
+    || fail "append before the failed snapshot write was lost"
+fi
 
 echo "PASS: surfacing"
