@@ -160,7 +160,22 @@ PROMPT="${PROMPT/INTENT_HIGH_SCORE_PLACEHOLDER/$INTENT_HIGH_SCORE}"
 PROMPT="${PROMPT/INTENT_MARGIN_PLACEHOLDER/$INTENT_MARGIN}"
 PROMPT="${PROMPT/CAPTURE_HIGH_SCORE_PLACEHOLDER/$CAPTURE_HIGH_SCORE}"
 
-RESULT=$(claude --print --bare --system-prompt "$PROMPT" --max-budget-usd 0.10 < "$TMPFILE" 2>/dev/null) || exit 1
+# Redact credentials before the transcript reaches the summarizer. Fail closed:
+# if redaction errors, skip this save rather than summarize unredacted text.
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+bash "${SCRIPT_DIR}/lib/redact-secrets.sh" "$TMPFILE" || exit 1
+
+# `--bare` authenticates only with ANTHROPIC_API_KEY. Without a key (login or
+# subscription auth) it prints "Not logged in", and because stderr is discarded
+# the autosave silently never happens. So use --bare only when a key exists, and
+# otherwise disable tools, MCP discovery, slash commands and settings sources.
+# OBSIDIAN_SUMMARIZING stops the nested session's Stop hook from autosaving the
+# summarizer's own session (session-save.sh exits when it is set).
+if [ -n "${ANTHROPIC_API_KEY:-}" ]; then
+  RESULT=$(OBSIDIAN_SUMMARIZING=1 claude --print --bare --system-prompt "$PROMPT" --max-budget-usd 0.10 < "$TMPFILE" 2>/dev/null) || exit 1
+else
+  RESULT=$(OBSIDIAN_SUMMARIZING=1 claude --print --no-session-persistence --disable-slash-commands --tools "" --strict-mcp-config --setting-sources "" --system-prompt "$PROMPT" --max-budget-usd 0.10 < "$TMPFILE" 2>/dev/null) || exit 1
+fi
 
 TRIMMED=$(printf '%s' "$RESULT" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
 if [ -z "$TRIMMED" ] || [ "$TRIMMED" = "SKIP" ]; then

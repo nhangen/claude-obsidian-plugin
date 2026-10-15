@@ -10,6 +10,10 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PLUGIN_ROOT="$(dirname "$SCRIPT_DIR")"
 . "${SCRIPT_DIR}/lib/resolve-config.sh"
 
+# Recursion guard: session-summarize.sh runs `claude --print` with OBSIDIAN_SUMMARIZING=1,
+# and that nested session must not autosave itself.
+[ -n "${OBSIDIAN_SUMMARIZING:-}" ] && exit 0
+
 CONFIG_FILE="$(resolve_obsidian_config "$PLUGIN_ROOT")" || CONFIG_FILE=""
 if [ -z "$CONFIG_FILE" ] || [ ! -f "$CONFIG_FILE" ]; then
   exit 0
