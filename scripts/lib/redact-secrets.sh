@@ -21,6 +21,32 @@ text = open(path, encoding="utf-8", errors="surrogateescape").read()
 orig = text
 
 R = "[REDACTED]"
+credential_fields = r"(?:key|private_key|client_secret|secret|token|password|access_token|api_key|auth_token|clientId|keyId)"
+escaped_field = re.compile(rf'''\\"{credential_fields}\\"\s*:\s*\\"''', re.I)
+
+def redact_escaped_values(source):
+    output = []
+    cursor = 0
+    search_from = 0
+    while match := escaped_field.search(source, search_from):
+        quote = match.end()
+        while (quote := source.find('"', quote)) != -1:
+            slash = quote - 1
+            while slash >= 0 and source[slash] == "\\":
+                slash -= 1
+            slash_count = quote - slash - 1
+            if slash_count % 4 == 1:
+                output.extend((source[cursor:match.end()], R))
+                cursor = quote - 1
+                search_from = quote + 1
+                break
+            quote += 1
+        else:
+            search_from = match.end()
+    output.append(source[cursor:])
+    return "".join(output)
+
+text = redact_escaped_values(text)
 
 rules = [
     # PEM private keys, complete or truncated (newlines may be literal or JSON-escaped)
@@ -37,8 +63,10 @@ rules = [
     (re.compile(r"AKIA[0-9A-Z]{16}"), R),
     (re.compile(r"eyJ[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}"), R),
     (re.compile(r"(Bearer\s+)[A-Za-z0-9._~+/=\-]{20,}", re.I), r"\1" + R),
-    # JSON-style credential fields (quotes may be backslash-escaped inside JSONL)
-    (re.compile(r"""(\\?["'](?:key|private_key|client_secret|secret|token|password|access_token|api_key|auth_token|clientId|keyId)\\?["']\s*:\s*\\?["'])([^"'\\\s]{6,})""", re.I),
+    # Plain JSON-style credential fields, including spaces and escaped content.
+    (re.compile(rf'''("{credential_fields}"\s*:\s*")((?:\\.|[^"\\])*)''', re.I),
+     r"\1" + R),
+    (re.compile(rf"('(?:{credential_fields})'\s*:\s*')((?:\\.|[^'\\])*)", re.I),
      r"\1" + R),
     # ENV-style assignments with secret-ish names
     (re.compile(r"""((?:[A-Za-z0-9_]*(?:TOKEN|SECRET|PASSWORD|PASSWD|API_KEY|PRIVATE_KEY)[A-Za-z0-9_]*)\s*[=:]\s*["']?)([^\s"'\\<>]{8,})""", re.I),
