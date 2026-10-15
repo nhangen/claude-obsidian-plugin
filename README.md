@@ -231,6 +231,12 @@ The body of `obsidian.local.md` defines two things the skills read directly:
 
 Per-repo commit-capture overrides go in the same file under a `## Commit Capture Overrides` section.
 
+### Autosave: authentication and secret redaction
+
+- **Authentication.** The autosave summarizer runs a nested `claude --print`. With `ANTHROPIC_API_KEY` set it uses `--bare`; without one (login or subscription auth) it uses `--no-session-persistence --disable-slash-commands --tools "" --setting-sources ""` instead, because `--bare` accepts only an API key and would fail with "Not logged in".
+- **Recursion guard.** The nested session runs with `OBSIDIAN_SUMMARIZING=1`, and `session-save.sh` exits immediately when it is set, so the summarizer never autosaves itself.
+- **Redaction.** Before the transcript reaches the summarizer, `scripts/lib/redact-secrets.sh` replaces PEM private keys, JSON credential fields (`key`, `token`, `password`, `clientId`, ...), provider tokens (GitLab, GitHub, Slack, AWS, `sk-`), JWTs, bearer headers, and `*_TOKEN` / `*_SECRET` / `PASSWORD` assignments with `[REDACTED]`. It is pattern-based, so it does not catch every possible secret, and it fails closed: if it errors, that save is skipped.
+
 ## Architecture
 
 ```
