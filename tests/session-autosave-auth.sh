@@ -47,18 +47,19 @@ unexpected() {
 
 case "${EXPECT_AUTH_MODE:-}" in
   login)
-    [ "$#" -eq 11 ] &&
+    [ "$#" -eq 12 ] &&
       [ "$1" = "--print" ] &&
       [ "$2" = "--no-session-persistence" ] &&
       [ "$3" = "--disable-slash-commands" ] &&
       [ "$4" = "--tools" ] &&
       [ -z "$5" ] &&
-      [ "$6" = "--setting-sources" ] &&
-      [ -z "$7" ] &&
-      [ "$8" = "--system-prompt" ] &&
-      [ -n "$9" ] &&
-      [ "${10}" = "--max-budget-usd" ] &&
-      [ "${11}" = "0.10" ] || unexpected "$@"
+      [ "$6" = "--strict-mcp-config" ] &&
+      [ "$7" = "--setting-sources" ] &&
+      [ -z "$8" ] &&
+      [ "$9" = "--system-prompt" ] &&
+      [ -n "${10}" ] &&
+      [ "${11}" = "--max-budget-usd" ] &&
+      [ "${12}" = "0.10" ] || unexpected "$@"
     ;;
   api)
     [ "$#" -eq 6 ] &&
