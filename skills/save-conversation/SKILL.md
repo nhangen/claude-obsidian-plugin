@@ -170,23 +170,28 @@ Record the answer in frontmatter:
 
 ```yaml
 research_state_change: none | supports_claim | weakens_claim | new_claim | new_experiment | new_evidence
-substrate_object: "[[Projects/Physics-AI-ML/Research-Substrate/<type>/<slug>]]"
+substrate_object: "[[<configured-research-object>]]"
 ```
 
 Use `research_state_change: none` and `substrate_object: ""` when the session did not change research state. Do this even for execution and planning sessions.
 
-When `research_state_change` is not `none`, create or update one small object under `Projects/Physics-AI-ML/Research-Substrate/` and link it from the session note. Pick the smallest accurate object type:
+When `research_state_change` is not `none`, resolve a research destination only
+from the configured taxonomy and routing rules. Use `allowlist_list "$CONFIG"`
+and `allowlist_validate "<resolved-research-target>" "$CONFIG"`; do not infer a
+new tree or assume object-type subfolders exist. Choose the smallest accurate
+claim, experiment, evidence, or literature object supported by that routing.
 
-- `claims/` for durable claims that can be supported, weakened, or invalidated.
-- `experiments/` for tests, benchmarks, protocols, or validation plans.
-- `evidence/` for repo runs, audits, result summaries, reproduced failures, or artifacts.
-- `literature/` for papers and source-backed frontier markers.
+If no research destination is configured, keep the findings in the ordinary
+routed project or configured daily note. Preserve `research_state_change`, set
+`substrate_object: ""`, and use `project_note` or `daily_only`, never
+`substrate_update`. An absent research route does not require another prompt or
+block ordinary session capture.
 
 **File it through the keeper, with a dedup pre-step.** Before writing, glob
-`Research-Substrate/<type>/` for an existing object on the same claim/slug; if
+the configured research folder for an existing object on the same claim/slug; if
 one matches, update that object rather than creating a twin. Then hand the
 create-or-update to `obsidian:keeper-save` with `op: insert`, `resolved: true`,
-`folder_hint: Projects/Physics-AI-ML/Research-Substrate/<type>`,
+`target: <resolved-research-folder>/<slug>.md`,
 `title: <slug>`, `body: <the object>`. The dedup pre-step is required because
 `resolved: true` skips the keeper's own dedup and this skill has no other
 substrate dedup — without it, duplicate claims/evidence accumulate silently.
@@ -207,10 +212,10 @@ Ask only when ambiguity changes the durable action. Do not ask for routine high-
 
 Examples:
 
-- User asks to read papers and compare to current work → `research + substrate_update`.
+- User asks to read papers and compare to current work → `research + substrate_update` when a research destination is configured; otherwise `research + project_note`.
 - User asks to fix a PR → `execution + project_note`; add substrate evidence only when an active claim is directly affected.
 - User asks for roadmap/spec → `planning + project_note` or `decision_record` when an actual decision is made.
-- User asks to leave an NRX/customer/admin note → `operations + project_note`.
+- User asks to leave a customer/admin note → `operations + project_note`.
 - Casual chat with no durable outcome → `scratch + none`.
 
 If top intent/action are close and the durable result differs, ask:
@@ -231,7 +236,7 @@ When the keyword scan in step 2 produces **2+ candidate domains** (common for cr
 4. **Remember the choice for the session** — once the user confirms or overrides, write `<topic-stem> → <chosen-domain>` into the in-memory cache from step 0. Do not re-prompt for the same topic-stem this session.
 5. **No precedence column at all** in the taxonomy → fall back to: warn the user about the multi-match, list candidates, and ask once. Their reply seeds the in-memory cache (step 4).
 
-This prevents the parallel-tree problem (e.g. `Career/`, `Awesome Motive/career/`, `Personal/Job Search/` all accumulating notes about the same job-search thread because each save resolved to a different route).
+This prevents parallel trees accumulating notes about the same thread because each save resolved to a different route.
 
 Mirror the precedence column in the example file's `## Project Taxonomy`. The setup wizard offers an optional precedence prompt — see `obsidian:setup`.
 
@@ -254,7 +259,7 @@ Source the shared validator and call it — do not re-implement the parse/normal
 
 If `strict_domains: false`, skip this validation.
 
-Why this matters: without strict validation, a typo'd hint silently creates an alias folder (e.g. `AM/` alongside `Awesome Motive/`) that fragments the vault over time. Failure-mode reference: `enum-config-typo-fallback`.
+Why this matters: without strict validation, a typo'd hint silently creates an alias folder (e.g. `Dev/` alongside `Development/`) that fragments the vault over time. Failure-mode reference: `enum-config-typo-fallback`.
 
 ## Output Format
 
@@ -311,7 +316,7 @@ source: claude-code
 
 1. **Check vault conventions** — if `VAULT.md` exists at the vault root, read it for vault-specific conventions (e.g., session template, domain folders, linking rules)
 2. **Infer intent and capture action** — assign `session_intent`, `capture_action`, confidence, scores, and evidence bullets. Ask only when ambiguity changes the durable action.
-3. **Infer research state change** — assign `research_state_change` and `substrate_object`. Create/update the substrate object when the value is not `none`.
+3. **Infer research state change** — assign `research_state_change` and `substrate_object`. Create/update an object only when a research destination is configured; otherwise retain the findings in the ordinary note with an empty object link per Research Substrate Check.
 4. **Detect topic and collect candidates** — scan conversation context for domain keywords; collect **every** matching candidate, not just the first
 5. **Resolve target folder** — if exactly one candidate matched, use it. If two or more matched, run the **Cross-Domain Tiebreaker** (see section above) to pick one. The result is the resolved target folder.
 6. **Generate title** — create descriptive kebab-case title from topic, e.g. `2026-02-19-obsidian-vault-consolidation`
@@ -336,7 +341,7 @@ source: claude-code
       `section: ## HH:MM — <Title>`, and `body: <the FULL h3 sub-block
       structure>` (see Same-Day Dedup Check "Append mode" for the exact body).
 12. **Confirm** — relay the path the keeper returns (new file or append).
-13. **Open in GUI (opt-in)** — do not open the note by default. Read `auto_open` from `$CONFIG` (`grep '^auto_open:' "$CONFIG"`); it defaults to `false` when absent. Only when it is explicitly `true`, or the user explicitly asks to open/view the saved note, call `bash ${CLAUDE_PLUGIN_ROOT}/scripts/open-in-obsidian.sh <relative-path>`.
+13. **Open in GUI (opt-in)** — do not open the note by default. Read `auto_open` with the sourced `obsidian_config_value auto_open`; it defaults to `false` when absent. Only when it is explicitly `true`, or the user explicitly asks to open/view the saved note, call `bash ${CLAUDE_PLUGIN_ROOT}/scripts/open-in-obsidian.sh <relative-path>`.
 14. **MOC-promotion prompt (post-save, soft)** — see "MOC-Promotion Prompt" below. After a successful new-file write, check whether the parent folder has accumulated 3+ notes sharing a topic stem. If so, prompt once to promote into a dedicated subfolder with a `README.md` index. Skip on append. Skip if the user previously declined promotion for this stem.
 
 ## Same-Day Dedup Check
@@ -395,7 +400,7 @@ After a successful new-file write, check whether the parent folder has grown a c
 1. **Skip conditions** — Skip immediately if any of:
    - The save was an append (not a new file).
    - The user has previously declined promotion for this topic-stem in the current session (track in the same in-memory cache as the Cross-Domain Tiebreaker, with a separate key prefix like `moc-declined:<stem>`).
-   - The parent folder is already inside a per-idea subfolder (e.g. `Projects/Physics-AI-ML/DeCoN/notes/`) — promotion only fires at the *parent of loose notes*, not nested.
+   - The parent folder is already inside a per-idea subfolder (e.g. `<configured-domain>/Example-Idea/notes/`) — promotion only fires at the *parent of loose notes*, not nested.
    - `moc_promotion: false` is set in `obsidian.local.md` frontmatter.
 
 2. **Cluster detection** — In the parent folder (non-recursive), find all `.md` files whose slug shares ≥ 2 tokens after applying the same token filter from "Same-Day Dedup Check" (drop purely-numeric and single-character tokens). Identify the candidate **topic stem** using the precise rule in the "Tokenization for stem detection" section below — do not pick stem by length alone here.
@@ -485,7 +490,7 @@ Tokenize every candidate slug with the shared `tokenize_slug` (source `dedup-sca
 
 ### Why
 
-Idea folders accumulate loose notes without an index. By the time the user notices, the cluster is hard to navigate and links are missing — the 2026-05-09 vault reorg found 9 loose notes at `Projects/Physics-AI-ML/` that had grown around 3-4 latent ideas. A soft prompt at the right moment promotes the cluster before drift sets in.
+Idea folders accumulate loose notes without an index. A soft prompt at the right moment promotes a coherent cluster before it becomes hard to navigate.
 
 This is **strictly opt-in per cluster**. Never move files without explicit confirmation. Never re-prompt for the same stem in the same session.
 

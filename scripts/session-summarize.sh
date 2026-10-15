@@ -88,8 +88,9 @@ Research state change values:
 Research substrate check:
 - Ask: Did this session create, weaken, support, or test a research claim?
 - Use research_state_change: none when the answer is no, even for normal execution/planning notes.
-- Use substrate_object for the expected or updated Obsidian wikilink when research_state_change is not none.
-- If capture_action is substrate_update, research_state_change must not be none and substrate_object should point under Projects/Physics-AI-ML/Research-Substrate/.
+- Resolve research destinations only from the configured Project Taxonomy and Routing Rules below; never invent a research folder.
+- If no configured research destination exists, preserve the research state change in a normal project_note or daily_only capture and leave substrate_object empty.
+- If capture_action is substrate_update, research_state_change must not be none and substrate_object must point to an object under the configured research destination.
 - If an execution session tests an active research claim, keep session_intent: execution and set the appropriate research_state_change.
 
 Scoring rules:
@@ -99,7 +100,7 @@ Scoring rules:
 - confidence is medium if score >= 0.45 but either margin is close or key evidence is mixed.
 - confidence is low otherwise.
 - Use concrete evidence bullets: user verbs, referenced artifacts, outputs produced, explicit destination hints, and domain terms.
-- Explicit user instructions win over inference (e.g. "daily only", "update research substrate", "leave a note in NRX").
+- Explicit user instructions win over inference (e.g. "daily only", "update research substrate", "leave a project note").
 - If the best capture action is none, output SKIP.
 - If this is an ambiguous non-interactive autosave where a human confirmation would be needed, still write the note but set capture_needs_confirmation: true and pick the safer durable action (usually daily_only or project_note, not substrate_update).
 
@@ -107,7 +108,7 @@ Output format (when not SKIP):
 ---
 date: YYYY-MM-DD
 domain: <domain>
-vault_folder: <relative path from vault root, e.g. Awesome Motive/sessions/>
+vault_folder: <relative path from vault root, selected from the configured taxonomy>
 slug: <topic-slug>
 session_intent: <execution|research|planning|reflection|operations|scratch>
 session_intent_score: <0.00-1.00>
