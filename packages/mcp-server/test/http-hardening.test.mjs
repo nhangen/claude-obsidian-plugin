@@ -402,8 +402,21 @@ test("a rejected POST does not revive a timed-out session", async (t) => {
 });
 
 
+test("requestEvents waits for newline-complete stderr records", () => {
+  let stderr = 'mcp-http-request {"status":200}\nmcp-http-request {"status":';
+  const server = { stderr: () => stderr };
+
+  assert.deepEqual(requestEvents(server), [{ status: 200 }]);
+  stderr += '408}';
+  assert.deepEqual(requestEvents(server), [{ status: 200 }]);
+  stderr += '\n';
+  assert.deepEqual(requestEvents(server), [{ status: 200 }, { status: 408 }]);
+  stderr += 'mcp-http-request {malformed}\n';
+  assert.throws(() => requestEvents(server), SyntaxError);
+});
+
 function requestEvents(server) {
-  return server.stderr().split("\n").filter((line) => line.startsWith("mcp-http-request "))
+  return server.stderr().split("\n").slice(0, -1).filter((line) => line.startsWith("mcp-http-request "))
     .map((line) => JSON.parse(line.slice("mcp-http-request ".length)));
 }
 
