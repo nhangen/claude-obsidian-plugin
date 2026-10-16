@@ -62,7 +62,7 @@ surfacing_digest() {
 # left alone, and because the row can never be re-derived, the next healthy tick's
 # `comm -23` cannot see it as new and re-append it.
 _surfacing_pending_append_locked() {
-  local vault="$1" pending="$1/Pending.md" line out payload tmp changed=0
+  local vault="$1" pending="$1/Pending.md" line out payload existing tmp rc changed=0
   [ ! -L "$pending" ] || return 1
   tmp="$(mktemp "$vault/.Pending-XXXXXX")" || return 1
   if [ -f "$pending" ]; then
@@ -70,7 +70,10 @@ _surfacing_pending_append_locked() {
   fi
   while IFS= read -r line; do
     [ -n "$line" ] || continue
-    payload="$(printf '%s' "$line" | sed 's/'$'\t''/: /')"
+    payload="$(printf '%s' "$line" | sed 's/'$'\t''/: /')" || {
+      printf 'surfacing: cannot format pending receipt\n' >&2
+      rm -f "$tmp"; return 1
+    }
     out="- [ ] ${payload}"
     # Idempotent against what is already there — and against the box being TICKED
     # (#37). Comparing whole lines missed `- [x] …`, so a candidate that dropped out
@@ -79,8 +82,18 @@ _surfacing_pending_append_locked() {
     # Syncthing-replicated, which makes this the one path where a bug touches notes a
     # person is working in. Compare the payload with the checkbox stripped, so any box
     # state counts as present.
-    if sed -n 's/^- \[[^]]*\] //p' "$tmp" | grep -qxF -- "$payload"; then
+    existing="$(sed -n 's/^- \[[^]]*\] //p' "$tmp")" || {
+      printf 'surfacing: cannot read pending receipts\n' >&2
+      rm -f "$tmp"; return 1
+    }
+    if grep -qxF -- "$payload" <<<"$existing"; then
       continue
+    else
+      rc=$?
+      if [ "$rc" -ne 1 ]; then
+        printf 'surfacing: cannot match pending receipt\n' >&2
+        rm -f "$tmp"; return 1
+      fi
     fi
     printf '%s\n' "$out" >> "$tmp" || { rm -f "$tmp"; return 1; }
     changed=1
@@ -100,13 +113,19 @@ surfacing_pending_append() {
 
 surfacing_pending_transition() {
   local vault="$1" cur snap new
-  cur="$(sort -u)"
+  cur="$(sort -u)" || {
+    printf 'surfacing: cannot sort candidates\n' >&2
+    return 1
+  }
   if ! keeper_has_snapshot "$vault"; then
     printf '%s\n' "$cur" | keeper_write_snapshot "$vault" || return 1
     return 0
   fi
-  snap="$(keeper_read_snapshot "$vault")"
-  new="$(comm -23 <(printf '%s\n' "$cur") <(printf '%s\n' "$snap"))"
+  snap="$(keeper_read_snapshot "$vault")" || return 1
+  new="$(comm -23 <(printf '%s\n' "$cur") <(printf '%s\n' "$snap"))" || {
+    printf 'surfacing: cannot compare snapshot\n' >&2
+    return 1
+  }
   # Through the same deduping appender as the irreversible-row path. The snapshot is
   # written *after* the append, so a failed snapshot swap leaves the append committed
   # and the gate un-advanced: every later tick sees the same rows as new. That order is
