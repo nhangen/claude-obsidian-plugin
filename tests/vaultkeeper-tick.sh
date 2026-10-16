@@ -188,6 +188,72 @@ _rq="$(grep -c 'QUARANTINE: Pending.sync-conflict-20260730-120000-RECEIPT.md' "$
 [ "$_rq" = "1" ] \
   || fail "the quarantine receipt appears $_rq times in Pending.md after a fault/heal cycle"
 
+# A failed receipt append must be reported without aborting the partial-scan monitor.
+RFV="$TMP/receiptfailvault"; mkdir -p "$RFV/Inbox"
+printf -- '---\ntags: [x]\ntype: a\n---\nbody\n' > "$RFV/n.md"
+printf 'conflicted\n' > "$RFV/Pending.sync-conflict-20260730-120000-FAILED.md"
+ln -s /dev/null "$RFV/Pending.md"
+RFCFG="$TMP/receiptfail.local.md"; sed "s|^vault_path: .*|vault_path: $RFV|" "$CFG" > "$RFCFG"
+RFOUT="$TMP/receiptfail.out"
+OBSIDIAN_LOCAL_MD="$RFCFG" VAULTKEEPER_HOST="ml-1" \
+  bash "$RQS/vaultkeeper-tick.sh" >"$RFOUT" 2>&1 \
+  || fail "a failed quarantine receipt append aborted the tick; got: $(cat "$RFOUT")"
+grep -q 'failed to append quarantine receipts' "$RFOUT" \
+  || fail "the failed quarantine receipt append was silent; got: $(cat "$RFOUT")"
+grep -q 'scan INCOMPLETE' "$RFOUT" \
+  || fail "the original partial scan was not reported after the receipt failure; got: $(cat "$RFOUT")"
+grep -q 'quarantine receipts appended' "$RFOUT" \
+  && fail "the tick falsely claimed the failed quarantine receipt was appended: $(cat "$RFOUT")"
+RFSTATE="$(keeper_cache_dir "$RFV")/monitor.state"
+[ -f "$RFSTATE" ] \
+  || fail "the receipt failure prevented keeper_monitor_tick from recording state"
+grep -q '^quarantine_status=firing$' "$RFSTATE" \
+  || fail "the monitor did not observe the quarantined file after the receipt failure: $(cat "$RFSTATE")"
+keeper_has_snapshot "$RFV" \
+  && fail "the receipt failure advanced the snapshot for a partial scan"
+
+# A healthy scan whose existing snapshot cannot be read must still reach monitoring,
+# without appending every candidate, advancing the snapshot, or claiming completion.
+SFV="$TMP/snapshotreadfailvault"; mkdir -p "$SFV/Inbox"
+printf -- '---\ntags: [x]\ntype: a\n---\nbody\n' > "$SFV/old.md"
+SFCFG="$TMP/snapshotreadfail.local.md"; sed "s|^vault_path: .*|vault_path: $SFV|" "$CFG" > "$SFCFG"
+OBSIDIAN_LOCAL_MD="$SFCFG" VAULTKEEPER_HOST="ml-1" \
+  bash "${ROOT_DIR}/scripts/vaultkeeper-tick.sh" >/dev/null 2>&1 \
+  || fail "could not seed the snapshot read failure fixture"
+SF_SNAPSHOT="$(keeper_snapshot_file "$SFV")"
+SF_BEFORE="$(keeper_read_snapshot "$SFV")"
+rm -f "$(keeper_cache_dir "$SFV")/monitor.state"
+printf -- '---\ntags: [x]\n---\nbody\n' > "$SFV/new-gap.md"
+SF_CAT_BIN="$TMP/snapshot-cat-bin"; mkdir -p "$SF_CAT_BIN"
+SF_REAL_CAT="$(command -v cat)"
+cat > "$SF_CAT_BIN/cat" <<'EOF'
+#!/usr/bin/env bash
+if [ "${1:-}" = "$FAIL_CAT_PATH" ]; then
+  exit 1
+fi
+exec "$REAL_CAT" "$@"
+EOF
+chmod +x "$SF_CAT_BIN/cat"
+SFOUT="$TMP/snapshotreadfail.out"
+PATH="$SF_CAT_BIN:$PATH" FAIL_CAT_PATH="$SF_SNAPSHOT" REAL_CAT="$SF_REAL_CAT" \
+  OBSIDIAN_LOCAL_MD="$SFCFG" VAULTKEEPER_HOST="ml-1" \
+  bash "${ROOT_DIR}/scripts/vaultkeeper-tick.sh" >"$SFOUT" 2>&1 \
+  || fail "an unreadable snapshot aborted the tick before monitoring; got: $(cat "$SFOUT")"
+grep -q 'cannot read.*candidates.snapshot' "$SFOUT" \
+  || fail "the snapshot read failure was not observable; got: $(cat "$SFOUT")"
+grep -q 'snapshot untouched' "$SFOUT" \
+  || fail "the failed transition did not state that the snapshot stayed untouched: $(cat "$SFOUT")"
+grep -q 'scan complete' "$SFOUT" \
+  && fail "the failed snapshot transition falsely reported scan complete: $(cat "$SFOUT")"
+[ -f "$(keeper_cache_dir "$SFV")/monitor.state" ] \
+  || fail "the snapshot read failure prevented keeper_monitor_tick from recording state"
+[ "$(keeper_read_snapshot "$SFV")" = "$SF_BEFORE" ] \
+  || fail "the failed snapshot read advanced or replaced the prior snapshot"
+if [ -f "$SFV/Pending.md" ]; then
+  grep -q 'new-gap.md' "$SFV/Pending.md" \
+    && fail "the unreadable snapshot treated the new candidate as unseen: $(cat "$SFV/Pending.md")"
+fi
+
 # --- the whole tick under real fd exhaustion (#57) ---------------------------
 # The scanner fix and the fault gate were each pinned individually, but nothing ran
 # the composition against the condition that produced the incident: the tick's own

@@ -34,7 +34,14 @@ keeper_state_init() {
 
 keeper_snapshot_file() { printf '%s/candidates.snapshot\n' "$(keeper_cache_dir "$1")"; }
 keeper_has_snapshot()  { [ -f "$(keeper_snapshot_file "$1")" ]; }
-keeper_read_snapshot() { local f; f="$(keeper_snapshot_file "$1")"; [ -f "$f" ] && cat "$f" || true; }
+keeper_read_snapshot() {
+  local f; f="$(keeper_snapshot_file "$1")"
+  [ -f "$f" ] || return 0
+  if ! cat "$f"; then
+    printf 'keeper_read_snapshot: cannot read %s\n' "$f" >&2
+    return 1
+  fi
+}
 
 keeper_write_snapshot() {
   local f dir tmp; f="$(keeper_snapshot_file "$1")"

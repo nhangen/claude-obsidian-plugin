@@ -127,6 +127,39 @@ SNAP_AFTER="$(keeper_read_snapshot "$AV")"
 grep -q 'new.md' <<<"$SNAP_AFTER" \
   || fail "snapshot was not updated on successful retry:"$'\n'"$SNAP_AFTER"
 
+# --- Existing snapshot read failure must abort before append or advance ---
+RVF="$TMP/readfail"; mkdir -p "$RVF"
+keeper_state_init "$RVF" >/dev/null
+printf 'GAP\told.md\n' | surfacing_pending_transition "$RVF" \
+  || fail "could not seed initial snapshot for read failure test"
+SNAP_FILE="$(keeper_snapshot_file "$RVF")"
+REAL_CAT="$(command -v cat)"
+CAT_BIN="$TMP/cat-bin"; mkdir -p "$CAT_BIN"
+cat > "$CAT_BIN/cat" <<'EOF'
+#!/usr/bin/env bash
+if [ "$1" = "$FAIL_CAT_PATH" ]; then
+  exit 1
+fi
+exec "$REAL_CAT" "$@"
+EOF
+chmod +x "$CAT_BIN/cat"
+set +e
+READ_ERR="$(
+  ( export PATH="$CAT_BIN:$PATH" FAIL_CAT_PATH="$SNAP_FILE" REAL_CAT
+    printf 'GAP\told.md\nGAP\tnew.md\n' | surfacing_pending_transition "$RVF"
+  ) 2>&1
+)"
+READ_RC=$?
+set -e
+[ "$READ_RC" -ne 0 ] \
+  || fail "transition reported success despite an unreadable existing snapshot"
+grep -q 'cannot read' <<<"$READ_ERR" \
+  || fail "the snapshot read failure was not observable; got: ${READ_ERR:-<empty>}"
+[ ! -f "$RVF/Pending.md" ] \
+  || fail "an unreadable snapshot treated every candidate as new: $(cat "$RVF/Pending.md")"
+[ "$(keeper_read_snapshot "$RVF")" = $'GAP\told.md' ] \
+  || fail "the unreadable snapshot path advanced or replaced the prior snapshot"
+
 # --- Final snapshot write failure after a successful append must propagate (#200) ---
 if [ "$(id -u)" != "0" ]; then
   SV="$TMP/snapfail"; mkdir -p "$SV"

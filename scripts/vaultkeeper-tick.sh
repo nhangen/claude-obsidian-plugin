@@ -195,18 +195,36 @@ if [ -n "$SCAN_FAULT" ]; then
   # sync conflict needs merging. Appended without touching the snapshot, which is what
   # keeps the transition gate intact: a row that cannot be re-derived cannot come back
   # through `comm -23` as new.
-  QUARANTINE_ROWS="$(printf '%s\n' "$CAND" | grep '^QUARANTINE'$'\t' || true)"
+  if QUARANTINE_ROWS="$(printf '%s\n' "$CAND" | grep '^QUARANTINE'$'\t')"; then
+    :
+  else
+    QUARANTINE_EXTRACT_RC=$?
+    QUARANTINE_ROWS=""
+    if [ "$QUARANTINE_EXTRACT_RC" -ne 1 ]; then
+      printf 'vaultkeeper: failed to extract quarantine receipts (grep rc=%s)\n' "$QUARANTINE_EXTRACT_RC" >&2
+    fi
+  fi
+  QUARANTINE_RECEIPT_STATUS=""
   if [ -n "$QUARANTINE_ROWS" ]; then
-    printf '%s\n' "$QUARANTINE_ROWS" | surfacing_pending_append "$VAULT"
+    if printf '%s\n' "$QUARANTINE_ROWS" | surfacing_pending_append "$VAULT"; then
+      QUARANTINE_RECEIPT_STATUS=", quarantine receipts appended to Pending.md"
+    else
+      printf 'vaultkeeper: failed to append quarantine receipts to Pending.md\n' >&2
+    fi
   fi
   keeper_monitor_tick "$VAULT" "$CAND" "$HOST" quarantine-only \
     || printf 'vaultkeeper: monitor tick failed\n' >&2
   printf 'vaultkeeper: scan INCOMPLETE on %s — snapshot untouched%s; scanners said: %s\n' \
-    "$HOST" "${QUARANTINE_ROWS:+, quarantine receipts appended to Pending.md}" "$SCAN_FAULT" >&2
+    "$HOST" "$QUARANTINE_RECEIPT_STATUS" "$SCAN_FAULT" >&2
   exit 0
 fi
 
-printf '%s\n' "$CAND" | surfacing_pending_transition "$VAULT"
+if ! printf '%s\n' "$CAND" | surfacing_pending_transition "$VAULT"; then
+  printf 'vaultkeeper: pending transition failed — snapshot untouched\n' >&2
+  keeper_monitor_tick "$VAULT" "$CAND" "$HOST" \
+    || printf 'vaultkeeper: monitor tick failed\n' >&2
+  exit 0
+fi
 # Guarded for the same reason as keeper_record_attempt above, and because
 # keeper-state.sh documents this call as checked: bare under `set -e` a failed
 # write aborts the tick here, after every shared write has already landed, so
