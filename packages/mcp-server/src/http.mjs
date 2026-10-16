@@ -713,4 +713,3 @@ httpServer.listen(configuration.port, configuration.bind, () => {
   }
   process.stderr.write(`mcp-http-listening http://${configuration.bind}:${address.port}\n`);
 });
-
