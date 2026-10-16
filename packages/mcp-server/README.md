@@ -89,7 +89,16 @@ supported.
 The HTTP server writes one bounded `mcp-http-request` JSON event per request to
 stderr. Events contain the HTTP status, duration, MCP method, tool name when
 applicable, and sanitized JWT subject. They never contain bearer tokens,
-request arguments, or vault content. A deployment can run the packaged
+request arguments, or vault content. `status` retains the legacy terminal status;
+`terminal_status` makes that meaning explicit. `wire_status` is the status of
+headers sent by the server, or null if no headers were sent (not proof of client
+receipt). An SSE response can therefore have `wire_status: 200` and
+`terminal_status: 408`. `terminal_reason` distinguishes `completed`, `http-error`,
+`request-timeout`, `client-disconnect`, and other `request-aborted` outcomes.
+`timeout_phase` is `body`, `transport`, or `response_stream` when a server deadline
+fires, otherwise null. These fields diagnose the responsible boundary; they do
+not identify the root cause of a slow tool or change deadlines/retry policy.
+A deployment can run the packaged
 `node monitor.mjs` command to perform an authenticated initialize handshake and
 aggregate recent request counts, failures, tool calls, clients, stream counts,
 and p95 request latency from the systemd journal. The p95 excludes long-lived

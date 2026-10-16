@@ -400,3 +400,149 @@ test("a rejected POST does not revive a timed-out session", async (t) => {
   });
   assert.equal(afterClose.status, 404);
 });
+
+
+test("requestEvents waits for newline-complete stderr records", () => {
+  let stderr = 'mcp-http-request {"status":200}\nmcp-http-request {"status":';
+  const server = { stderr: () => stderr };
+
+  assert.deepEqual(requestEvents(server), [{ status: 200 }]);
+  stderr += '408}';
+  assert.deepEqual(requestEvents(server), [{ status: 200 }]);
+  stderr += '\n';
+  assert.deepEqual(requestEvents(server), [{ status: 200 }, { status: 408 }]);
+  stderr += 'mcp-http-request {malformed}\n';
+  assert.throws(() => requestEvents(server), SyntaxError);
+});
+
+function requestEvents(server) {
+  return server.stderr().split("\n").slice(0, -1).filter((line) => line.startsWith("mcp-http-request "))
+    .map((line) => JSON.parse(line.slice("mcp-http-request ".length)));
+}
+
+async function waitForRequestEvent(server, predicate) {
+  const deadline = Date.now() + 3_000;
+  while (Date.now() < deadline) {
+    const found = requestEvents(server).find(predicate);
+    if (found) return found;
+    await new Promise((done) => setTimeout(done, 10));
+  }
+  assert.fail("expected request telemetry was not emitted");
+}
+
+test("request telemetry separates wire status, stream deadline, and client disconnect", async (t) => {
+  const { directory, config } = await fixture();
+  const server = startServer(config, { MCP_HTTP_REQUEST_TIMEOUT_MS: "400", MCP_HTTP_DISCONNECT_GRACE_MS: "5000" });
+  t.after(async () => { await server.stop(); await rm(directory, { recursive: true, force: true }); });
+  const url = await server.ready;
+  const bearer = token();
+  const initialized = await fetch(`${url}/mcp`, {
+    method: "POST", headers: headers(url, bearer), body: JSON.stringify(initialize()),
+  });
+  await initialized.text();
+  const sessionId = initialized.headers.get("mcp-session-id");
+  const ok = await waitForRequestEvent(server, (event) => event.mcp_method === "initialize");
+  assert.equal(ok.wire_status, 200);
+  assert.equal(ok.terminal_status, 200);
+  assert.equal(ok.terminal_reason, "completed");
+  assert.equal(ok.timeout_phase, null);
+  const streamHeaders = headers(url, bearer, { Accept: "text/event-stream", "Mcp-Session-Id": sessionId });
+  const stream = await fetch(`${url}/mcp`, { headers: streamHeaders });
+  assert.equal(stream.status, 200);
+  await stream.text();
+  const timedOut = await waitForRequestEvent(server, (event) => event.method === "GET" && event.timeout_phase === "response_stream");
+  assert.equal(timedOut.wire_status, 200);
+  assert.equal(timedOut.status, 408); // legacy monitoring contract
+  assert.equal(timedOut.terminal_status, 408);
+  assert.equal(timedOut.terminal_reason, "request-timeout");
+  const disconnected = await fetch(`${url}/mcp`, { headers: streamHeaders });
+  assert.equal(disconnected.status, 200);
+  await disconnected.body.cancel();
+  const cancelled = await waitForRequestEvent(server, (event) => event.terminal_reason === "client-disconnect");
+  assert.equal(cancelled.wire_status, 200);
+  assert.equal(cancelled.timeout_phase, null);
+  assert.equal(cancelled.method, "GET");
+  // Request telemetry must not grow a payload, credential, or session identifier channel.
+  for (const event of requestEvents(server)) {
+    assert.deepEqual(Object.keys(event).sort(), ["event", "method", "status", "wire_status", "terminal_status", "terminal_reason", "timeout_phase", "duration_ms", "mcp_method", "client_id"].sort());
+    assert.ok(!JSON.stringify(event).includes(bearer));
+    assert.ok(!JSON.stringify(event).includes(sessionId));
+  }
+});
+
+test("request telemetry identifies an incomplete request body deadline", async (t) => {
+  const { directory, config } = await fixture();
+  const server = startServer(config, { MCP_HTTP_REQUEST_TIMEOUT_MS: "150" });
+  t.after(async () => { await server.stop(); await rm(directory, { recursive: true, force: true }); });
+  const url = await server.ready;
+  const response = await new Promise((resolveResponse, reject) => {
+    const request = httpRequest(`${url}/mcp`, {
+      method: "POST", headers: headers(url, token(), { "Content-Length": "100" }),
+    }, (res) => {
+      res.resume();
+      res.once("end", () => { request.destroy(); resolveResponse(res.statusCode); });
+    });
+    request.once("error", reject);
+    t.after(() => request.destroy());
+    request.write("{"); // Deliberately never finish the declared body.
+  });
+  assert.equal(response, 408);
+  const event = await waitForRequestEvent(server, (item) => item.timeout_phase === "body");
+  assert.equal(event.wire_status, 408);
+  assert.equal(event.terminal_status, 408);
+  assert.equal(event.terminal_reason, "request-timeout");
+});
+
+test("request telemetry identifies the transport deadline without logging tool arguments", async (t) => {
+  const { directory, config } = await fixture();
+  const bin = join(directory, "bin");
+  await mkdir(bin);
+  // Delay only the real metadata subprocess; configuration resolution stays real.
+  await writeFile(join(bin, "bash"), '#!/bin/sh\ncase "$1" in */commit-meta.sh) exec sleep 5 ;; esac\nexec /bin/bash "$@"\n');
+  await chmod(join(bin, "bash"), 0o755);
+  const server = startServer(config, {
+    PATH: `${bin}:${process.env.PATH}`,
+    MCP_HTTP_REQUEST_TIMEOUT_MS: "200",
+    MCP_REPOSITORY_ROOTS: directory,
+  });
+  t.after(async () => { await server.stop(); await rm(directory, { recursive: true, force: true }); });
+  const url = await server.ready;
+  const bearer = token();
+  const initialized = await fetch(`${url}/mcp`, { method: "POST", headers: headers(url, bearer), body: JSON.stringify(initialize()) });
+  await initialized.text();
+  const sessionId = initialized.headers.get("mcp-session-id");
+  const response = await fetch(`${url}/mcp`, {
+    method: "POST",
+    headers: headers(url, bearer, { "Mcp-Session-Id": sessionId, "MCP-Protocol-Version": "2025-11-25" }),
+    body: JSON.stringify({ jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "obsidian_commit_meta", arguments: { repository: directory } } }),
+  });
+  assert.equal(response.status, 408);
+  await response.text();
+  const event = await waitForRequestEvent(server, (item) => item.tool === "obsidian_commit_meta");
+  assert.equal(event.wire_status, 408);
+  assert.equal(event.terminal_status, 408);
+  assert.equal(event.timeout_phase, "transport");
+  assert.equal(event.terminal_reason, "request-timeout");
+  assert.ok(!JSON.stringify(event).includes(directory));
+  assert.ok(!JSON.stringify(event).includes(bearer));
+  assert.ok(!JSON.stringify(event).includes(sessionId));
+});
+
+test("disconnect before response headers keeps wire status null", async (t) => {
+  const { directory, config } = await fixture();
+  const server = startServer(config, { MCP_HTTP_REQUEST_TIMEOUT_MS: "2000" });
+  t.after(async () => { await server.stop(); await rm(directory, { recursive: true, force: true }); });
+  const url = await server.ready;
+  const request = httpRequest(`${url}/mcp`, {
+    method: "POST", headers: headers(url, token(), { "Content-Length": "100" }),
+  });
+  request.on("error", () => {});
+  t.after(() => request.destroy());
+  await new Promise((done) => request.write("{", done));
+  // The socket accepted the partial request, then the client leaves before headers.
+  await new Promise((done) => setTimeout(done, 50));
+  request.destroy();
+  const event = await waitForRequestEvent(server, (item) => item.terminal_reason === "client-disconnect");
+  assert.equal(event.wire_status, null);
+  assert.equal(event.timeout_phase, null);
+});

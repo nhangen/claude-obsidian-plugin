@@ -97,11 +97,16 @@ function requestSummary(message) {
   return summary;
 }
 
-function logRequest({ method, status, startedAt, clientId, summary = {} }) {
+function logRequest({ method, status, startedAt, clientId, summary = {}, response, wireStatus, terminalReason, timeoutPhase }) {
   const event = {
     event: "mcp-http-request",
     method: metricLabel(method),
     status,
+    // Keep status for existing monitor consumers; wire status can differ after SSE headers.
+    wire_status: wireStatus !== undefined ? wireStatus : response?.headersSent ? response.statusCode : null,
+    terminal_status: status,
+    terminal_reason: terminalReason ?? (status >= 400 ? "http-error" : "completed"),
+    timeout_phase: timeoutPhase ?? null,
     duration_ms: Math.max(0, Date.now() - startedAt),
     mcp_method: summary.mcpMethod ?? "unknown",
     client_id: metricLabel(clientId),
@@ -528,6 +533,8 @@ async function handleRequest(req, res, configuration) {
   let clientId = "unknown";
   let summary;
   let abortReason;
+  let timeoutPhase;
+  let wireStatusOnDisconnect;
   const activeSet = method === "GET" ? activeStreams : activeRequests;
   if (method !== "DELETE" && activeSet.size >= configuration.concurrencyLimit) {
     status = 429;
@@ -537,6 +544,7 @@ async function handleRequest(req, res, configuration) {
       status,
       startedAt,
       clientId,
+      response: res,
       summary: { rejectionReason: method === "GET" ? "active-stream-cap" : "active-request-cap" },
     });
     return;
@@ -544,6 +552,9 @@ async function handleRequest(req, res, configuration) {
   const controller = new AbortController();
   activeSet.add(controller);
   const abort = () => {
+    // A later error handler can call writeHead on an already closed socket.
+    // Preserve what was sent before disconnection, including no headers at all.
+    if (wireStatusOnDisconnect === undefined) wireStatusOnDisconnect = res.headersSent ? res.statusCode : null;
     abortReason ??= "transport-disconnect";
     controller.abort();
   };
@@ -560,7 +571,10 @@ async function handleRequest(req, res, configuration) {
     if (!["GET", "POST", "DELETE"].includes(method)) {
       throw new HttpBoundaryError(405, -32000, "Method not allowed");
     }
-    const bodyTimer = setTimeout(() => controller.abort(), configuration.requestTimeoutMs);
+    const bodyTimer = setTimeout(() => {
+      if (!controller.signal.aborted) timeoutPhase = "body";
+      controller.abort();
+    }, configuration.requestTimeoutMs);
     let body;
     try {
       body = await readRequestBody(req, configuration.maxBodyBytes, controller.signal);
@@ -605,11 +619,15 @@ async function handleRequest(req, res, configuration) {
       configuration.requestTimeoutMs,
       controller,
       configuration,
-      () => { abortReason ??= "stream-timeout"; },
+      () => {
+        if (!controller.signal.aborted) timeoutPhase = "transport";
+        abortReason ??= "stream-timeout";
+      },
     );
     status = response.status;
     if (method === "GET" && response.status === 408) scheduleSessionClose(session, configuration, "stream-timeout");
     const responseTimer = setTimeout(() => {
+      if (!controller.signal.aborted) timeoutPhase = "response_stream";
       abortReason ??= "stream-timeout";
       controller.abort();
     }, configuration.requestTimeoutMs);
@@ -636,7 +654,13 @@ async function handleRequest(req, res, configuration) {
     }
     if (controller.signal.aborted && session && method !== "GET") await closeSession(session, configuration, "request-aborted");
     activeSet.delete(controller);
-    logRequest({ method, status, startedAt, clientId, summary });
+    logRequest({
+      method, status, startedAt, clientId, summary, response: res, timeoutPhase,
+      wireStatus: wireStatusOnDisconnect,
+      terminalReason: timeoutPhase ? "request-timeout"
+        : controller.signal.aborted ? (abortReason === "transport-disconnect" ? "client-disconnect" : "request-aborted")
+        : undefined,
+    });
   }
 }
 
