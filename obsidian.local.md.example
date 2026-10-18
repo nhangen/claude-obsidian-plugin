@@ -25,6 +25,8 @@ domains:
   - Work
   - Personal
   - Learning
+summary_interval_secs: 900
+summary_min_messages: 3
 ---
 
 # Obsidian Plugin Config

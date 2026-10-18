@@ -68,11 +68,12 @@ chmod +x "${BIN_DIR}/claude"
 cat > "${BIN_DIR}/nohup" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
-[ "$#" -eq 8 ] &&
+[ "$#" -eq 10 ] &&
   [ "$1" = "python3" ] &&
   [ "$2" = "${EXPECTED_SUMMARIZER:?}" ] &&
   [ "$4" = "${EXPECTED_CONFIG:?}" ] &&
   [ "$5" = "${EXPECTED_VAULT:?}" ] &&
+  [ "$9" = "false" ] && [ -z "${10}" ] &&
   [ -f "$3" ] && [ -s "$3" ] && [ -f "$6" ] || {
     printf 'stub: unexpected nohup argv:' >&2
     printf ' <%s>' "$@" >&2

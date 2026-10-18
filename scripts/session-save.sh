@@ -92,6 +92,12 @@ value = json.load(sys.stdin).get("session_id", "")
 print(value if isinstance(value, str) else "")
 ') || exit 0
 
+CAPTURE_CWD=$(printf '%s' "$HOOK_JSON" | python3 -c '
+import json, sys
+value = json.load(sys.stdin).get("cwd", "")
+print(value if isinstance(value, str) else "")
+') || exit 0
+
 FILE_SIZE=$(wc -c < "$TRANSCRIPT_PATH" 2>/dev/null | tr -d ' ')
 if [ -z "$FILE_SIZE" ] || [ "$FILE_SIZE" -lt 200 ]; then
   exit 0
@@ -108,6 +114,6 @@ if ! cp "$TRANSCRIPT_PATH" "$TMPFILE"; then
   exit 0
 fi
 
-nohup python3 "${SCRIPT_DIR}/lib/session-capture.py" "$TMPFILE" "$CONFIG_FILE" "$VAULT_PATH" "$TRANSCRIPT_PATH" "$SESSION_ID" "$RETRY_REQUESTED" &>/dev/null &
+nohup python3 "${SCRIPT_DIR}/lib/session-capture.py" "$TMPFILE" "$CONFIG_FILE" "$VAULT_PATH" "$TRANSCRIPT_PATH" "$SESSION_ID" "$RETRY_REQUESTED" "$CAPTURE_REQUESTED" "$CAPTURE_CWD" &>/dev/null &
 
 exit 0

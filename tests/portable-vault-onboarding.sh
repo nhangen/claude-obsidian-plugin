@@ -166,7 +166,7 @@ test_rendered_setup_choices() {
   cat > "$case_dir/bin/nohup" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
-[ "$#" -eq 8 ] && [ "$1" = python3 ] &&
+[ "$#" -eq 10 ] && [ "$1" = python3 ] &&
   [ "$2" = "${EXPECTED_SUMMARIZER:?}" ] && [ -f "$3" ] &&
   [ "$4" = "${OBSIDIAN_LOCAL_MD:?}" ] && [ "$5" = "${EXPECTED_VAULT:?}" ] || exit 99
 printf 'save\n' >> "${CALLS:?}"
