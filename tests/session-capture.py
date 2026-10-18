@@ -30,7 +30,7 @@ import json, os, pathlib, sys, time
 case = pathlib.Path(os.environ['CAPTURE_CASE'])
 with (case / 'calls').open('a') as stream:
     stream.write(json.dumps(sys.argv[1:]) + '\\n')
-sys.stdin.read()
+(case / 'provider-input').write_text(sys.stdin.read())
 if os.environ.get('BLOCK_PROVIDER') == '1':
     (case / 'ready').touch()
     deadline = time.monotonic() + 15
@@ -57,7 +57,7 @@ print(json.dumps({"type":"result", "subtype":"success", "is_error":False, "resul
     def configure(self, capture="stop", auto_save="true"):
         self.config.write_text(f"---\nvault_path: {self.case}/vault\n"
                                f"auto_save: {auto_save}\nsummary_capture: {capture}\n"
-                               "keeper_autostart: false\n---\n")
+                               "keeper_autostart: false\nsummary_interval_secs: 0\nsummary_min_messages: 1\n---\n")
 
     def message(self, uuid, text):
         with self.transcript.open("a") as stream:
@@ -66,7 +66,7 @@ print(json.dumps({"type":"result", "subtype":"success", "is_error":False, "resul
                                          {"type": "text", "text": text}]}}) + "\n")
 
     def start(self, *args, session="fixture-session", **env):
-        payload = {"transcript_path": str(self.transcript), "session_id": session}
+        payload = {"transcript_path": str(self.transcript), "session_id": session, "cwd": str(self.case / "repo")}
         process = subprocess.Popen(
             ["bash", "-c", 'trap wait EXIT; source "$0" "$@"',
              str(ROOT / "scripts/session-save.sh"), *args],
@@ -107,6 +107,125 @@ print(json.dumps({"type":"result", "subtype":"success", "is_error":False, "resul
                 self.fail("capture fixture did not reach synchronization point")
             time.sleep(0.01)
 
+    def automatic_defaults(self):
+        self.config.write_text(self.config.read_text().replace(
+            "summary_interval_secs: 0", "summary_interval_secs: 900").replace(
+            "summary_min_messages: 1", "summary_min_messages: 3"))
+
+    def test_routine_stops_do_not_invoke_provider(self):
+        self.transcript.write_text("")
+        self.message("ack", "Thanks, that makes sense.")
+        self.message("question", "What changed?")
+        self.run_hook()
+        self.assertFalse(self.calls())
+        self.assertFalse(self.receipts())
+
+    def test_research_batches_without_git_then_cooldown_preserves_pending(self):
+        self.automatic_defaults()
+        self.run_hook()
+        self.assertFalse(self.calls())
+        self.message("second", "Research observation: the evidence is incomplete and the source needs verification. " * 2)
+        self.run_hook()
+        self.assertFalse(self.calls())
+        self.message("third", "Research decision: preserve the uncertainty and compare the competing explanations. " * 2)
+        self.run_hook()
+        self.assertEqual(len(self.calls()), 1)
+        self.message("fourth", "A further research finding changes the interpretation of the previous comparison. " * 2)
+        self.run_hook()
+        self.assertEqual(len(self.calls()), 1)
+        self.run_hook("--capture")
+        self.assertEqual(len(self.calls()), 2)
+        self.assertIn("further research finding", (self.case / "provider-input").read_text())
+
+    def test_git_changes_qualify_and_successful_capture_uses_only_new_activity(self):
+        self.automatic_defaults()
+        repo = self.case / "repo"
+        repo.mkdir()
+        subprocess.run(["git", "init", str(repo)], check=True, capture_output=True)
+        subprocess.run(["git", "-C", str(repo), "-c", "user.name=Fixture", "-c",
+                        "user.email=fixture@example.invalid", "-c", "core.hooksPath=/dev/null",
+                        "commit", "--allow-empty", "-m", "Fixture baseline"],
+                       check=True, capture_output=True)
+        (repo / "changed.txt").write_text("fixture change")
+        self.run_hook()
+        self.assertEqual(len(self.calls()), 1)
+        payload = (self.case / "provider-input").read_text()
+        self.assertIn("local_activity_digest", payload)
+        self.assertIn("changed.txt", payload)
+        # Expire the checkpoint without sleeping or introducing a production clock override.
+        state, = (self.case / "state").glob("**/activity.json")
+        checkpoint = json.loads(state.read_text())
+        checkpoint["last_attempt"] = 0
+        state.write_text(json.dumps(checkpoint))
+        self.message("second", "The dirty Git state is unchanged, so one intermediate response must not trigger a call. " * 2)
+        self.run_hook()
+        self.assertEqual(len(self.calls()), 1)
+        for uuid in ("third", "fourth"):
+            self.message(uuid, "New research without another repository change still deserves a later checkpoint. " * 2)
+        self.run_hook()
+        self.assertEqual(len(self.calls()), 2)
+        payload = (self.case / "provider-input").read_text()
+        self.assertNotIn("Decided to preserve the validated result", payload)
+        self.assertIn("New research", payload)
+        checkpoint = json.loads(state.read_text())
+        checkpoint["last_attempt"] = 0
+        state.write_text(json.dumps(checkpoint))
+        subprocess.run(["git", "-C", str(repo), "add", "changed.txt"], check=True)
+        subprocess.run(["git", "-C", str(repo), "-c", "user.name=Fixture", "-c",
+                        "user.email=fixture@example.invalid", "-c", "core.hooksPath=/dev/null",
+                        "commit", "-m", "Fixture checkpoint commit"], check=True, capture_output=True)
+        self.message("after-commit", "A committed result must still qualify even though the working tree is now clean. " * 2)
+        self.run_hook()
+        self.assertEqual(len(self.calls()), 3)
+        self.assertIn("Fixture checkpoint commit", (self.case / "provider-input").read_text())
+
+    def test_failed_call_keeps_unsummarized_activity(self):
+        self.run_hook(FAIL_PROVIDER="1")
+        self.message("second", "New evidence after the failure must not discard earlier unsummarized decisions. " * 2)
+        self.run_hook()
+        self.assertEqual(len(self.calls()), 2)
+        self.assertIn("Decided to preserve", (self.case / "provider-input").read_text())
+
+    def test_different_boundaries_share_in_flight_session_lock(self):
+        first = self.start(BLOCK_PROVIDER="1")
+        self.wait_for(lambda: (self.case / "ready").exists())
+        self.message("second", "A second changed boundary while capture is running must not start another model. " * 2)
+        self.finish(self.start())
+        self.assertEqual(len(self.calls()), 1)
+        (self.case / "release").touch()
+        self.finish(first)
+        self.run_hook()
+        self.assertEqual(len(self.calls()), 2)
+
+    def test_automatic_digest_is_bounded_redacted_and_preserves_original(self):
+        for i in range(16):
+            self.message(str(i), "Decision head " + "🦉" * 4000 + " API_KEY=fictional-automatic-secret tail evidence")
+        original = self.transcript.read_bytes()
+        self.run_hook()
+        self.assertEqual(len(self.calls()), 1)
+        self.assertEqual(original, self.transcript.read_bytes())
+        payload = (self.case / "provider-input").read_text()
+        metadata = json.loads(payload.splitlines()[0])
+        self.assertLessEqual(metadata["source_bytes"], 24576)
+        self.assertNotIn("fictional-automatic-secret", payload)
+        self.assertIn("[REDACTED]", payload)
+        self.assertIn("local digest excerpt omitted", payload)
+        state = "".join(p.read_text() for p in (self.case / "state").glob("**/*.json"))
+        self.assertNotIn("Decision head", state)
+        self.assertNotIn("tail evidence", state)
+
+    def test_invalid_activity_configuration_and_state_fail_closed(self):
+        self.config.write_text(self.config.read_text().replace("summary_interval_secs: 0", "summary_interval_secs: typo"))
+        self.run_hook()
+        self.assertFalse(self.calls())
+        self.configure()
+        self.run_hook()
+        state, = (self.case / "state").glob("**/activity.json")
+        state.write_text("[]")
+        self.message("second", "New evidence with corrupt activity state must never silently bypass the gate. " * 2)
+        self.run_hook()
+        self.assertEqual(len(self.calls()), 1)
+
     def test_paired_hooks_and_late_instrumentation_summarize_once(self):
         first = self.start(BLOCK_PROVIDER="1")
         self.wait_for(lambda: (self.case / "ready").exists())
@@ -135,11 +254,11 @@ print(json.dumps({"type":"result", "subtype":"success", "is_error":False, "resul
 
     def test_new_message_boundary_is_not_suppressed(self):
         self.run_hook()
-        self.message("second", "Final commit abc1234 passed the regression fixture.")
+        self.message("second", "Final commit abc1234 passed the regression fixture. The local mock-data checks passed and the result was recorded.")
         self.run_hook()
         self.assertEqual(len(self.calls()), 2)
         self.assertEqual(len(self.receipts()), 2)
-        self.message("second", "Corrected the final result: the live rollout is still unverified.")
+        self.message("second", "Corrected the final result: the live rollout is still unverified. Only local mock-data checks were run and passed.")
         self.run_hook()
         self.assertEqual(len(self.calls()), 3)
 

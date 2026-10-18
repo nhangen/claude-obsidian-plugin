@@ -3,12 +3,15 @@ import fcntl
 import hashlib
 import json
 import os
+import runpy
 from pathlib import Path
 import subprocess
 import sys
 import tempfile
 import time
 import uuid
+
+checkpoint = runpy.run_path(str(Path(__file__).with_name("activity_gate.py")))["checkpoint"]
 
 
 def digest(value):
@@ -78,7 +81,18 @@ def prepare_state(vault, source, session_id):
     return source_id, state, records
 
 
-def capture(snapshot, config, vault, source, session_id, retry):
+def capture(snapshot, config, vault, source, session_id, retry, forced=False, cwd=""):
+    _, state, _ = prepare_state(vault, source, session_id)
+    descriptor = os.open(state / "activity.lock", os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+    with os.fdopen(descriptor, "r+") as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return 0
+        return capture_locked(snapshot, config, vault, source, session_id, retry, forced, cwd, lock.fileno())
+
+
+def capture_locked(snapshot, config, vault, source, session_id, retry, forced, cwd, activity_fd):
     source_id, state, records = prepare_state(vault, source, session_id)
     event = {"source_session_hash": source_id, "time": time.time(),
              "provider_success": None, "usage": None}
@@ -120,6 +134,17 @@ def capture(snapshot, config, vault, source, session_id, retry):
                 write_record(state / "last-event.json", dict(event, status="deduplicated",
                              previous_status=previous.get("status")))
                 return 0
+        try:
+            status, facts, next_state = checkpoint(snapshot, config, state, cwd, forced or retry)
+        except (OSError, ValueError, TypeError):
+            write_record(state / "last-event.json", dict(event, status="activity_error"))
+            raise
+        if status != "eligible":
+            write_record(state / "last-event.json", dict(event, status=status, activity=facts))
+            return 0
+        activity_path = state / "activity.json"
+        previous_activity = json.loads(activity_path.read_text()) if activity_path.exists() else {}
+        write_record(activity_path, dict(previous_activity, last_attempt=next_state["last_attempt"]))
         receipt = dict(event, schema_version=1, invocation_id=str(uuid.uuid4()), status="running",
                        worker_pid=os.getpid(), attempt=previous.get("attempt", 0) + 1,
                        snapshot_bytes=snapshot.stat().st_size, dedup_result="claimed",
@@ -131,10 +156,12 @@ def capture(snapshot, config, vault, source, session_id, retry):
                 ["bash", str(Path(__file__).resolve().parents[1] / "session-summarize.sh"),
                  str(snapshot), str(config), str(vault), str(source)],
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                pass_fds=(lock.fileno(),), check=False)
+                pass_fds=(lock.fileno(), activity_fd), check=False)
             exit_code = result.returncode
         except OSError:
             exit_code = 127
+        if exit_code == 0:
+            write_record(activity_path, next_state)
         receipt.update(status="process_succeeded" if exit_code == 0 else "process_failed",
                        exit_code=exit_code, finished_at=time.time(),
                        retry_required=exit_code != 0)
@@ -154,12 +181,13 @@ def main():
             print("session-capture: cannot initialize capture state; check XDG_STATE_HOME "
                   "or HOME/.local/state and directory permissions", file=sys.stderr)
             return 1
-    snapshot, config, vault, source, session_id, retry = sys.argv[1:]
+    snapshot, config, vault, source, session_id, retry = sys.argv[1:7]
+    forced, cwd = (sys.argv[7:] or ["false", ""])
     try:
-        if retry not in ("true", "false"):
+        if retry not in ("true", "false") or forced not in ("true", "false"):
             raise ValueError("invalid retry mode")
         return capture(Path(snapshot), Path(config), Path(vault), Path(source),
-                       session_id, retry == "true")
+                       session_id, retry == "true", forced == "true", cwd)
     except (OSError, ValueError, TypeError):
         print("session-capture: capture failed; inspect private capture state before retrying",
               file=sys.stderr)

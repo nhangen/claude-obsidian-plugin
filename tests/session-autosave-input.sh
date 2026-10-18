@@ -53,7 +53,7 @@ print(json.dumps({"type": "result", "subtype": "success",
     def run(hook=False, save=False):
         capture.unlink(missing_ok=True)
         if hook:
-            subprocess.run(["bash", "-c", 'trap wait EXIT; source "$0"',
+            subprocess.run(["bash", "-c", 'trap wait EXIT; source "$0" --capture',
                             str(root / "scripts/session-save.sh")],
                            input=json.dumps({"transcript_path": str(source)}),
                            text=True, env=dict(env, SAVE_NOTE=str(save).lower()), check=True)

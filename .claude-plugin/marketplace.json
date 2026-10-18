@@ -9,7 +9,7 @@
     {
       "name": "obsidian",
       "description": "Obsidian vault integration with automatic commit-context capture for Claude Code and an installed safe capture skill for Codex.",
-      "version": "1.23.0",
+      "version": "1.24.0",
       "author": {
         "name": "nhangen"
       },
