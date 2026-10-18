@@ -89,6 +89,34 @@ fi
     assert meta["source_bytes"] > meta["payload_bytes"] * 100
     assert not meta["context_incomplete"]
 
+    credential_text = (
+        'export API_KEY="fictional-quoted-key"; KEEP after double quote\n'
+        "PASSWORD='fictional multiword password'; KEEP after single quote\n"
+        'CLIENT_SECRET="fictional \\"embedded\\" quotes and \\\\ slashes"; KEEP escaped boundary\n'
+        'AUTH_TOKEN="fictional\nmultiline credential"; KEEP multiline boundary\n'
+        'Authorization: Bearer\tFICTIONALBEARERabcdefghijklmnopqrs\n'
+        'KEEP credential context'
+    )
+    credential_text += ('API_SECRET="fictional' + chr(92) + chr(10)
+                        + 'continued-secret"; KEEP continued boundary\n')
+    write([message("user", credential_text),
+           message("user", [{"type": "tool_result", "tool_use_id": "quoted", "content":
+                            'PASSWORD="fictional result password"; KEEP result boundary'}])])
+    meta, events, text = run(hook=True)
+    decoded = "\n".join(event["text"] for event in events)
+    for secret in ("fictional-quoted-key", "fictional multiword password", "fictional",
+                   "FICTIONALBEARERabcdefghijklmnopqrs"):
+        assert secret not in decoded, "credential survived production extraction"
+    for context in ("KEEP after double quote", "KEEP after single quote", "KEEP escaped boundary",
+                    "KEEP multiline boundary", "KEEP credential context", "KEEP result boundary"):
+        assert context in decoded, "redaction consumed adjacent context"
+    assert 'CLIENT_SECRET=[REDACTED]; KEEP escaped boundary' in decoded
+    assert 'AUTH_TOKEN=[REDACTED]; KEEP multiline boundary' in decoded
+    assert 'PASSWORD=[REDACTED]; KEEP result boundary' in decoded
+    assert 'API_SECRET=[REDACTED]; KEEP continued boundary' in decoded
+    assert 'Bearer\t[REDACTED]' in decoded
+    assert not meta["context_incomplete"]
+
     write([message("user", "Before compaction, no longer needed."),
            message("user", "Prior decision: use atomic replacement. Commit abcdef1234567890.", isCompactSummary=True),
            message("assistant", "New delta: offline fixtures pass.")])

@@ -14,7 +14,7 @@ FILE="${1:-}"
 command -v python3 >/dev/null 2>&1 || { echo "redact-secrets: python3 required" >&2; exit 3; }
 
 python3 - "$FILE" <<'PY' || exit 1
-import re, sys
+import json, re, sys
 
 path = sys.argv[1]
 text = open(path, encoding="utf-8", errors="surrogateescape").read()
@@ -46,8 +46,6 @@ def redact_escaped_values(source):
     output.append(source[cursor:])
     return "".join(output)
 
-text = redact_escaped_values(text)
-
 rules = [
     # PEM private keys, complete or truncated (newlines may be literal or JSON-escaped)
     (re.compile(r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----.*?-----END [A-Z0-9 ]*PRIVATE KEY-----", re.S),
@@ -68,13 +66,39 @@ rules = [
      r"\1" + R),
     (re.compile(rf"('(?:{credential_fields})'\s*:\s*')((?:\\.|[^'\\])*)", re.I),
      r"\1" + R),
-    # ENV-style assignments with secret-ish names
-    (re.compile(r"""((?:[A-Za-z0-9_]*(?:TOKEN|SECRET|PASSWORD|PASSWD|API_KEY|PRIVATE_KEY)[A-Za-z0-9_]*)\s*[=:]\s*["']?)([^\s"'\\<>]{8,})""", re.I),
+    # Quoted values may contain spaces, newlines, and escaped quotes.
+    (re.compile(r"""((?:[A-Za-z0-9_]*(?:TOKEN|SECRET|PASSWORD|PASSWD|API_KEY|PRIVATE_KEY)[A-Za-z0-9_]*)\s*[=:]\s*)(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^\s"'\\<>;|&]{8,})""", re.I | re.S),
      r"\1" + R),
 ]
 
-for rx, repl in rules:
-    text = rx.sub(repl, text)
+def redact_text(value):
+    value = redact_escaped_values(value)
+    for rx, repl in rules:
+        value = rx.sub(repl, value)
+    return value
+
+
+def redact_value(value):
+    if isinstance(value, str):
+        return redact_text(value)
+    if isinstance(value, list):
+        return [redact_value(item) for item in value]
+    if isinstance(value, dict):
+        return {key: redact_value(item) for key, item in value.items()}
+    return value
+
+
+lines = []
+for line in text.split("\n"):
+    try:
+        value = json.loads(line)
+    except ValueError:
+        lines.append(line)
+    else:
+        # Decode JSON escapes before matching shell quoting or bearer whitespace.
+        lines.append(json.dumps(redact_value(value), ensure_ascii=False,
+                               separators=(",", ":")))
+text = redact_text("\n".join(lines))
 
 if text != orig:
     open(path, "w", encoding="utf-8", errors="surrogateescape").write(text)
