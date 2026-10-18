@@ -164,13 +164,15 @@ def prepare(source, target, context=None, sent_path=None):
 
     git_rows = []
     if git and git.get("available"):
-        git_rows = redact([{"kind": "local_git_evidence", "text": json.dumps(git, ensure_ascii=False)}])
+        evidence = {"scope": "Observed Git state, not proof of authorship, successful tests or a merge.",
+                    **git}
+        git_rows = redact([{"kind": "local_git_evidence", "text": json.dumps(evidence, ensure_ascii=False)}])
     reserved = sum(len(encode(row).encode("utf-8")) for row in git_rows)
 
     # With carry-forward the oldest evidence goes first and the newest stays pending.
     budget = MAX_INPUT - 2048 - reserved
     total = sum(unit[3] for unit in units)
-    while total > budget:
+    while units and total > budget:
         index = -1 if seen is not None else (
             1 if has_summary and len(units) > 1 and units[0][1] == "previous_summary" else 0)
         total -= units.pop(index)[3]
@@ -181,6 +183,7 @@ def prepare(source, target, context=None, sent_path=None):
     metadata = {"kind": "extraction_metadata", "policy": "autosave-v1",
                 "max_input_bytes": MAX_INPUT, "max_record_bytes": MAX_RECORD,
                 "max_events": MAX_EVENTS, "max_text_bytes": MAX_TEXT,
+                "max_event_bytes": MAX_EVENT_BYTES,
                 "source_bytes": source_bytes, "payload_bytes": 0,
                 "mode": "previous_summary_plus_delta" if has_summary else "bounded_conversation",
                 "carry_forward": seen is not None,

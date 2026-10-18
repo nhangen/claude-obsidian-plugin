@@ -12,6 +12,7 @@ import time
 import uuid
 
 checkpoint = runpy.run_path(str(Path(__file__).with_name("activity_gate.py")))["checkpoint"]
+redact = runpy.run_path(str(Path(__file__).with_name("autosave-input.py")))["redact"]
 
 
 def digest(value):
@@ -53,18 +54,27 @@ def boundary(snapshot):
     return digest(json.dumps(list(messages.values()), sort_keys=True, separators=(",", ":")))
 
 
+def redacted_git(git):
+    keys = [key for key, value in git.items() if isinstance(value, str)]
+    rows = redact([{"kind": "git", "text": git[key]} for key in keys])
+    return dict(git, **{key: row["text"] for key, row in zip(keys, rows)})
+
+
 def acknowledged(next_state, sent_path):
+    status = "acknowledged"
     try:
         sent = json.loads(sent_path.read_text(encoding="utf-8"))["sent"]
         if not isinstance(sent, list) or any(not isinstance(v, str) for v in sent):
             raise ValueError("invalid sent receipt")
+    except FileNotFoundError:
+        sent, status = [], "receipt_missing"
     except (OSError, ValueError, KeyError, TypeError):
-        sent = []
+        sent, status = [], "receipt_invalid"
     delivered = set(sent) | set(next_state["seen"])
     state = {key: value for key, value in next_state.items() if key != "current"}
     state["seen"] = [fp for fp in next_state["current"]
                      if fp in delivered]
-    return state
+    return state, status
 
 
 def private_directory(path):
@@ -164,28 +174,41 @@ def capture_locked(snapshot, config, vault, source, session_id, retry, forced, c
         sent_path.unlink(missing_ok=True)
         child_env = dict(os.environ, AUTOSAVE_SENT_FILE=str(sent_path))
         child_env.pop("AUTOSAVE_CONTEXT_FILE", None)
-        if context is not None:
-            write_record(context_path, context)
-            child_env["AUTOSAVE_CONTEXT_FILE"] = str(context_path)
         receipt = dict(event, schema_version=1, invocation_id=str(uuid.uuid4()), status="running",
                        worker_pid=os.getpid(), attempt=previous.get("attempt", 0) + 1,
                        snapshot_bytes=snapshot.stat().st_size, dedup_result="claimed",
                        retry_required=False, stage="summarizer_process")
-        write_record(receipt_path, receipt)
+        ack = None
         try:
-            # The child retains ownership if this supervisor is killed mid-call.
-            result = subprocess.run(
-                ["bash", str(Path(__file__).resolve().parents[1] / "session-summarize.sh"),
-                 str(snapshot), str(config), str(vault), str(source)],
-                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                pass_fds=(lock.fileno(), activity_fd), env=child_env, check=False)
-            exit_code = result.returncode
-        except OSError:
-            exit_code = 127
-        if exit_code == 0:
-            write_record(activity_path, acknowledged(next_state, sent_path))
-        context_path.unlink(missing_ok=True)
-        sent_path.unlink(missing_ok=True)
+            if context is not None:
+                try:
+                    write_record(context_path, dict(context, git=redacted_git(context["git"])))
+                except subprocess.SubprocessError:
+                    write_record(state / "last-event.json", dict(event, status="redaction_error"))
+                    return 1
+                child_env["AUTOSAVE_CONTEXT_FILE"] = str(context_path)
+            write_record(receipt_path, receipt)
+            try:
+                # The child retains ownership if this supervisor is killed mid-call.
+                result = subprocess.run(
+                    ["bash", str(Path(__file__).resolve().parents[1] / "session-summarize.sh"),
+                     str(snapshot), str(config), str(vault), str(source)],
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                    pass_fds=(lock.fileno(), activity_fd), env=child_env, check=False)
+                exit_code = result.returncode
+            except OSError:
+                exit_code = 127
+            if exit_code == 0:
+                try:
+                    acknowledged_state, ack = acknowledged(next_state, sent_path)
+                    write_record(activity_path, acknowledged_state)
+                except OSError:
+                    ack = "ack_write_failed"
+        finally:
+            context_path.unlink(missing_ok=True)
+            sent_path.unlink(missing_ok=True)
+        if ack:
+            receipt["ack"] = ack
         receipt.update(status="process_succeeded" if exit_code == 0 else "process_failed",
                        exit_code=exit_code, finished_at=time.time(),
                        retry_required=exit_code != 0)

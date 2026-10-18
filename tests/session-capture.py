@@ -38,6 +38,10 @@ if os.environ.get('BLOCK_PROVIDER') == '1':
         if time.monotonic() > deadline:
             sys.exit(99)
         time.sleep(0.01)
+if os.environ.get('AUTOSAVE_CONTEXT_FILE'):
+    (case / 'context-copy').write_text(pathlib.Path(os.environ['AUTOSAVE_CONTEXT_FILE']).read_text())
+if os.environ.get('DROP_RECEIPT') == '1':
+    pathlib.Path(os.environ['AUTOSAVE_SENT_FILE']).unlink()
 if os.environ.get('FAIL_PROVIDER') == '1':
     print('sensitive provider error must never enter receipts', file=sys.stderr)
     sys.exit(23)
@@ -158,6 +162,11 @@ print(json.dumps({"type":"result", "subtype":"success", "is_error":False,
         self.assertIn("local_git_evidence", payload)
         self.assertIn("changed.txt", payload)
         self.assertNotIn("fictional-git-secret", payload)
+        self.assertIn("not proof of authorship", payload)
+        context = (self.case / "context-copy").read_text()
+        self.assertIn("changed.txt", context)
+        self.assertNotIn("fictional-git-secret", context)
+        self.assertFalse(list((self.case / "state").glob("**/context-*.json")))
         # Expire the checkpoint without sleeping or introducing a production clock override.
         state, = (self.case / "state").glob("**/activity.json")
         checkpoint = json.loads(state.read_text())
@@ -288,6 +297,37 @@ print(json.dumps({"type":"result", "subtype":"success", "is_error":False,
         self.assertGreater(metadata["retained_events"], 0)
         self.assertEqual(self.seen_count(), metadata["sent_events"])
         self.assertFalse(list((self.case / "vault").glob("**/*gate-fixture.md")))
+
+    def test_oversized_event_is_clipped_flagged_and_acknowledged(self):
+        self.transcript.write_text("")
+        self.message("huge", "HUGE-HEAD " + "note " * 9000 + " HUGE-TAIL")
+        self.fill("small", 3, 500)
+        self.run_hook()
+        metadata = self.provider_rows()[0]
+        self.assertEqual(metadata["omissions"]["clipped_events"], 1)
+        self.assertTrue(metadata["context_incomplete"])
+        self.assertIn("HUGE-TAIL", self.provider_text())
+        self.assertEqual(self.seen_count(), 4)
+
+    def test_missing_sent_receipt_acknowledges_nothing_and_is_recorded(self):
+        self.transcript.write_text("")
+        self.fill("dropped", 4, 500)
+        self.run_hook(DROP_RECEIPT="1")
+        self.assertEqual(self.seen_count(), 0)
+        self.assertEqual({r["ack"] for r in self.receipts()}, {"receipt_missing"})
+
+    def test_forced_capture_over_budget_acknowledges_only_what_was_sent(self):
+        self.transcript.write_text("")
+        for i in range(14):
+            self.message(f"big{i}", f"FACT-{i:02d} " + "note " * 1400)
+        self.run_hook("--capture")
+        metadata = self.provider_rows()[0]
+        self.assertFalse(metadata["carry_forward"])
+        self.assertTrue(metadata["context_incomplete"])
+        self.assertLess(metadata["sent_events"], 14)
+        self.assertEqual(self.seen_count(), metadata["sent_events"])
+        self.assertIn("FACT-13", self.provider_text())
+        self.assertNotIn("FACT-00", self.provider_text())
 
     def test_failed_capture_acknowledges_nothing(self):
         self.transcript.write_text("")
