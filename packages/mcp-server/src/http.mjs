@@ -313,7 +313,9 @@ function touchSession(session, configuration) {
 }
 
 function reviveSession(session) {
-  if (session.closed || !session.disconnectTimer) return;
+  if (session.closed) return;
+  session.pendingDisconnect = false;
+  if (!session.disconnectTimer) return;
   clearTimeout(session.disconnectTimer);
   session.disconnectTimer = undefined;
   session.disconnectReason = undefined;
@@ -331,6 +333,11 @@ function scheduleSessionClose(session, configuration, reason) {
   if (session.disconnectTimer) return;
   session.disconnectTimer = setTimeout(() => {
     session.disconnectTimer = undefined;
+    if (session.closed) return;
+    if ((session.inFlight ?? 0) > 0) {
+      session.pendingDisconnect = true;
+      return;
+    }
     const closeReason = session.disconnectReason ?? reason;
     session.disconnectReason = undefined;
     void closeSession(session, configuration, closeReason);
@@ -365,6 +372,8 @@ function createSession(configuration, auth) {
     expiryTimer: undefined,
     disconnectTimer: undefined,
     disconnectReason: undefined,
+    inFlight: 0,
+    pendingDisconnect: false,
     reservationReleased: false,
     closed: false,
     closeReason: undefined,
@@ -381,6 +390,7 @@ function closeSessionState(session, configuration, reason) {
   releaseSessionReservation(session);
   session.closed = true;
   session.closeReason = reason;
+  session.pendingDisconnect = false;
   if (session.expiryTimer) clearTimeout(session.expiryTimer);
   if (session.disconnectTimer) clearTimeout(session.disconnectTimer);
   session.disconnectTimer = undefined;
@@ -564,12 +574,23 @@ async function handleRequest(req, res, configuration) {
   });
   let provisionalSession;
   let session;
+  let inFlightTracked = false;
   try {
     const requestUrl = validateTransportBoundary(req, configuration);
     const auth = validateToken(req, configuration);
     clientId = auth.subject;
     if (!["GET", "POST", "DELETE"].includes(method)) {
       throw new HttpBoundaryError(405, -32000, "Method not allowed");
+    }
+    const sessionId = req.headers["mcp-session-id"];
+    const normalizedSessionId = Array.isArray(sessionId) ? undefined : sessionId;
+    session = normalizedSessionId ? sessions.get(normalizedSessionId) : undefined;
+    if (normalizedSessionId && !session) throw new HttpBoundaryError(404, -32001, "Session not found");
+    if (session && session.fingerprint !== auth.fingerprint) throw new HttpBoundaryError(403, -32000, "Forbidden");
+    if (session && method === "DELETE") session.closeReason = "client-delete";
+    if (session) {
+      session.inFlight = (session.inFlight ?? 0) + 1;
+      inFlightTracked = true;
     }
     const bodyTimer = setTimeout(() => {
       if (!controller.signal.aborted) timeoutPhase = "body";
@@ -585,12 +606,6 @@ async function handleRequest(req, res, configuration) {
     const parsedBody = method === "POST" ? parseJsonBody(body) : undefined;
     summary = requestSummary(parsedBody);
     if (parsedBody !== undefined) enforceMessageScopes(parsedBody, auth);
-    const sessionId = req.headers["mcp-session-id"];
-    const normalizedSessionId = Array.isArray(sessionId) ? undefined : sessionId;
-    session = normalizedSessionId ? sessions.get(normalizedSessionId) : undefined;
-    if (normalizedSessionId && !session) throw new HttpBoundaryError(404, -32001, "Session not found");
-    if (session && session.fingerprint !== auth.fingerprint) throw new HttpBoundaryError(403, -32000, "Forbidden");
-    if (session && method === "DELETE") session.closeReason = "client-delete";
     if (!session) {
       const messages = Array.isArray(parsedBody) ? parsedBody : [parsedBody];
       const initializing = method === "POST" && messages.length === 1 && messages[0]?.method === "initialize";
@@ -609,6 +624,8 @@ async function handleRequest(req, res, configuration) {
       provisionalSession = createSession(configuration, auth);
       await provisionalSession.server.connect(provisionalSession.transport);
       session = provisionalSession;
+      session.inFlight = (session.inFlight ?? 0) + 1;
+      inFlightTracked = true;
     }
     touchSession(session, configuration);
     const request = webRequest(req, requestUrl, body, controller.signal);
@@ -653,6 +670,15 @@ async function handleRequest(req, res, configuration) {
       }
     }
     if (controller.signal.aborted && session && method !== "GET") await closeSession(session, configuration, "request-aborted");
+    if (inFlightTracked && session) {
+      session.inFlight = Math.max(0, (session.inFlight ?? 0) - 1);
+      if (session.inFlight === 0 && session.pendingDisconnect && !session.closed) {
+        session.pendingDisconnect = false;
+        const closeReason = session.disconnectReason ?? "stream-timeout";
+        session.disconnectReason = undefined;
+        await closeSession(session, configuration, closeReason);
+      }
+    }
     activeSet.delete(controller);
     logRequest({
       method, status, startedAt, clientId, summary, response: res, timeoutPhase,
