@@ -308,22 +308,34 @@ function touchSession(session, configuration) {
   if (!session.id || session.closed) return;
   if (session.expiryTimer) clearTimeout(session.expiryTimer);
   const deadline = Math.min(session.absoluteExpiresAt, Date.now() + configuration.sessionTtlMs);
-  session.expiryTimer = setTimeout(() => void closeSession(session, configuration, "ttl-expired"), Math.max(1, deadline - Date.now()));
+  session.expiryTimer = setTimeout(() => {
+    session.expiryTimer = undefined;
+    if (session.closed) return;
+    if (session.inFlight > 0) {
+      session.pendingDisconnect = true;
+      session.disconnectReason ??= "ttl-expired";
+      logSession({ action: "disconnect-deferred", session, configuration, reason: session.disconnectReason, inFlight: session.inFlight });
+      return;
+    }
+    void closeSession(session, configuration, "ttl-expired");
+  }, Math.max(1, deadline - Date.now()));
   session.expiryTimer.unref?.();
   logSession({ action: "touched", session, configuration });
 }
 
-function reviveSession(session) {
+function reviveSession(session, configuration) {
   if (session.closed) return;
   session.reviveCount = (session.reviveCount ?? 0) + 1;
   if (session.pendingDisconnect) {
     session.pendingDisconnect = false;
     if (!session.disconnectTimer) session.disconnectReason = undefined;
   }
-  if (!session.disconnectTimer) return;
-  clearTimeout(session.disconnectTimer);
-  session.disconnectTimer = undefined;
-  session.disconnectReason = undefined;
+  if (session.disconnectTimer) {
+    clearTimeout(session.disconnectTimer);
+    session.disconnectTimer = undefined;
+    session.disconnectReason = undefined;
+  }
+  if (configuration && !session.expiryTimer) touchSession(session, configuration);
 }
 
 function releaseSessionReservation(session) {
@@ -398,6 +410,7 @@ function closeSessionState(session, configuration, reason) {
   session.closeReason = reason;
   session.pendingDisconnect = false;
   if (session.expiryTimer) clearTimeout(session.expiryTimer);
+  session.expiryTimer = undefined;
   if (session.disconnectTimer) clearTimeout(session.disconnectTimer);
   session.disconnectTimer = undefined;
   session.disconnectReason = undefined;
@@ -680,7 +693,7 @@ async function handleRequest(req, res, configuration) {
     } finally {
       clearTimeout(responseTimer);
     }
-    if (method === "POST" && response.status >= 200 && response.status < 300 && !controller.signal.aborted) reviveSession(session);
+    if (method === "POST" && response.status >= 200 && response.status < 300 && !controller.signal.aborted) reviveSession(session, configuration);
     if (provisionalSession && !provisionalSession.id) await closeSession(provisionalSession, configuration, "initialize-failed");
   } catch (error) {
     status = error instanceof HttpBoundaryError ? error.status : 500;
