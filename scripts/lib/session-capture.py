@@ -129,7 +129,7 @@ def capture(snapshot, config, vault, source, session_id, retry):
             # The child retains ownership if this supervisor is killed mid-call.
             result = subprocess.run(
                 ["bash", str(Path(__file__).resolve().parents[1] / "session-summarize.sh"),
-                 str(snapshot), str(config), str(vault)],
+                 str(snapshot), str(config), str(vault), str(source)],
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                 pass_fds=(lock.fileno(),), check=False)
             exit_code = result.returncode

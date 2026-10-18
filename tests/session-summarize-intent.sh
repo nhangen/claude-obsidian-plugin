@@ -77,7 +77,7 @@ while [ "$#" -gt 0 ]; do
   shift || true
 done
 cat >/dev/null
-printf '%s\n' "${FAKE_CLAUDE_OUTPUT:?}"
+python3 -c 'import json,os; print(json.dumps({"type":"result","subtype":"success","is_error":False,"result":os.environ["FAKE_CLAUDE_OUTPUT"]}))'
 EOF
   chmod +x "${BIN_DIR}/claude"
 }
@@ -90,6 +90,7 @@ run_summarizer() {
   printf '%s\n' '{"type":"user","message":{"content":"read these papers and update research substrate"}}' \
     > "${CASE_DIR}/transcript.jsonl"
   PATH="${BIN_DIR}:$PATH" \
+    XDG_STATE_HOME="${CASE_DIR}/state" \
     PROMPT_CAPTURE="${CASE_DIR}/prompt.txt" \
     FAKE_CLAUDE_OUTPUT="$1" \
     bash "${ROOT_DIR}/scripts/session-summarize.sh" \

@@ -47,38 +47,21 @@ unexpected() {
   exit 99
 }
 
+[ "$1" = "--print" ] || unexpected "$@"
 case "${EXPECT_AUTH_MODE:-}" in
-  login)
-    [ "$#" -eq 11 ] &&
-      [ "$1" = "--print" ] &&
-      [ "$2" = "--disable-slash-commands" ] &&
-      [ "$3" = "--tools" ] &&
-      [ -z "$4" ] &&
-      [ "$5" = "--strict-mcp-config" ] &&
-      [ "$6" = "--setting-sources" ] &&
-      [ -z "$7" ] &&
-      [ "$8" = "--system-prompt" ] &&
-      [ -n "$9" ] &&
-      [ "${10}" = "--max-budget-usd" ] &&
-      [ "${11}" = "0.10" ] || unexpected "$@"
-    ;;
-  api)
-    [ "$#" -eq 6 ] &&
-      [ "$1" = "--print" ] &&
-      [ "$2" = "--bare" ] &&
-      [ "$3" = "--system-prompt" ] &&
-      [ -n "$4" ] &&
-      [ "$5" = "--max-budget-usd" ] &&
-      [ "$6" = "0.10" ] || unexpected "$@"
-    ;;
+  login) [ "$2" != "--bare" ] || unexpected "$@" ;;
+  api) [ "$2" = "--bare" ] || unexpected "$@" ;;
   *) unexpected "$@" ;;
 esac
+for arg in "$@"; do
+  [ "$arg" != "--no-session-persistence" ] || unexpected "$@"
+done
 
 printf '%s\n' "$@" > "${CALL_ARGS:?}"
 printf '%s' "${OBSIDIAN_SUMMARIZING:-unset}" > "${CALL_ENV:?}"
 cat > "${CALL_STDIN:?}"
 [ "${CLAUDE_EXIT_CODE:-0}" -eq 0 ] || exit "$CLAUDE_EXIT_CODE"
-printf 'SKIP\n'
+printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"result":"SKIP"}'
 EOF
 chmod +x "${BIN_DIR}/claude"
 
@@ -159,6 +142,7 @@ run_summarizer() {
   write_transcript "${CASE_DIR}/transcript.jsonl"
   rm -f "${CASE_DIR}/args.txt" "${CASE_DIR}/env.txt" "${CASE_DIR}/stdin.txt"
   env PATH="${BIN_DIR}:$PATH" \
+    XDG_STATE_HOME="${CASE_DIR}/state" \
     CALL_ARGS="${CASE_DIR}/args.txt" \
     CALL_ENV="${CASE_DIR}/env.txt" \
     CALL_STDIN="${CASE_DIR}/stdin.txt" \
