@@ -165,7 +165,7 @@ test_rendered_setup_choices() {
   cat > "$case_dir/bin/nohup" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
-[ "$#" -eq 5 ] && [ "$1" = bash ] &&
+[ "$#" -eq 8 ] && [ "$1" = python3 ] &&
   [ "$2" = "${EXPECTED_SUMMARIZER:?}" ] && [ -f "$3" ] &&
   [ "$4" = "${OBSIDIAN_LOCAL_MD:?}" ] && [ "$5" = "${EXPECTED_VAULT:?}" ] || exit 99
 printf 'save\n' >> "${CALLS:?}"
@@ -205,10 +205,11 @@ EOF
       : > "$case_dir/calls"
       printf '{"transcript_path":"%s"}' "$case_dir/transcript.jsonl" |
         env HOME="$case_dir/home" XDG_CONFIG_HOME="$case_dir/home/.config" \
+          XDG_STATE_HOME="$case_dir/home/.local/state" \
           XDG_CACHE_HOME="$case_dir/home/.cache" TMPDIR="$case_dir/tmp" \
           PATH="$case_dir/bin:$PATH" KEEPER_OS=Darwin OBSIDIAN_SUMMARIZING= \
           OBSIDIAN_LOCAL_MD="$config" CALLS="$case_dir/calls" \
-          EXPECTED_SUMMARIZER="$ROOT_DIR/scripts/session-summarize.sh" \
+          EXPECTED_SUMMARIZER="$ROOT_DIR/scripts/lib/session-capture.py" \
           EXPECTED_VAULT="$case_dir/Marine Cabin" EXPECTED_TICK="$ROOT_DIR/scripts/vaultkeeper-tick.sh" \
           VAULTKEEPER_INSTALL="$case_dir/bin/install-fixture" \
           bash -c "trap wait EXIT; source \"\$0\"" "$ROOT_DIR/scripts/session-save.sh" \

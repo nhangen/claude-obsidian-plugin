@@ -85,8 +85,8 @@ chmod +x "${BIN_DIR}/claude"
 cat > "${BIN_DIR}/nohup" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
-[ "$#" -eq 5 ] &&
-  [ "$1" = "bash" ] &&
+[ "$#" -eq 8 ] &&
+  [ "$1" = "python3" ] &&
   [ "$2" = "${EXPECTED_SUMMARIZER:?}" ] &&
   [ "$4" = "${EXPECTED_CONFIG:?}" ] &&
   [ "$5" = "${EXPECTED_VAULT:?}" ] &&
@@ -217,10 +217,11 @@ run_hook() {
     env PATH="${BIN_DIR}:$PATH" \
       HOME="${CASE_DIR}/home" \
       XDG_CONFIG_HOME="${CASE_DIR}/xdg" \
+      XDG_STATE_HOME="${CASE_DIR}/state" \
       OBSIDIAN_LOCAL_MD="${CASE_DIR}/config.md" \
       TMPDIR="${CASE_DIR}" \
       NOHUP_ARGS="${CASE_DIR}/nohup-args.txt" \
-      EXPECTED_SUMMARIZER="${ROOT_DIR}/scripts/session-summarize.sh" \
+      EXPECTED_SUMMARIZER="${ROOT_DIR}/scripts/lib/session-capture.py" \
       EXPECTED_CONFIG="${CASE_DIR}/config.md" \
       EXPECTED_VAULT="$VAULT_DIR" \
       "$@" bash -c "trap wait EXIT; source \"\$0\"" "${ROOT_DIR}/scripts/session-save.sh"
