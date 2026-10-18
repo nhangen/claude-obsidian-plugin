@@ -1,7 +1,7 @@
 ---
 name: daily-note
 description: Reads, creates, or appends to the Obsidian daily note. Triggers on phrases like "add to my daily note", "update today's note", "what's in my daily note", "open today's note", "daily note", "log this to today".
-version: 1.1.0
+version: 1.2.0
 ---
 
 # Daily Note Management

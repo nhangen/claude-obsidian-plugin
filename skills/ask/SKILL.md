@@ -1,7 +1,7 @@
 ---
 name: ask
 description: Ask the Obsidian vault librarian a question or file new information into the vault. Triggers on "ask my vault", "what do we know about X", "where in my vault is Y", "what did I decide about Z", "remember this in obsidian", "file this note". Dispatches the vault-librarian subagent for index-grounded answers and no-back-and-forth inserts.
-version: 1.0.0
+version: 1.1.0
 ---
 
 # Ask the Vault Librarian
