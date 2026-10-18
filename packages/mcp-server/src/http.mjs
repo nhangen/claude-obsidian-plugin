@@ -335,7 +335,7 @@ function reviveSession(session, configuration) {
     session.disconnectTimer = undefined;
     session.disconnectReason = undefined;
   }
-  if (configuration && !session.expiryTimer) touchSession(session, configuration);
+  if (!session.expiryTimer) touchSession(session, configuration);
 }
 
 function releaseSessionReservation(session) {
