@@ -90,7 +90,7 @@ set -euo pipefail
   [ "$2" = "${EXPECTED_SUMMARIZER:?}" ] &&
   [ "$4" = "${EXPECTED_CONFIG:?}" ] &&
   [ "$5" = "${EXPECTED_VAULT:?}" ] &&
-  [ -f "$3" ] || {
+  [ -f "$3" ] && [ -s "$3" ] && [ -f "$6" ] || {
     printf 'stub: unexpected nohup argv:' >&2
     printf ' <%s>' "$@" >&2
     printf '\n' >&2
@@ -153,6 +153,19 @@ PY
     || fail "redactor removed ordinary prose"
 }
 
+assert_model_redacted() {
+  python3 - "$1" <<'MODEL_PY' || fail "model input was not extracted and redacted"
+import json, sys
+rows = [json.loads(line) for line in open(sys.argv[1])]
+assert rows[0]["kind"] == "extraction_metadata"
+text = "\n".join(row.get("text", "") for row in rows[1:])
+assert "fake escaped phrase" not in text and "remaining secret phrase" not in text
+assert "FAKEFAKE" not in text and "hunter2" not in text
+assert "KEEP parsed boundary" in text and "ordinary key and token prose" in text
+assert "[REDACTED]" in text
+MODEL_PY
+}
+
 run_summarizer() {
   local scripts_dir="$1"
   shift
@@ -183,7 +196,7 @@ test_login_auth() {
     || fail "login-auth summarizer invocation failed"
   [ "$(cat "${CASE_DIR}/env.txt")" = "1" ] \
     || fail "OBSIDIAN_SUMMARIZING was not set for the nested claude"
-  assert_redacted "${CASE_DIR}/stdin.txt"
+  assert_model_redacted "${CASE_DIR}/stdin.txt"
 }
 
 test_api_auth() {
@@ -192,7 +205,7 @@ test_api_auth() {
     || fail "API-key summarizer invocation failed"
   grep -qx -- '--bare' "${CASE_DIR}/args.txt" \
     || fail "API-key path no longer uses --bare"
-  assert_redacted "${CASE_DIR}/stdin.txt"
+  assert_model_redacted "${CASE_DIR}/stdin.txt"
 }
 
 test_failure_propagation() {
