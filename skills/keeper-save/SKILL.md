@@ -1,7 +1,7 @@
 ---
 name: keeper-save
 description: Agent-facing entry point for filing or appending a structured note through the vault keeper. Triggers when another agent or skill needs to persist a note — findings, decisions, observations, research results, daily-log entries — into the vault without back-and-forth. Humans use /obsidian:ask instead. Validates the structured payload then writes it directly through the local keeper CLI (APPEND, and INSERT with `resolved: true`) with no subagent; only an unresolved INSERT dispatches the vault-librarian for routing/dedup judgment.
-version: 1.2.0
+version: 1.2.1
 ---
 
 # keeper-save (Agent-Facing Vault Write)
@@ -46,6 +46,8 @@ target: <append: explicit note path, e.g. Daily/2026-06-29.md.
          insert+resolved: the full vault-relative path the caller resolved,
          e.g. Decisions/2026-06-29-my-note.md>
 section: <append, optional — section heading, e.g. ## 14:30 — Topic>
+hash: <append, optional — commit sha (7+ hex); a replay of the same sha is skipped
+       instead of appended twice>
 session_link_date: <insert+resolved, optional — YYYY-MM-DD; adds a
                     `- [[title]]` entry under that daily note's ## Session Links>
 ---
@@ -83,8 +85,11 @@ is rejected, never coerced.
    ```bash
    bash "${CLAUDE_PLUGIN_ROOT}/scripts/keeper" append --vault "$VAULT" \
      {--target "<target>" | --date "<date>"} --section "<section>" \
-     --body-file "<body-temp>" [--init-file "<init-temp>"]
+     --body-file "<body-temp>" [--init-file "<init-temp>"] \
+     [--skip-if-hash "<hash>"]
    ```
+   Pass `--skip-if-hash` whenever the payload has a `hash`; a skip exits 0 with
+   a "skipped" notice, which is not a failure.
    For a `--date` append whose daily note may not exist, first render an
    `--init-file`: read `$VAULT/Daily/_Daily Template.md` (substitute `{{date}}`)
    if present, else a minimal `---\ndate: <date>\ntags: [daily]\n---\n\n# <date>\n`.
@@ -96,8 +101,9 @@ is rejected, never coerced.
      --target "<target>" --body-file "<body-temp>" --title "<title>" \
      [--session-link-date "<session_link_date>"]
    ```
-   Use the payload's `target` (the caller's resolved full path); if absent, build
-   it from `folder_hint` + a kebab-cased `title`. Pass `--session-link-date` from
+   Use the payload's `target` (the caller's resolved full path). A `resolved:
+   true` payload with no `target` is not resolved: treat it as an unresolved
+   insert below rather than guessing a path. Pass `--session-link-date` from
    the `session_link_date` field when set. The CLI writes the note, links the
    folder INDEX, and (if dated) adds the Session-Links entry.
 
@@ -109,6 +115,6 @@ is rejected, never coerced.
 
 5. **Relay the committed path** back to the caller: what was written and where.
    Report keeper failures verbatim (a non-zero exit means not written); keep the
-   `--skip-if-hash` guard when the caller supplied a commit hash.
+   `--skip-if-hash` guard when the caller supplied a `hash`.
    For an unresolved insert, if the librarian reports low-confidence routing or a
    near-duplicate, surface its question — do not auto-resolve it.
