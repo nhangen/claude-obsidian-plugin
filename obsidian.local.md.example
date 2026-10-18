@@ -3,6 +3,7 @@ vault_path: /Users/yourname/Documents/Obsidian
 vault_name: Obsidian
 daily_path: Daily/
 auto_save: false
+summary_capture: stop
 auto_open: false
 time_gap_minutes: 30
 smart_detect: true
