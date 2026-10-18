@@ -175,7 +175,7 @@ bash "${SCRIPT_DIR}/lib/redact-secrets.sh" "$TMPFILE" || exit 1
 if [ -n "${ANTHROPIC_API_KEY:-}" ]; then
   RESULT=$(OBSIDIAN_SUMMARIZING=1 claude --print --bare --system-prompt "$PROMPT" --max-budget-usd 0.10 < "$TMPFILE" 2>/dev/null) || exit 1
 else
-  RESULT=$(OBSIDIAN_SUMMARIZING=1 claude --print --no-session-persistence --disable-slash-commands --tools "" --strict-mcp-config --setting-sources "" --system-prompt "$PROMPT" --max-budget-usd 0.10 < "$TMPFILE" 2>/dev/null) || exit 1
+  RESULT=$(OBSIDIAN_SUMMARIZING=1 claude --print --disable-slash-commands --tools "" --strict-mcp-config --setting-sources "" --system-prompt "$PROMPT" --max-budget-usd 0.10 < "$TMPFILE" 2>/dev/null) || exit 1
 fi
 
 TRIMMED=$(printf '%s' "$RESULT" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
