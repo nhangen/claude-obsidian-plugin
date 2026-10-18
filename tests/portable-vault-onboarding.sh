@@ -52,6 +52,7 @@ while [ "$#" -gt 0 ]; do
       prompt="$2"
       shift 2
       ;;
+    --model|--effort|--output-format|--settings) shift 2 ;;
     --max-budget-usd)
       [ "$#" -ge 2 ] && [ "$2" = "0.10" ] || exit 99
       shift 2
@@ -62,7 +63,7 @@ done
 [ "$print_seen" = true ] && [ -n "$prompt" ] || exit 99
 printf '%s' "$prompt" > "${PROMPT_CAPTURE:?}"
 cat >/dev/null
-cat <<'NOTE'
+python3 -c 'import json,sys; print(json.dumps({"type":"result","subtype":"success","is_error":False,"result":sys.stdin.read()}))' <<'NOTE'
 ---
 vault_folder: Projects/Marine-Systems/
 slug: reef-survey

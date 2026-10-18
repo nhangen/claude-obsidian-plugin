@@ -245,6 +245,8 @@ vault_path: /absolute/path/to/your/vault
 vault_name: Obsidian          # must match the vault name in the Obsidian app
 daily_path: Daily/            # relative to vault root
 auto_save: false              # opt in to automatic session capture
+summary_model: claude-haiku-5-5
+summary_effort: low
 keeper_autostart: false       # independent opt-in to scheduler bootstrap
 auto_open: false              # open note in GUI after writing (opt-in)
 strict_domains: true          # refuse to create folders outside the taxonomy
@@ -322,3 +324,48 @@ Claude Code supplies `${CLAUDE_PLUGIN_ROOT}`. The Codex skill resolves its bundl
 ## License
 
 MIT
+
+### Autosave summary model and usage
+
+Automatic summaries use `summary_model: claude-haiku-5-5` and
+`summary_effort: low`, independent of the parent session and review models.
+Supported exact model overrides are `claude-haiku-5-5`, `claude-sonnet-5-5`, and
+`claude-opus-5-5`; supported efforts are `low`, `medium`, and `high`. Unknown or
+empty values fail before inference. Missing keys use the defaults. Quoted values
+and trailing YAML comments are accepted. Requires a CLI supporting `--effort`,
+JSON output, and the selected model. Unavailable models fail without a plugin retry.
+
+Haiku 5.5 is the low-cost candidate described in the
+[official model documentation](https://platform.claude.com/docs/en/models/haiku-5-5/overview).
+Note usefulness and subscription allowance savings have **not** been validated;
+API pricing does not establish subscription weighting. No live model evaluation
+is part of the offline tests.
+
+The subprocess overrides inherited effort, disables ordinary settings discovery,
+and sets an empty fallback chain with a model allowlist plus exact returned-model
+validation. Organization managed policy can supersede that allowlist; when the CLI
+returns a different model, the summary is rejected and recorded as `model_mismatch`.
+This check happens after the call and cannot undo provider usage. It never
+retries with a pricier model.
+
+Each invocation retains one private JSON record under
+`${XDG_STATE_HOME:-$HOME/.local/state}/obsidian/summary-usage/` (directory mode 700,
+files 600), outside the synced vault. Records include a local invocation UUID,
+hashed source transcript path and pre-redaction content boundary, requested and
+available actual model IDs, effort, selected authentication route (not verified
+billing type), attempts, successful calls, completion/error code, process exit,
+and dedup outcome (`skipped`, `committed_or_identical`, `conflict`, `partial`, or
+`write_failed`). Keeper does not distinguish a new insert from identical recovery
+in its locked success response; `committed_or_identical` preserves that uncertainty
+even for concurrent writes. Direct script calls without source context have a null source
+session hash. No transcript, prompt, raw source path, credentials, or provider
+error text is copied into these records. CLI stderr is discarded.
+
+Provider `modelUsage` counters take precedence over aggregate `usage`; they are
+never added together. Input/output/cache-read/cache-write counters retain explicit
+zeros, while absent/invalid fields remain null. `usage_status` distinguishes
+`complete`, `missing`, and `malformed`, and `usage_source` identifies the source.
+A successful call can have missing usage, and an errored call can have usage.
+If private accounting cannot be saved, autosave fails instead of running untracked.
+Inspect the local records for background failures; the Stop hook remains detached.
+Local transcript persistence is a separate concern.

@@ -4,6 +4,8 @@ vault_name: Obsidian
 daily_path: Daily/
 auto_save: false
 summary_capture: stop
+summary_model: claude-haiku-5-5
+summary_effort: low
 auto_open: false
 time_gap_minutes: 30
 smart_detect: true

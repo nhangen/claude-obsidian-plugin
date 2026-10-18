@@ -10,20 +10,28 @@ TMPFILE="$1"
 CONFIG_FILE="$2"
 VAULT_PATH="$3"
 BODY_FILE=""
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+USAGE_RECORD=""
+DEDUP_OUTCOME="not_run"
+umask 077
 
 if [ ! -f "$TMPFILE" ]; then
   exit 1
 fi
 
 cleanup() {
+  local rc=$?
+  if [ -n "$USAGE_RECORD" ]; then
+    python3 "${SCRIPT_DIR}/lib/summary-call.py" finish "$USAGE_RECORD" "$rc" "$DEDUP_OUTCOME" || rc=1
+  fi
   rm -f "$TMPFILE"
   [ -z "$BODY_FILE" ] || rm -f "$BODY_FILE"
+  trap - EXIT
+  exit "$rc"
 }
 trap cleanup EXIT
 
-if ! command -v claude &>/dev/null; then
-  exit 1
-fi
+USAGE_RECORD=$(python3 "${SCRIPT_DIR}/lib/summary-call.py" start "$TMPFILE" "${4:-}") || exit 1
 
 TODAY=$(date '+%Y-%m-%d')
 DAILY_SUBPATH=$(grep '^daily_path:' "$CONFIG_FILE" | head -1 | sed 's/^daily_path:[[:space:]]*//' | sed 's|\.\./||g; s|^\./||; s|^/||; s|/$||')
@@ -166,20 +174,11 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 python3 "${SCRIPT_DIR}/lib/autosave-input.py" "$TMPFILE" "$TMPFILE" || exit 1
 INPUT_METADATA=$(head -1 "$TMPFILE")
 
-# `--bare` authenticates only with ANTHROPIC_API_KEY. Without a key (login or
-# subscription auth) it prints "Not logged in", and because stderr is discarded
-# the autosave silently never happens. So use --bare only when a key exists, and
-# otherwise disable tools, MCP discovery, slash commands and settings sources.
-# OBSIDIAN_SUMMARIZING stops the nested session's Stop hook from autosaving the
-# summarizer's own session (session-save.sh exits when it is set).
-if [ -n "${ANTHROPIC_API_KEY:-}" ]; then
-  RESULT=$(OBSIDIAN_SUMMARIZING=1 claude --print --bare --system-prompt "$PROMPT" --max-budget-usd 0.10 < "$TMPFILE" 2>/dev/null) || exit 1
-else
-  RESULT=$(OBSIDIAN_SUMMARIZING=1 claude --print --disable-slash-commands --tools "" --strict-mcp-config --setting-sources "" --system-prompt "$PROMPT" --max-budget-usd 0.10 < "$TMPFILE" 2>/dev/null) || exit 1
-fi
+RESULT=$(printf '%s' "$PROMPT" | python3 "${SCRIPT_DIR}/lib/summary-call.py" run "$USAGE_RECORD" "$TMPFILE" "$CONFIG_FILE") || exit 1
 
 TRIMMED=$(printf '%s' "$RESULT" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
 if [ -z "$TRIMMED" ] || [ "$TRIMMED" = "SKIP" ]; then
+  DEDUP_OUTCOME="skipped"
   exit 0
 fi
 
@@ -221,6 +220,7 @@ case "$RESEARCH_STATE_CHANGE" in
     ;;
 esac
 if [ "$CAPTURE_ACTION" = "none" ]; then
+  DEDUP_OUTCOME="skipped"
   exit 0
 fi
 
@@ -248,7 +248,9 @@ TITLE=$(printf '%s\n' "$RESULT" | grep '^# ' | head -1 | sed 's/^# //')
 # Recovery is safe only when the existing note is byte-identical. A different
 # same-target note remains an explicit keeper conflict and this process exits
 # non-zero without truncating it.
-bash "$(dirname "$0")/keeper" insert \
+DEDUP_OUTCOME="write_failed"
+KEEPER_RC=0
+KEEPER_RESULT=$(bash "$(dirname "$0")/keeper" insert \
   --vault "$RESOLVED_VAULT" \
   --target "$NOTE_TARGET" \
   --body-file "$BODY_FILE" \
@@ -256,4 +258,11 @@ bash "$(dirname "$0")/keeper" insert \
   --session-link-date "$TODAY" \
   --daily-path "$DAILY_SUBPATH" \
   --recover \
-  --format json
+  --format json) || KEEPER_RC=$?
+printf '%s\n' "$KEEPER_RESULT"
+case "$KEEPER_RC" in
+  0) DEDUP_OUTCOME="committed_or_identical" ;;
+  3) DEDUP_OUTCOME="conflict" ;;
+  2) DEDUP_OUTCOME="partial" ;;
+esac
+exit "$KEEPER_RC"

@@ -1,4 +1,5 @@
 import fcntl
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -40,7 +41,7 @@ if os.environ.get('BLOCK_PROVIDER') == '1':
 if os.environ.get('FAIL_PROVIDER') == '1':
     print('sensitive provider error must never enter receipts', file=sys.stderr)
     sys.exit(23)
-print('SKIP')
+print(json.dumps({"type":"result", "subtype":"success", "is_error":False, "result":"SKIP"}))
 """)
         provider.chmod(0o755)
         self.env = dict(os.environ, HOME=str(self.case / "home"),
@@ -124,6 +125,13 @@ print('SKIP')
         self.assertEqual(receipt["status"], "process_succeeded")
         self.assertIsNone(receipt["provider_success"])
         self.assertIsNone(receipt["usage"])
+        usage_path, = (self.case / "state/obsidian/summary-usage").glob("*.json")
+        usage = json.loads(usage_path.read_text())
+        self.assertEqual(usage["source_session_hash"], hashlib.sha256(str(self.transcript).encode()).hexdigest())
+        self.assertEqual(usage["attempts"], 1)
+        self.assertEqual(usage["successful_calls"], 1)
+        self.assertEqual(usage["dedup_outcome"], "skipped")
+
 
     def test_new_message_boundary_is_not_suppressed(self):
         self.run_hook()
