@@ -1,7 +1,7 @@
 ---
 name: daily-note
 description: Reads, creates, or appends to the Obsidian daily note. Triggers on phrases like "add to my daily note", "update today's note", "what's in my daily note", "open today's note", "daily note", "log this to today".
-version: 1.1.0
+version: 1.2.0
 ---
 
 # Daily Note Management
@@ -9,8 +9,9 @@ version: 1.1.0
 Manages the daily note in `Daily/YYYY-MM-DD.md`.
 
 Append and create-on-absent are filed through the **keeper-save** skill
-(`op: append`) — the vault-librarian owns target resolution, creating from the
-daily template when the file is absent, and the append itself. The read path
+(`op: append`) — a single direct `keeper append` call (no subagent) that
+resolves `Daily/<date>.md`, creates it from the daily template when absent, and
+appends. The read path
 stays native (it only reads).
 
 ## Vault Path (read path only)
@@ -36,7 +37,8 @@ Invoke the `obsidian:keeper-save` skill with an append payload:
 - `section` — `## HH:MM — [Topic]` (current time + the topic)
 - `body` — the content to log
 
-keeper-save → the librarian resolves `Daily/<date>.md`, creates it from
-`Daily/_Daily Template.md` if absent, and appends the section. Relay the path it
+keeper-save runs `keeper append` directly: it resolves `Daily/<date>.md`,
+creates it from `Daily/_Daily Template.md` if absent, and appends the section.
+Do not dispatch the vault-librarian for this. Relay the path it
 returns. To log to a non-today date, pass that `date` (or a `target` path)
 instead.

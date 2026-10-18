@@ -1,7 +1,7 @@
 ---
 name: create-note
 description: Creates a new note, project folder, or page in the Obsidian vault. Triggers on phrases like "create a note about X", "start a new project for Y", "add a page for Z", "new obsidian note", "create project folder", "set up a new project in obsidian".
-version: 1.2.0
+version: 1.3.0
 ---
 
 # Create Note in Obsidian
@@ -9,8 +9,8 @@ version: 1.2.0
 Creates new notes or project structures in the vault.
 
 Single notes and pages are filed through the **keeper-save** skill — the
-vault-librarian owns routing, the `## Project Taxonomy` allow-list, the
-template, dedup, and INDEX linking. This skill does not re-implement any of
+keeper owns the write and INDEX linking; when routing is unresolved the
+vault-librarian owns routing, the `## Project Taxonomy` allow-list, and dedup. This skill does not re-implement any of
 those. Project scaffolding (a folder with README + subfolders) is the one
 shape keeper-save's single-note INSERT cannot build, so that branch stays
 native here.
@@ -29,6 +29,11 @@ native here.
      path for a page. May be omitted; the librarian routes by the taxonomy.
    - `type` — `note` (or a vault-defined type if `VAULT.md` names one).
    - `links` — any related notes the user named.
+   - `resolved: true` + `target` — only for a page inside an existing project
+     folder whose full path you know. Perform the step 6 allow-list check
+     (`allowlist_validate "<target>"`) first, then check the folder for a same-name note first; `resolved` promises the
+     caller already routed and deduped. keeper-save then writes directly with
+     no subagent. Otherwise omit both and let the librarian route.
    Relay the committed path keeper-save returns. If it surfaces a
    low-confidence-routing or near-duplicate question, pass it to the user —
    do not auto-resolve. **Stop here for this type.**

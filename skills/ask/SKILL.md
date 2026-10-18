@@ -1,7 +1,7 @@
 ---
 name: ask
 description: Ask the Obsidian vault librarian a question or file new information into the vault. Triggers on "ask my vault", "what do we know about X", "where in my vault is Y", "what did I decide about Z", "remember this in obsidian", "file this note". Dispatches the vault-librarian subagent for index-grounded answers and no-back-and-forth inserts.
-version: 1.0.0
+version: 1.1.0
 ---
 
 # Ask the Vault Librarian
@@ -15,6 +15,11 @@ information.
   "where is…", "what did I decide…", "summarize what's in <domain>".
 - **INSERT**: the request asks to store something — "remember…", "file this…",
   "record this decision…", "add a note about…".
+
+**Already-resolved writes skip this skill.** If the caller already has the
+body and the exact target (append or resolved insert), use `obsidian:keeper-save`
+instead — it is one local keeper call with no subagent. Dispatch the librarian
+here only for a query, or an INSERT whose routing/dedup is unresolved.
 
 ## Steps
 
