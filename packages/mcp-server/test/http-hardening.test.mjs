@@ -630,7 +630,7 @@ test("rejected POST in flight across disconnect grace boundary does not revive s
 
   await new Promise((done) => setTimeout(done, 150));
 
-  const payload = "not valid json";
+  const payload = '{"jsonrpc":"1.0","id":1}';
   const sessionHeaders = headers(url, bearer, { "Mcp-Session-Id": sessionId, "Content-Length": String(Buffer.byteLength(payload)) });
   const req = httpRequest(`${url}/mcp`, { method: "POST", headers: sessionHeaders });
   const responsePromise = new Promise((resolve) => {
@@ -640,11 +640,12 @@ test("rejected POST in flight across disconnect grace boundary does not revive s
       res.on("end", () => resolve({ status: res.statusCode, body: data }));
     });
   });
-  req.write("not ");
+  req.write(payload.slice(0, 10));
   await new Promise((done) => setTimeout(done, 300));
   assert.match(server.stderr(), /mcp-http-session .*"action":"disconnect-deferred".*"in_flight":1/);
   assert.doesNotMatch(server.stderr(), /mcp-http-session .*"action":"closed"/);
-  req.end("valid json");
+  const requestEndedAt = Date.now();
+  req.end(payload.slice(10));
 
   const rejected = await responsePromise;
   assert.equal(rejected.status, 400);
@@ -815,6 +816,41 @@ test("POST tool call in flight across session TTL boundary completes and revives
   assert.equal(afterClose.status, 404);
 });
 
+test("revived session re-arms idle TTL without a follow-up request (#221)", async (t) => {
+  const { directory, config } = await fixture();
+  const bin = join(directory, "bin");
+  await mkdir(bin);
+  await writeFile(join(bin, "bash"), '#!/bin/sh\ncase "$1" in */commit-meta.sh) node -e \'setTimeout(()=>{}, 350)\' ;; esac\nexec /bin/bash "$@"\n');
+  await chmod(join(bin, "bash"), 0o755);
+  const server = startServer(config, {
+    PATH: `${bin}:${process.env.PATH}`,
+    MCP_HTTP_REQUEST_TIMEOUT_MS: "3000",
+    MCP_HTTP_SESSION_TTL_MS: "200",
+    MCP_REPOSITORY_ROOTS: directory,
+  });
+  t.after(async () => { await server.stop(); await rm(directory, { recursive: true, force: true }); });
+  const url = await server.ready;
+  const bearer = token();
+  const initialized = await fetch(`${url}/mcp`, { method: "POST", headers: headers(url, bearer), body: JSON.stringify(initialize()) });
+  assert.equal(initialized.status, 200);
+  await initialized.text();
+  const sessionId = initialized.headers.get("mcp-session-id");
+  assert.ok(sessionId);
+
+  const sessionHeaders = headers(url, bearer, { "Mcp-Session-Id": sessionId, "MCP-Protocol-Version": "2025-11-25" });
+  const callPromise = fetch(`${url}/mcp`, {
+    method: "POST",
+    headers: sessionHeaders,
+    body: JSON.stringify({ jsonrpc: "2.0", id: 10, method: "tools/call", params: { name: "obsidian_commit_meta", arguments: { repository: directory } } }),
+  });
+  await waitForStderr(server, /mcp-http-session .*"action":"disconnect-deferred".*"reason":"ttl-expired".*"in_flight":1/);
+  const res = await callPromise;
+  assert.equal(res.status, 200);
+  await res.text();
+
+  await waitForStderr(server, /mcp-http-session .*"action":"closed".*"reason":"ttl-expired"/, 2000);
+});
+
 test("rejected POST in flight across session TTL boundary does not revive session (#221)", async (t) => {
   const { directory, config } = await fixture();
   const server = startServer(config, {
@@ -830,7 +866,7 @@ test("rejected POST in flight across session TTL boundary does not revive sessio
   const sessionId = initialized.headers.get("mcp-session-id");
   assert.ok(sessionId);
 
-  const payload = "not valid json";
+  const payload = '{"jsonrpc":"1.0","id":1}';
   const sessionHeaders = headers(url, bearer, { "Mcp-Session-Id": sessionId, "Content-Length": String(Buffer.byteLength(payload)) });
   const req = httpRequest(`${url}/mcp`, { method: "POST", headers: sessionHeaders });
   const responsePromise = new Promise((resolve) => {
@@ -840,15 +876,18 @@ test("rejected POST in flight across session TTL boundary does not revive sessio
       res.on("end", () => resolve({ status: res.statusCode, body: data }));
     });
   });
-  req.write("not ");
+  req.write(payload.slice(0, 10));
   await waitForStderr(server, /mcp-http-session .*"action":"disconnect-deferred".*"reason":"ttl-expired".*"in_flight":1/);
   assert.doesNotMatch(server.stderr(), /mcp-http-session .*"action":"closed"/);
-  req.end("valid json");
+  const requestEndedAt = Date.now();
+  req.end(payload.slice(10));
 
   const rejected = await responsePromise;
   assert.equal(rejected.status, 400);
 
   await waitForStderr(server, /mcp-http-session .*"action":"closed".*"reason":"ttl-expired"/, 2000);
+  // A revived session would only close after a fresh 200ms idle TTL; a rejected one closes on drain.
+  assert.ok(Date.now() - requestEndedAt < 150);
 
   const afterClose = await fetch(`${url}/mcp`, {
     method: "POST",
