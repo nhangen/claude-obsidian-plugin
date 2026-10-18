@@ -315,7 +315,10 @@ function touchSession(session, configuration) {
 
 function reviveSession(session) {
   if (session.closed) return;
-  session.pendingDisconnect = false;
+  if (session.pendingDisconnect) {
+    session.pendingDisconnect = false;
+    if (!session.disconnectTimer) session.disconnectReason = undefined;
+  }
   if (!session.disconnectTimer) return;
   clearTimeout(session.disconnectTimer);
   session.disconnectTimer = undefined;
@@ -404,13 +407,16 @@ function closeSessionState(session, configuration, reason) {
   }
 }
 
-// An aborted POST closes the session only when no sibling request is still using it;
-// otherwise the close waits for inFlight to drain (handled in handleRequest's finally).
+// An aborted POST closes the session only when no other request (POST or open GET stream)
+// is still using it. Otherwise the close is deferred: a sibling's successful response
+// revives the session (reviveSession), and the last sibling to drain without one runs
+// the close from handleRequest's finally.
 async function closeAbortedSession(session, configuration) {
   if (session.closed) return;
   if (session.inFlight > 1) {
     session.pendingDisconnect = true;
     session.disconnectReason ??= "request-aborted";
+    logSession({ action: "disconnect-deferred", session, configuration, reason: "request-aborted", inFlight: session.inFlight });
     return;
   }
   await closeSession(session, configuration, "request-aborted");
