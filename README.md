@@ -267,6 +267,9 @@ Per-repo commit-capture overrides go in the same file under a `## Commit Capture
 
 ### Autosave: authentication and secret redaction
 
+Version 1.23.0 includes bounded summary input, duplicate-launch protection,
+normal login-session persistence, and explicit model/usage accounting.
+
 - **Autosave input.** The background worker extracts user requests, assistant text and final tool-result text, excluding API-request records, progress events, tool schemas, thinking and tool-call arguments. Repeated message/tool identities are deduplicated. A native `isCompactSummary` checkpoint supplies the previous summary plus the following conversation delta; otherwise each save uses a bounded conversation scan, without a persistent cursor that could discard unsaved context.
 - **Bounds and coverage.** Model stdin is at most 65,536 UTF-8 bytes including metadata, with up to 128 recent events and 8,192 bytes of text per event (head and tail, including an omission marker). Records over 1 MiB are omitted. Full selected credential values are redacted before clipping. The model receives omission counts, and every saved note includes deterministic input coverage metadata even if the model omits the warning. Filtered instrumentation and duplicates are counted separately from lost or clipped conversation. These limits can omit an earlier decision; `context_incomplete` exposes that limitation.
 - **Usage measurement.** `source_bytes` and `payload_bytes` measure transcript bytes and model-stdin bytes, excluding the system prompt. They are not estimated tokens, actual model token counters or billed consumption. Offline fixtures use a fake model executable and incur no provider usage. Review models, manual capture and commit capture use their existing paths.
