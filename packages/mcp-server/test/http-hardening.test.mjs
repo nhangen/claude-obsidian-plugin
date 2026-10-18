@@ -426,7 +426,7 @@ async function waitForStderr(server, pattern, timeoutMs = 3000) {
     if (pattern.test(server.stderr())) return;
     await new Promise((done) => setTimeout(done, 25));
   }
-  assert.fail(`stderr never matched ${pattern}`);
+  assert.fail(`stderr never matched ${pattern}\n${server.stderr()}`);
 }
 
 async function waitForRequestEvent(server, predicate) {
@@ -702,7 +702,7 @@ test("cancelling one of several concurrent POST tool calls leaves its siblings r
     assert.ok(!body.error, `unexpected error: ${JSON.stringify(body.error)}`);
   }
   assert.equal((await cancelledCall).name, "AbortError");
-  assert.match(server.stderr(), /mcp-http-session .*"action":"disconnect-deferred".*"reason":"request-aborted"/);
+  assert.equal(server.stderr().match(/"action":"disconnect-deferred"/g)?.length, 1);
 
   const followUp = await fetch(`${url}/mcp`, {
     method: "POST",
@@ -712,16 +712,16 @@ test("cancelling one of several concurrent POST tool calls leaves its siblings r
   assert.equal(followUp.status, 200);
 });
 
-test("cancelling every concurrent POST tool call closes the session once the last one drains (#222)", async (t) => {
+test("an aborted POST deferred behind an open GET stream closes the session when the stream ends (#222)", async (t) => {
   const { directory, config } = await fixture();
   const bin = join(directory, "bin");
   await mkdir(bin);
-  await writeFile(join(bin, "bash"), '#!/bin/sh\ncase "$1" in */commit-meta.sh) node -e \'setTimeout(()=>{}, 600)\' ;; esac\nexec /bin/bash "$@"\n');
+  await writeFile(join(bin, "bash"), '#!/bin/sh\ncase "$1" in */commit-meta.sh) node -e \'setTimeout(()=>{}, 300)\' ;; esac\nexec /bin/bash "$@"\n');
   await chmod(join(bin, "bash"), 0o755);
   const server = startServer(config, {
     PATH: `${bin}:${process.env.PATH}`,
-    MCP_HTTP_REQUEST_TIMEOUT_MS: "5000",
-    MCP_HTTP_DISCONNECT_GRACE_MS: "5000",
+    MCP_HTTP_REQUEST_TIMEOUT_MS: "20000",
+    MCP_HTTP_DISCONNECT_GRACE_MS: "20000",
     MCP_REPOSITORY_ROOTS: directory,
   });
   t.after(async () => { await server.stop(); await rm(directory, { recursive: true, force: true }); });
@@ -733,19 +733,27 @@ test("cancelling every concurrent POST tool call closes the session once the las
   const sessionId = initialized.headers.get("mcp-session-id");
   assert.ok(sessionId);
 
+  const stream = await fetch(`${url}/mcp`, { headers: headers(url, bearer, { Accept: "text/event-stream", "Mcp-Session-Id": sessionId }) });
+  assert.equal(stream.status, 200);
+
   const sessionHeaders = headers(url, bearer, { "Mcp-Session-Id": sessionId, "MCP-Protocol-Version": "2025-11-25" });
-  const controllers = [10, 11, 12].map(() => new AbortController());
-  const calls = controllers.map((controller, i) => fetch(`${url}/mcp`, {
+  const cancelled = new AbortController();
+  const cancelledCall = fetch(`${url}/mcp`, {
     method: "POST",
     headers: sessionHeaders,
-    signal: controller.signal,
-    body: JSON.stringify({ jsonrpc: "2.0", id: 10 + i, method: "tools/call", params: { name: "obsidian_commit_meta", arguments: { repository: directory } } }),
-  }).catch((error) => error));
-  await new Promise((done) => setTimeout(done, 150));
-  for (const controller of controllers) controller.abort();
-  for (const result of await Promise.all(calls)) assert.equal(result.name, "AbortError");
+    signal: cancelled.signal,
+    body: JSON.stringify({ jsonrpc: "2.0", id: 10, method: "tools/call", params: { name: "obsidian_commit_meta", arguments: { repository: directory } } }),
+  }).catch((error) => error);
+  await new Promise((done) => setTimeout(done, 100));
+  cancelled.abort();
+  assert.equal((await cancelledCall).name, "AbortError");
 
-  await waitForStderr(server, /mcp-http-session .*"action":"closed".*"reason":"request-aborted"/);
+  await waitForStderr(server, /mcp-http-session .*"action":"disconnect-deferred"/);
+  await new Promise((done) => setTimeout(done, 500));
+  assert.doesNotMatch(server.stderr(), /mcp-http-session .*"action":"closed"/);
+
+  await stream.body.cancel();
+  await waitForStderr(server, /mcp-http-session .*"action":"closed"/, 2000);
   const followUp = await fetch(`${url}/mcp`, {
     method: "POST",
     headers: sessionHeaders,

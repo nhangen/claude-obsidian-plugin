@@ -315,6 +315,7 @@ function touchSession(session, configuration) {
 
 function reviveSession(session) {
   if (session.closed) return;
+  session.reviveCount = (session.reviveCount ?? 0) + 1;
   if (session.pendingDisconnect) {
     session.pendingDisconnect = false;
     if (!session.disconnectTimer) session.disconnectReason = undefined;
@@ -410,13 +411,19 @@ function closeSessionState(session, configuration, reason) {
 // An aborted POST closes the session only when no other request (POST or open GET stream)
 // is still using it. Otherwise the close is deferred: a sibling's successful response
 // revives the session (reviveSession), and the last sibling to drain without one runs
-// the close from handleRequest's finally.
-async function closeAbortedSession(session, configuration) {
+// the close from handleRequest's finally. One request reaches this from up to three
+// sites, so the controller remembers the deferral: it logs once, and a later call after
+// a revive must not close the session the sibling just revived.
+async function closeAbortedSession(session, configuration, controller) {
   if (session.closed) return;
+  if (controller.deferredAtRevive !== undefined && controller.deferredAtRevive !== (session.reviveCount ?? 0)) return;
   if (session.inFlight > 1) {
-    session.pendingDisconnect = true;
-    session.disconnectReason ??= "request-aborted";
-    logSession({ action: "disconnect-deferred", session, configuration, reason: "request-aborted", inFlight: session.inFlight });
+    if (controller.deferredAtRevive === undefined) {
+      controller.deferredAtRevive = session.reviveCount ?? 0;
+      session.pendingDisconnect = true;
+      session.disconnectReason ??= "request-aborted";
+      logSession({ action: "disconnect-deferred", session, configuration, reason: session.disconnectReason, inFlight: session.inFlight });
+    }
     return;
   }
   await closeSession(session, configuration, "request-aborted");
@@ -439,7 +446,7 @@ async function transportResponse(session, request, parsedBody, timeoutMs, contro
     }, timeoutMs);
   });
   const abortSession = () => {
-    if (request.method !== "GET") void closeAbortedSession(session, configuration);
+    if (request.method !== "GET") void closeAbortedSession(session, configuration, controller);
   };
   controller.signal.addEventListener("abort", abortSession, { once: true });
   try {
@@ -447,7 +454,7 @@ async function transportResponse(session, request, parsedBody, timeoutMs, contro
   } finally {
     clearTimeout(timer);
     controller.signal.removeEventListener("abort", abortSession);
-    if (controller.signal.aborted && request.method !== "GET") await closeAbortedSession(session, configuration);
+    if (controller.signal.aborted && request.method !== "GET") await closeAbortedSession(session, configuration, controller);
   }
 }
 
@@ -673,7 +680,7 @@ async function handleRequest(req, res, configuration) {
     } finally {
       clearTimeout(responseTimer);
     }
-    if (method === "POST" && response.status >= 200 && response.status < 300) reviveSession(session);
+    if (method === "POST" && response.status >= 200 && response.status < 300 && !controller.signal.aborted) reviveSession(session);
     if (provisionalSession && !provisionalSession.id) await closeSession(provisionalSession, configuration, "initialize-failed");
   } catch (error) {
     status = error instanceof HttpBoundaryError ? error.status : 500;
@@ -689,7 +696,7 @@ async function handleRequest(req, res, configuration) {
         logSession({ action: "transport-disconnect", session, configuration, reason: "request-aborted" });
       }
     }
-    if (controller.signal.aborted && session && method !== "GET") await closeAbortedSession(session, configuration);
+    if (controller.signal.aborted && session && method !== "GET") await closeAbortedSession(session, configuration, controller);
     if (inFlightTracked && session) {
       session.inFlight = Math.max(0, session.inFlight - 1);
       if (session.inFlight === 0 && session.pendingDisconnect && !session.closed) {
