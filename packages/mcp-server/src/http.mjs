@@ -404,6 +404,18 @@ function closeSessionState(session, configuration, reason) {
   }
 }
 
+// An aborted POST closes the session only when no sibling request is still using it;
+// otherwise the close waits for inFlight to drain (handled in handleRequest's finally).
+async function closeAbortedSession(session, configuration) {
+  if (session.closed) return;
+  if (session.inFlight > 1) {
+    session.pendingDisconnect = true;
+    session.disconnectReason ??= "request-aborted";
+    return;
+  }
+  await closeSession(session, configuration, "request-aborted");
+}
+
 async function closeSession(session, configuration, reason = "server-close") {
   if (session.closed) return;
   closeSessionState(session, configuration, reason);
@@ -421,7 +433,7 @@ async function transportResponse(session, request, parsedBody, timeoutMs, contro
     }, timeoutMs);
   });
   const abortSession = () => {
-    if (request.method !== "GET") void closeSession(session, configuration, "request-aborted");
+    if (request.method !== "GET") void closeAbortedSession(session, configuration);
   };
   controller.signal.addEventListener("abort", abortSession, { once: true });
   try {
@@ -429,7 +441,7 @@ async function transportResponse(session, request, parsedBody, timeoutMs, contro
   } finally {
     clearTimeout(timer);
     controller.signal.removeEventListener("abort", abortSession);
-    if (controller.signal.aborted && request.method !== "GET") await closeSession(session, configuration, "request-aborted");
+    if (controller.signal.aborted && request.method !== "GET") await closeAbortedSession(session, configuration);
   }
 }
 
@@ -671,7 +683,7 @@ async function handleRequest(req, res, configuration) {
         logSession({ action: "transport-disconnect", session, configuration, reason: "request-aborted" });
       }
     }
-    if (controller.signal.aborted && session && method !== "GET") await closeSession(session, configuration, "request-aborted");
+    if (controller.signal.aborted && session && method !== "GET") await closeAbortedSession(session, configuration);
     if (inFlightTracked && session) {
       session.inFlight = Math.max(0, session.inFlight - 1);
       if (session.inFlight === 0 && session.pendingDisconnect && !session.closed) {

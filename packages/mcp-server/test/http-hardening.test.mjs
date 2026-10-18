@@ -652,3 +652,52 @@ test("rejected POST in flight across disconnect grace boundary does not revive s
   });
   assert.equal(afterClose.status, 404);
 });
+
+test("cancelling one of several concurrent POST tool calls leaves its siblings running (#222)", async (t) => {
+  const { directory, config } = await fixture();
+  const bin = join(directory, "bin");
+  await mkdir(bin);
+  await writeFile(join(bin, "bash"), '#!/bin/sh\ncase "$1" in */commit-meta.sh) node -e \'setTimeout(()=>{}, 600)\' ;; esac\nexec /bin/bash "$@"\n');
+  await chmod(join(bin, "bash"), 0o755);
+  const server = startServer(config, {
+    PATH: `${bin}:${process.env.PATH}`,
+    MCP_HTTP_REQUEST_TIMEOUT_MS: "5000",
+    MCP_HTTP_DISCONNECT_GRACE_MS: "5000",
+    MCP_REPOSITORY_ROOTS: directory,
+  });
+  t.after(async () => { await server.stop(); await rm(directory, { recursive: true, force: true }); });
+  const url = await server.ready;
+  const bearer = token();
+  const initialized = await fetch(`${url}/mcp`, { method: "POST", headers: headers(url, bearer), body: JSON.stringify(initialize()) });
+  assert.equal(initialized.status, 200);
+  await initialized.text();
+  const sessionId = initialized.headers.get("mcp-session-id");
+  assert.ok(sessionId);
+
+  const sessionHeaders = headers(url, bearer, { "Mcp-Session-Id": sessionId, "MCP-Protocol-Version": "2025-11-25" });
+  const call = (id, signal) => fetch(`${url}/mcp`, {
+    method: "POST",
+    headers: sessionHeaders,
+    signal,
+    body: JSON.stringify({ jsonrpc: "2.0", id, method: "tools/call", params: { name: "obsidian_commit_meta", arguments: { repository: directory } } }),
+  });
+  const cancelled = new AbortController();
+  const cancelledCall = call(10, cancelled.signal).catch((error) => error);
+  const siblings = [11, 12, 13].map((id) => call(id));
+  await new Promise((done) => setTimeout(done, 150));
+  cancelled.abort();
+
+  for (const res of await Promise.all(siblings)) {
+    assert.equal(res.status, 200);
+    const body = await res.json();
+    assert.ok(!body.error, `unexpected error: ${JSON.stringify(body.error)}`);
+  }
+  assert.equal((await cancelledCall).name, "AbortError");
+
+  const followUp = await fetch(`${url}/mcp`, {
+    method: "POST",
+    headers: sessionHeaders,
+    body: JSON.stringify({ jsonrpc: "2.0", id: 20, method: "tools/list", params: {} }),
+  });
+  assert.equal(followUp.status, 200);
+});
