@@ -16,14 +16,23 @@ with tempfile.TemporaryDirectory(prefix="autosave-input-") as temporary:
     (case / "vault").mkdir()
     (case / "home").mkdir()
     model = case / "bin" / "claude"
-    model.write_text("""#!/usr/bin/env bash
-set -euo pipefail
-cat > "$CAPTURE_INPUT"
-if [ "${SAVE_NOTE:-false}" = true ]; then
-  printf '%s\n' '---' 'vault_folder: Inbox/' 'slug: bounded-input' 'session_intent: execution' 'capture_action: project_note' 'research_state_change: none' '---' '# Bounded input' 'A decision survived.'
-else
-  printf 'SKIP\n'
-fi
+    model.write_text("""#!/usr/bin/env python3
+import json
+import os
+from pathlib import Path
+import sys
+
+Path(os.environ["CAPTURE_INPUT"]).write_bytes(sys.stdin.buffer.read())
+result = "SKIP"
+if os.environ.get("SAVE_NOTE") == "true":
+    result = "\\n".join([
+        "---", "vault_folder: Inbox/", "slug: bounded-input",
+        "session_intent: execution", "capture_action: project_note",
+        "research_state_change: none", "---", "# Bounded input",
+        "A decision survived.", ""
+    ])
+print(json.dumps({"type": "result", "subtype": "success",
+                  "is_error": False, "result": result}))
 """)
     model.chmod(0o755)
     config = case / "config.md"
