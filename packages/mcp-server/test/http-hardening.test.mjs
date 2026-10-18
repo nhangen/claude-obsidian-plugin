@@ -420,6 +420,15 @@ function requestEvents(server) {
     .map((line) => JSON.parse(line.slice("mcp-http-request ".length)));
 }
 
+async function waitForStderr(server, pattern, timeoutMs = 3000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (pattern.test(server.stderr())) return;
+    await new Promise((done) => setTimeout(done, 25));
+  }
+  assert.fail(`stderr never matched ${pattern}\n${server.stderr()}`);
+}
+
 async function waitForRequestEvent(server, predicate) {
   const deadline = Date.now() + 3_000;
   while (Date.now() < deadline) {
@@ -651,4 +660,104 @@ test("rejected POST in flight across disconnect grace boundary does not revive s
     body: JSON.stringify({ jsonrpc: "2.0", id: 30, method: "tools/list", params: {} }),
   });
   assert.equal(afterClose.status, 404);
+});
+
+test("cancelling one of several concurrent POST tool calls leaves its siblings running (#222)", async (t) => {
+  const { directory, config } = await fixture();
+  const bin = join(directory, "bin");
+  await mkdir(bin);
+  await writeFile(join(bin, "bash"), '#!/bin/sh\ncase "$1" in */commit-meta.sh) node -e \'setTimeout(()=>{}, 600)\' ;; esac\nexec /bin/bash "$@"\n');
+  await chmod(join(bin, "bash"), 0o755);
+  const server = startServer(config, {
+    PATH: `${bin}:${process.env.PATH}`,
+    MCP_HTTP_REQUEST_TIMEOUT_MS: "5000",
+    MCP_HTTP_DISCONNECT_GRACE_MS: "5000",
+    MCP_REPOSITORY_ROOTS: directory,
+  });
+  t.after(async () => { await server.stop(); await rm(directory, { recursive: true, force: true }); });
+  const url = await server.ready;
+  const bearer = token();
+  const initialized = await fetch(`${url}/mcp`, { method: "POST", headers: headers(url, bearer), body: JSON.stringify(initialize()) });
+  assert.equal(initialized.status, 200);
+  await initialized.text();
+  const sessionId = initialized.headers.get("mcp-session-id");
+  assert.ok(sessionId);
+
+  const sessionHeaders = headers(url, bearer, { "Mcp-Session-Id": sessionId, "MCP-Protocol-Version": "2025-11-25" });
+  const call = (id, signal) => fetch(`${url}/mcp`, {
+    method: "POST",
+    headers: sessionHeaders,
+    signal,
+    body: JSON.stringify({ jsonrpc: "2.0", id, method: "tools/call", params: { name: "obsidian_commit_meta", arguments: { repository: directory } } }),
+  });
+  const cancelled = new AbortController();
+  const cancelledCall = call(10, cancelled.signal).catch((error) => error);
+  const siblings = [11, 12, 13].map((id) => call(id));
+  await new Promise((done) => setTimeout(done, 150));
+  cancelled.abort();
+
+  for (const res of await Promise.all(siblings)) {
+    assert.equal(res.status, 200);
+    const body = await res.json();
+    assert.ok(!body.error, `unexpected error: ${JSON.stringify(body.error)}`);
+  }
+  assert.equal((await cancelledCall).name, "AbortError");
+  assert.equal(server.stderr().match(/"action":"disconnect-deferred"/g)?.length, 1);
+
+  const followUp = await fetch(`${url}/mcp`, {
+    method: "POST",
+    headers: sessionHeaders,
+    body: JSON.stringify({ jsonrpc: "2.0", id: 20, method: "tools/list", params: {} }),
+  });
+  assert.equal(followUp.status, 200);
+});
+
+test("an aborted POST deferred behind an open GET stream closes the session when the stream ends (#222)", async (t) => {
+  const { directory, config } = await fixture();
+  const bin = join(directory, "bin");
+  await mkdir(bin);
+  await writeFile(join(bin, "bash"), '#!/bin/sh\ncase "$1" in */commit-meta.sh) node -e \'setTimeout(()=>{}, 300)\' ;; esac\nexec /bin/bash "$@"\n');
+  await chmod(join(bin, "bash"), 0o755);
+  const server = startServer(config, {
+    PATH: `${bin}:${process.env.PATH}`,
+    MCP_HTTP_REQUEST_TIMEOUT_MS: "20000",
+    MCP_HTTP_DISCONNECT_GRACE_MS: "20000",
+    MCP_REPOSITORY_ROOTS: directory,
+  });
+  t.after(async () => { await server.stop(); await rm(directory, { recursive: true, force: true }); });
+  const url = await server.ready;
+  const bearer = token();
+  const initialized = await fetch(`${url}/mcp`, { method: "POST", headers: headers(url, bearer), body: JSON.stringify(initialize()) });
+  assert.equal(initialized.status, 200);
+  await initialized.text();
+  const sessionId = initialized.headers.get("mcp-session-id");
+  assert.ok(sessionId);
+
+  const stream = await fetch(`${url}/mcp`, { headers: headers(url, bearer, { Accept: "text/event-stream", "Mcp-Session-Id": sessionId }) });
+  assert.equal(stream.status, 200);
+
+  const sessionHeaders = headers(url, bearer, { "Mcp-Session-Id": sessionId, "MCP-Protocol-Version": "2025-11-25" });
+  const cancelled = new AbortController();
+  const cancelledCall = fetch(`${url}/mcp`, {
+    method: "POST",
+    headers: sessionHeaders,
+    signal: cancelled.signal,
+    body: JSON.stringify({ jsonrpc: "2.0", id: 10, method: "tools/call", params: { name: "obsidian_commit_meta", arguments: { repository: directory } } }),
+  }).catch((error) => error);
+  await new Promise((done) => setTimeout(done, 100));
+  cancelled.abort();
+  assert.equal((await cancelledCall).name, "AbortError");
+
+  await waitForStderr(server, /mcp-http-session .*"action":"disconnect-deferred"/);
+  await new Promise((done) => setTimeout(done, 500));
+  assert.doesNotMatch(server.stderr(), /mcp-http-session .*"action":"closed"/);
+
+  await stream.body.cancel();
+  await waitForStderr(server, /mcp-http-session .*"action":"closed"/, 2000);
+  const followUp = await fetch(`${url}/mcp`, {
+    method: "POST",
+    headers: sessionHeaders,
+    body: JSON.stringify({ jsonrpc: "2.0", id: 20, method: "tools/list", params: {} }),
+  });
+  assert.equal(followUp.status, 404);
 });
