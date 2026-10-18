@@ -3,6 +3,7 @@
 import collections
 import hashlib
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -12,6 +13,7 @@ MAX_INPUT = 65536
 MAX_RECORD = 1048576
 MAX_EVENTS = 128
 MAX_TEXT = 8192
+MAX_EVENT_BYTES = 32768
 
 
 def encode(value):
@@ -28,7 +30,24 @@ def texts(content):
     return ""
 
 
-def prepare(source, target):
+def event_fingerprint(event):
+    return hashlib.sha256(json.dumps({"kind": event["kind"], "text": event["text"]},
+                                     sort_keys=True).encode("utf-8")).hexdigest()
+
+
+def segments(raw):
+    parts = []
+    while len(raw) > MAX_TEXT:
+        end = MAX_TEXT
+        while end and raw[end] & 0xC0 == 0x80:
+            end -= 1
+        parts.append(raw[:end].decode("utf-8"))
+        raw = raw[end:]
+    parts.append(raw.decode("utf-8"))
+    return parts
+
+
+def extract(source):
     events = collections.OrderedDict()
     summary = None
     counts = collections.Counter()
@@ -111,38 +130,76 @@ def prepare(source, target):
                         scratch.name], check=True)
         scratch.seek(0)
         candidates = [json.loads(line) for line in scratch]
-
     for event in candidates:
+        event["fp"] = event_fingerprint(event)
+    return candidates, counts, source_bytes, summary is not None
+
+
+def prepare(source, target, context=None, sent_path=None):
+    candidates, counts, source_bytes, has_summary = extract(source)
+    seen = set(context["seen"]) if context else None
+    git = context.get("git") if context else None
+    pending = [event for event in candidates if seen is None or event["fp"] not in seen]
+
+    units = []
+    for event in pending:
         raw = event["text"].encode("utf-8")
-        if len(raw) > MAX_TEXT:
+        if len(raw) > MAX_EVENT_BYTES:
             marker = "\n[... text omitted ...]\n"
             side = (MAX_TEXT - len(marker.encode("utf-8"))) // 2
-            event["text"] = (raw[:side].decode("utf-8", errors="ignore")
-                             + marker + raw[-side:].decode("utf-8", errors="ignore"))
+            parts = [raw[:side].decode("utf-8", errors="ignore") + marker
+                     + raw[-side:].decode("utf-8", errors="ignore")]
             counts["clipped_events"] += 1
+        else:
+            parts = segments(raw)
+        rows = [{"kind": event["kind"], "text": part} if len(parts) == 1 else
+                {"kind": event["kind"], "text": part, "part": f"{n}/{len(parts)}"}
+                for n, part in enumerate(parts, 1)]
+        units.append((event["fp"], event["kind"], rows,
+                      sum(len(encode(row).encode("utf-8")) for row in rows)))
 
+    git_rows = []
+    if git and git.get("available"):
+        git_rows = [{"kind": "local_git_evidence", "text": json.dumps(git, ensure_ascii=False)}]
+    reserved = sum(len(encode(row).encode("utf-8")) for row in git_rows)
+
+    # With carry-forward the oldest evidence goes first and the newest stays pending.
+    budget = MAX_INPUT - 2048 - reserved
+    total = sum(unit[3] for unit in units)
+    while total > budget:
+        index = -1 if seen is not None else (
+            1 if has_summary and len(units) > 1 and units[0][1] == "previous_summary" else 0)
+        total -= units.pop(index)[3]
+        counts["omitted_events"] += 1
+
+    sent = [unit[0] for unit in units]
+    body_rows = git_rows + [row for unit in units for row in unit[2]]
     metadata = {"kind": "extraction_metadata", "policy": "autosave-v1",
                 "max_input_bytes": MAX_INPUT, "max_record_bytes": MAX_RECORD,
                 "max_events": MAX_EVENTS, "max_text_bytes": MAX_TEXT,
                 "source_bytes": source_bytes, "payload_bytes": 0,
-                "mode": "previous_summary_plus_delta" if summary else "bounded_conversation",
-                "omissions": dict(counts)}
-    # Leave room for metadata, including byte-count digits and omission counters.
-    while sum(len(encode(event).encode("utf-8")) for event in candidates) > MAX_INPUT - 2048:
-        candidates.pop(1 if summary and len(candidates) > 1 else 0)
-        counts["omitted_events"] += 1
+                "mode": "previous_summary_plus_delta" if has_summary else "bounded_conversation",
+                "carry_forward": seen is not None,
+                "extracted_events": len(candidates),
+                "already_summarized_events": len(candidates) - len(pending),
+                "pending_events": len(pending), "sent_events": len(sent),
+                "retained_events": len(pending) - len(sent) if seen is not None else 0}
     metadata["omissions"] = dict(counts)
     metadata["context_incomplete"] = any(counts[key] for key in
         ("oversized_records", "invalid_records", "omitted_events", "clipped_events"))
-    body = "".join(encode(event) for event in candidates)
+    body = "".join(encode(row) for row in body_rows)
     for _ in range(4):
         metadata["payload_bytes"] = len((encode(metadata) + body).encode("utf-8"))
     output = encode(metadata) + body
     assert len(output.encode("utf-8")) <= MAX_INPUT
     Path(target).write_text(output, encoding="utf-8")
+    if sent_path:
+        Path(sent_path).write_text(json.dumps({"sent": sent}), encoding="utf-8")
     print("autosave input: source_bytes={} payload_bytes={} context_incomplete={}".format(
         source_bytes, metadata["payload_bytes"], metadata["context_incomplete"]), file=sys.stderr)
 
-
 if __name__ == "__main__":
-    prepare(sys.argv[1], sys.argv[2])
+    context_path = os.environ.get("AUTOSAVE_CONTEXT_FILE")
+    prepare(sys.argv[1], sys.argv[2],
+            json.loads(Path(context_path).read_text(encoding="utf-8")) if context_path else None,
+            os.environ.get("AUTOSAVE_SENT_FILE"))
