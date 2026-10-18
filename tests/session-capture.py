@@ -238,6 +238,39 @@ print('SKIP')
         self.run_hook(session=session)
         self.assertEqual(len(self.calls()), 2)
 
+    def test_unusable_state_reports_sanitized_error_before_dispatch(self):
+        unavailable = self.case / "state-file-sensitive-fixture"
+        unavailable.write_text("not a directory")
+        self.env["XDG_STATE_HOME"] = str(unavailable)
+        for args in ((), ("--capture",), ("--retry",)):
+            with self.subTest(args=args):
+                stderr = self.run_hook(*args)
+                self.assertIn("cannot initialize capture state", stderr)
+                self.assertIn("XDG_STATE_HOME", stderr)
+                self.assertNotIn(str(unavailable), stderr)
+                self.assertNotIn("Traceback", stderr)
+                self.assertNotIn("Decided to preserve", stderr)
+                self.assertFalse(self.calls())
+                self.assertFalse(self.receipts())
+                self.assertFalse(list((self.case / "tmp").glob("obsidian-session-*")))
+
+    def test_preflight_does_not_wait_for_background_capture(self):
+        process = subprocess.Popen(
+            ["bash", str(ROOT / "scripts/session-save.sh")],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True, env=dict(self.env, BLOCK_PROVIDER="1"))
+        self.addCleanup(self.reap, process)
+        try:
+            stdout, stderr = process.communicate(json.dumps({
+                "transcript_path": str(self.transcript), "session_id": "async-fixture"}), timeout=5)
+            self.assertEqual(process.returncode, 0, (stdout, stderr))
+            self.wait_for(lambda: (self.case / "ready").exists())
+            receipt, = self.receipts()
+            self.assertEqual(receipt["status"], "running")
+        finally:
+            (self.case / "release").touch()
+            self.wait_for(lambda: any(r["status"] == "process_succeeded" for r in self.receipts()))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -97,6 +97,10 @@ if [ -z "$FILE_SIZE" ] || [ "$FILE_SIZE" -lt 200 ]; then
   exit 0
 fi
 
+if ! python3 "${SCRIPT_DIR}/lib/session-capture.py" --prepare "$VAULT_PATH" "$TRANSCRIPT_PATH" "$SESSION_ID" >/dev/null; then
+  exit 0
+fi
+
 # Copy transcript to a temp file so session-summarize.sh can own and delete it
 TMPFILE="$(mktemp "${TMPDIR:-/tmp}/obsidian-session-XXXXXX")" || exit 0
 if ! cp "$TRANSCRIPT_PATH" "$TMPFILE"; then

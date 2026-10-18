@@ -218,6 +218,7 @@ run_hook() {
     env PATH="${BIN_DIR}:$PATH" \
       HOME="${CASE_DIR}/home" \
       XDG_CONFIG_HOME="${CASE_DIR}/xdg" \
+      XDG_STATE_HOME="${CASE_DIR}/state" \
       OBSIDIAN_LOCAL_MD="${CASE_DIR}/config.md" \
       TMPDIR="${CASE_DIR}" \
       NOHUP_ARGS="${CASE_DIR}/nohup-args.txt" \

@@ -205,6 +205,7 @@ EOF
       : > "$case_dir/calls"
       printf '{"transcript_path":"%s"}' "$case_dir/transcript.jsonl" |
         env HOME="$case_dir/home" XDG_CONFIG_HOME="$case_dir/home/.config" \
+          XDG_STATE_HOME="$case_dir/home/.local/state" \
           XDG_CACHE_HOME="$case_dir/home/.cache" TMPDIR="$case_dir/tmp" \
           PATH="$case_dir/bin:$PATH" KEEPER_OS=Darwin OBSIDIAN_SUMMARIZING= \
           OBSIDIAN_LOCAL_MD="$config" CALLS="$case_dir/calls" \

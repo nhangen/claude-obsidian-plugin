@@ -57,7 +57,7 @@ def private_directory(path):
     path.chmod(0o700)
 
 
-def capture(snapshot, config, vault, source, session_id, retry):
+def prepare_state(vault, source, session_id):
     state_home = os.environ.get("XDG_STATE_HOME")
     if not state_home:
         home = os.environ.get("HOME")
@@ -72,6 +72,14 @@ def capture(snapshot, config, vault, source, session_id, retry):
     private_directory(state)
     records = state / "boundaries"
     private_directory(records)
+    for directory in (state, records):
+        with tempfile.TemporaryFile(dir=directory):
+            pass
+    return source_id, state, records
+
+
+def capture(snapshot, config, vault, source, session_id, retry):
+    source_id, state, records = prepare_state(vault, source, session_id)
     event = {"source_session_hash": source_id, "time": time.time(),
              "provider_success": None, "usage": None}
     try:
@@ -137,6 +145,15 @@ def capture(snapshot, config, vault, source, session_id, retry):
 
 def main():
     os.umask(0o077)
+    if sys.argv[1:2] == ["--prepare"]:
+        try:
+            vault, source, session_id = sys.argv[2:]
+            prepare_state(Path(vault), Path(source), session_id)
+            return 0
+        except (OSError, ValueError, TypeError):
+            print("session-capture: cannot initialize capture state; check XDG_STATE_HOME "
+                  "or HOME/.local/state and directory permissions", file=sys.stderr)
+            return 1
     snapshot, config, vault, source, session_id, retry = sys.argv[1:]
     try:
         if retry not in ("true", "false"):
