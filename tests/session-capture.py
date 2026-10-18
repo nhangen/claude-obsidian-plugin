@@ -151,11 +151,13 @@ print(json.dumps({"type":"result", "subtype":"success", "is_error":False,
                         "commit", "--allow-empty", "-m", "Fixture baseline"],
                        check=True, capture_output=True)
         (repo / "changed.txt").write_text("fixture change")
+        (repo / "API_KEY=fictional-git-secret.txt").write_text("credential-shaped filename")
         self.run_hook()
         self.assertEqual(len(self.calls()), 1)
         payload = (self.case / "provider-input").read_text()
         self.assertIn("local_git_evidence", payload)
         self.assertIn("changed.txt", payload)
+        self.assertNotIn("fictional-git-secret", payload)
         # Expire the checkpoint without sleeping or introducing a production clock override.
         state, = (self.case / "state").glob("**/activity.json")
         checkpoint = json.loads(state.read_text())

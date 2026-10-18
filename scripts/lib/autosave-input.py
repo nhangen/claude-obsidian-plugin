@@ -30,6 +30,17 @@ def texts(content):
     return ""
 
 
+def redact(events):
+    with tempfile.NamedTemporaryFile(mode="w+", encoding="utf-8") as scratch:
+        for event in events:
+            scratch.write(encode(event))
+        scratch.flush()
+        subprocess.run(["bash", str(Path(__file__).with_name("redact-secrets.sh")),
+                        scratch.name], check=True)
+        scratch.seek(0)
+        return [json.loads(line) for line in scratch]
+
+
 def event_fingerprint(event):
     return hashlib.sha256(json.dumps({"kind": event["kind"], "text": event["text"]},
                                      sort_keys=True).encode("utf-8")).hexdigest()
@@ -122,14 +133,7 @@ def extract(source):
 
     candidates = ([summary] if summary else []) + list(events.values())
     # Redact full values before clipping, so a boundary cannot split a credential.
-    with tempfile.NamedTemporaryFile(mode="w+", encoding="utf-8") as scratch:
-        for event in candidates:
-            scratch.write(encode(event))
-        scratch.flush()
-        subprocess.run(["bash", str(Path(__file__).with_name("redact-secrets.sh")),
-                        scratch.name], check=True)
-        scratch.seek(0)
-        candidates = [json.loads(line) for line in scratch]
+    candidates = redact(candidates)
     for event in candidates:
         event["fp"] = event_fingerprint(event)
     return candidates, counts, source_bytes, summary is not None
@@ -160,7 +164,7 @@ def prepare(source, target, context=None, sent_path=None):
 
     git_rows = []
     if git and git.get("available"):
-        git_rows = [{"kind": "local_git_evidence", "text": json.dumps(git, ensure_ascii=False)}]
+        git_rows = redact([{"kind": "local_git_evidence", "text": json.dumps(git, ensure_ascii=False)}])
     reserved = sum(len(encode(row).encode("utf-8")) for row in git_rows)
 
     # With carry-forward the oldest evidence goes first and the newest stays pending.
