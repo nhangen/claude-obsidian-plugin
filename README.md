@@ -339,10 +339,11 @@ API pricing does not establish subscription weighting. No live model evaluation
 is part of the offline tests.
 
 The subprocess overrides inherited effort, disables ordinary settings discovery,
-and sets an empty fallback chain with an exact model allowlist. Organization
-managed policy can supersede that allowlist; when the CLI returns a different
-model, the summary is rejected and recorded as `model_mismatch`. This check happens
-after the call and cannot undo provider usage. It never retries with a pricier model.
+and sets an empty fallback chain with a model allowlist plus exact returned-model
+validation. Organization managed policy can supersede that allowlist; when the CLI
+returns a different model, the summary is rejected and recorded as `model_mismatch`.
+This check happens after the call and cannot undo provider usage. It never
+retries with a pricier model.
 
 Each invocation retains one private JSON record under
 `${XDG_STATE_HOME:-$HOME/.local/state}/obsidian/summary-usage/` (directory mode 700,
