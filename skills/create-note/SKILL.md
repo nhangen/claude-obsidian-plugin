@@ -30,8 +30,8 @@ native here.
    - `type` — `note` (or a vault-defined type if `VAULT.md` names one).
    - `links` — any related notes the user named.
    - `resolved: true` + `target` — only for a page inside an existing project
-     folder whose full path you know. Run `allowlist_validate "<target>"` (step 6)
-     and check the folder for a same-name note first; `resolved` promises the
+     folder whose full path you know. Perform the step 6 allow-list check
+     (`allowlist_validate "<target>"`) first, then check the folder for a same-name note first; `resolved` promises the
      caller already routed and deduped. keeper-save then writes directly with
      no subagent. Otherwise omit both and let the librarian route.
    Relay the committed path keeper-save returns. If it surfaces a
