@@ -7,7 +7,6 @@ import re
 from pathlib import Path
 import runpy
 import subprocess
-import tempfile
 import time
 
 
@@ -59,13 +58,11 @@ def checkpoint(snapshot, config, state, cwd, forced):
     minimum = int(scalar(str(config), "summary_min_messages", "3"))
     if interval < 0 or minimum < 1:
         raise ValueError("invalid activity thresholds")
-    prepare = runpy.run_path(str(Path(__file__).with_name("autosave-input.py")))["prepare"]
-    with tempfile.NamedTemporaryFile(dir=snapshot.parent) as bounded:
-        prepare(snapshot, bounded.name)
-        rows = [json.loads(line) for line in Path(bounded.name).read_text().splitlines()]
-    metadata, events = rows[0], rows[1:]
-    fingerprints = [sha(json.dumps(event, sort_keys=True)) for event in events]
-    pending = [event for event, fingerprint in zip(events, fingerprints) if fingerprint not in seen]
+    extract = runpy.run_path(str(Path(__file__).with_name("autosave-input.py")))["extract"]
+    events = extract(snapshot)[0]
+    fingerprints = [event["fp"] for event in events]
+    known = set(seen)
+    pending = [event for event in events if event["fp"] not in known]
     meaningful = [event for event in pending if event["kind"] in ("user", "assistant")
                   and len(event["text"].strip()) >= 80]
     git, git_hash = git_activity(cwd, previous.get("head"))
@@ -76,40 +73,10 @@ def checkpoint(snapshot, config, state, cwd, forced):
              "interval_secs": interval, "minimum_messages": minimum}
     if not forced:
         if now - last_attempt < interval:
-            return "deferred_interval", facts, None
+            return "deferred_interval", facts, None, None
         if not pending or (len(meaningful) < minimum and not (git_changed and meaningful)):
-            return "deferred_activity", facts, None
-    next_state = {"version": 1, "seen": fingerprints, "git": git_hash, "head": git.get("head"), "last_attempt": now}
-    if forced:
-        return "eligible", facts, next_state
-    # Keep the real transcript untouched; the child owns only this private snapshot.
-    selected = pending[-12:]
-    digest = {"kind": "local_activity_digest", **facts, "git": git,
-              "original_extraction": metadata,
-              "selected_events": len(selected), "pending_events": len(pending),
-              "scope": "Recent activity excerpts, not a complete session transcript. "
-                       "Git metadata describes observed state, not authorship or test success."}
-    records = [{"type": "user", "message": {"content": json.dumps(digest)}}]
-    clipped = 0
-    for event in selected:
-        text = event["text"]
-        raw = text.encode("utf-8")
-        if len(raw) > 1200:
-            clipped += 1
-            text = (raw[:600].decode("utf-8", errors="ignore")
-                    + "\n[... local digest excerpt omitted ...]\n"
-                    + raw[-600:].decode("utf-8", errors="ignore"))
-        records.append({"type": "assistant" if event["kind"] == "assistant" else "user",
-                        "message": {"content": event["kind"] + ": " + text}})
-    digest["clipped_events"] = clipped
-    while True:
-        digest["selected_events"] = len(records) - 1
-        records[0]["message"]["content"] = json.dumps(digest, ensure_ascii=False)
-        output = "".join(json.dumps(row, ensure_ascii=False) + "\n" for row in records)
-        if len(output.encode("utf-8")) <= 24576:
-            break
-        if len(records) == 1:
-            raise ValueError("activity metadata exceeds digest limit")
-        records.pop(1)
-    snapshot.write_text(output)
-    return "eligible", facts, next_state
+            return "deferred_activity", facts, None, None
+    next_state = {"version": 1, "seen": [fp for fp in fingerprints if fp in known], "git": git_hash,
+                  "head": git.get("head"), "last_attempt": now, "current": fingerprints}
+    context = None if forced else {"seen": sorted(known), "git": git}
+    return "eligible", facts, next_state, context

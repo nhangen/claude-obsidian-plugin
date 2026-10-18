@@ -38,10 +38,18 @@ if os.environ.get('BLOCK_PROVIDER') == '1':
         if time.monotonic() > deadline:
             sys.exit(99)
         time.sleep(0.01)
+if os.environ.get('AUTOSAVE_CONTEXT_FILE'):
+    (case / 'context-copy').write_text(pathlib.Path(os.environ['AUTOSAVE_CONTEXT_FILE']).read_text())
+if os.environ.get('DROP_RECEIPT') == '1':
+    pathlib.Path(os.environ['AUTOSAVE_SENT_FILE']).unlink()
 if os.environ.get('FAIL_PROVIDER') == '1':
     print('sensitive provider error must never enter receipts', file=sys.stderr)
     sys.exit(23)
-print(json.dumps({"type":"result", "subtype":"success", "is_error":False, "result":"SKIP"}))
+note = ("---\\ndate: 2026-10-18\\ndomain: dev\\nvault_folder: Inbox/\\nslug: gate-fixture\\n"
+        "session_intent: execution\\ncapture_action: project_note\\nresearch_state_change: none\\n---\\n\\n"
+        "# Gate fixture\\n\\n## Summary\\n- fixture\\n")
+print(json.dumps({"type":"result", "subtype":"success", "is_error":False,
+                  "result": note if os.environ.get('PROVIDER_NOTE') == '1' else "SKIP"}))
 """)
         provider.chmod(0o755)
         self.env = dict(os.environ, HOME=str(self.case / "home"),
@@ -147,11 +155,18 @@ print(json.dumps({"type":"result", "subtype":"success", "is_error":False, "resul
                         "commit", "--allow-empty", "-m", "Fixture baseline"],
                        check=True, capture_output=True)
         (repo / "changed.txt").write_text("fixture change")
+        (repo / "API_KEY=fictional-git-secret.txt").write_text("credential-shaped filename")
         self.run_hook()
         self.assertEqual(len(self.calls()), 1)
         payload = (self.case / "provider-input").read_text()
-        self.assertIn("local_activity_digest", payload)
+        self.assertIn("local_git_evidence", payload)
         self.assertIn("changed.txt", payload)
+        self.assertNotIn("fictional-git-secret", payload)
+        self.assertIn("not proof of authorship", payload)
+        context = (self.case / "context-copy").read_text()
+        self.assertIn("changed.txt", context)
+        self.assertNotIn("fictional-git-secret", context)
+        self.assertFalse(list((self.case / "state").glob("**/context-*.json")))
         # Expire the checkpoint without sleeping or introducing a production clock override.
         state, = (self.case / "state").glob("**/activity.json")
         checkpoint = json.loads(state.read_text())
@@ -197,7 +212,27 @@ print(json.dumps({"type":"result", "subtype":"success", "is_error":False, "resul
         self.run_hook()
         self.assertEqual(len(self.calls()), 2)
 
-    def test_automatic_digest_is_bounded_redacted_and_preserves_original(self):
+    def expire(self):
+        state, = (self.case / "state").glob("**/activity.json")
+        checkpoint = json.loads(state.read_text())
+        checkpoint["last_attempt"] = 0
+        state.write_text(json.dumps(checkpoint))
+
+    def seen_count(self):
+        state, = (self.case / "state").glob("**/activity.json")
+        return len(json.loads(state.read_text()).get("seen", []))
+
+    def provider_rows(self):
+        return [json.loads(line) for line in (self.case / "provider-input").read_text().splitlines()]
+
+    def provider_text(self):
+        return "\n".join(row.get("text", "") for row in self.provider_rows()[1:])
+
+    def fill(self, prefix, count, size):
+        for i in range(count):
+            self.message(f"{prefix}{i}", f"{prefix}{i} " + "note " * (size // 5))
+
+    def test_automatic_input_is_bounded_redacted_and_preserves_original(self):
         for i in range(16):
             self.message(str(i), "Decision head " + "🦉" * 4000 + " API_KEY=fictional-automatic-secret tail evidence")
         original = self.transcript.read_bytes()
@@ -206,13 +241,129 @@ print(json.dumps({"type":"result", "subtype":"success", "is_error":False, "resul
         self.assertEqual(original, self.transcript.read_bytes())
         payload = (self.case / "provider-input").read_text()
         metadata = json.loads(payload.splitlines()[0])
-        self.assertLessEqual(metadata["source_bytes"], 24576)
+        self.assertLessEqual(metadata["payload_bytes"], 65536)
+        self.assertGreater(metadata["source_bytes"], len(original) - 1)
+        self.assertNotIn("local_activity_digest", payload)
         self.assertNotIn("fictional-automatic-secret", payload)
         self.assertIn("[REDACTED]", payload)
-        self.assertIn("local digest excerpt omitted", payload)
         state = "".join(p.read_text() for p in (self.case / "state").glob("**/*.json"))
         self.assertNotIn("Decision head", state)
         self.assertNotIn("tail evidence", state)
+
+    def test_older_pending_event_and_middle_of_long_event_reach_the_model(self):
+        self.transcript.write_text("")
+        self.message("old", "OLD-DECISION-A: accepted finding, dropped finding two. " + "note " * 60)
+        self.message("long", "LONG-HEAD " + "alpha " * 1500 + " MIDDLE-FACT-B exact test outcome PASS on php 8.3 " + "beta " * 1800 + " LONG-TAIL")
+        self.fill("filler", 20, 400)
+        self.run_hook(PROVIDER_NOTE="1")
+        text = self.provider_text()
+        for fact in ("OLD-DECISION-A", "MIDDLE-FACT-B", "LONG-TAIL", "filler19"):
+            self.assertIn(fact, text)
+        metadata = self.provider_rows()[0]
+        self.assertFalse(metadata["context_incomplete"])
+        self.assertEqual(metadata["retained_events"], 0)
+        self.assertEqual(self.seen_count(), 22)
+        note, = (self.case / "vault/Inbox").glob("*-gate-fixture.md")
+        self.assertIn('"context_incomplete":false', note.read_text())
+
+    def test_omitted_pending_stays_unacknowledged_and_is_sent_next_capture(self):
+        self.transcript.write_text("")
+        for i in range(14):
+            self.message(f"big{i}", f"FACT-{i:02d} " + "note " * 1400)
+        self.run_hook(PROVIDER_NOTE="1")
+        first = self.provider_text()
+        metadata = self.provider_rows()[0]
+        self.assertTrue(metadata["context_incomplete"])
+        self.assertGreater(metadata["retained_events"], 0)
+        self.assertIn("FACT-00", first)
+        self.assertNotIn("FACT-13", first)
+        self.assertEqual(self.seen_count(), metadata["sent_events"])
+        note, = (self.case / "vault/Inbox").glob("*-gate-fixture.md")
+        self.assertIn('"context_incomplete":true', note.read_text())
+        self.expire()
+        self.message("later", "later " + "note " * 100)
+        self.run_hook()
+        self.assertEqual(len(self.calls()), 2)
+        second = self.provider_text()
+        self.assertIn("FACT-13", second)
+        self.assertNotIn("FACT-00", second)
+        self.assertEqual(self.seen_count(), 15)
+
+    def test_skip_acknowledges_only_events_the_model_received(self):
+        self.transcript.write_text("")
+        self.fill("skipped", 14, 7000)
+        self.run_hook()
+        metadata = self.provider_rows()[0]
+        self.assertGreater(metadata["retained_events"], 0)
+        self.assertEqual(self.seen_count(), metadata["sent_events"])
+        self.assertFalse(list((self.case / "vault").glob("**/*gate-fixture.md")))
+
+    def test_oversized_event_is_clipped_flagged_and_acknowledged(self):
+        self.transcript.write_text("")
+        self.message("huge", "HUGE-HEAD " + "note " * 9000 + " HUGE-TAIL")
+        self.fill("small", 3, 500)
+        self.run_hook()
+        metadata = self.provider_rows()[0]
+        self.assertEqual(metadata["omissions"]["clipped_events"], 1)
+        self.assertTrue(metadata["context_incomplete"])
+        self.assertIn("HUGE-TAIL", self.provider_text())
+        self.assertEqual(self.seen_count(), 4)
+
+    def test_missing_sent_receipt_acknowledges_nothing_and_is_recorded(self):
+        self.transcript.write_text("")
+        self.fill("dropped", 4, 500)
+        self.run_hook(DROP_RECEIPT="1")
+        self.assertEqual(self.seen_count(), 0)
+        self.assertEqual({r["ack"] for r in self.receipts()}, {"receipt_missing"})
+
+    def test_forced_capture_over_budget_acknowledges_only_what_was_sent(self):
+        self.transcript.write_text("")
+        for i in range(14):
+            self.message(f"big{i}", f"FACT-{i:02d} " + "note " * 1400)
+        self.run_hook("--capture")
+        metadata = self.provider_rows()[0]
+        self.assertFalse(metadata["carry_forward"])
+        self.assertTrue(metadata["context_incomplete"])
+        self.assertLess(metadata["sent_events"], 14)
+        self.assertEqual(self.seen_count(), metadata["sent_events"])
+        self.assertIn("FACT-13", self.provider_text())
+        self.assertNotIn("FACT-00", self.provider_text())
+
+    def test_failed_capture_acknowledges_nothing(self):
+        self.transcript.write_text("")
+        self.fill("failed", 6, 500)
+        self.run_hook(FAIL_PROVIDER="1")
+        self.assertEqual(self.seen_count(), 0)
+        self.expire()
+        self.message("later", "later " + "note " * 100)
+        self.run_hook()
+        self.assertEqual(len(self.calls()), 2)
+        self.assertIn("failed0", self.provider_text())
+        self.assertEqual(self.seen_count(), 7)
+
+    def test_compaction_and_rewrite_resend_only_what_changed(self):
+        self.transcript.write_text("")
+        self.fill("before", 4, 500)
+        self.run_hook()
+        self.expire()
+        with self.transcript.open("a") as stream:
+            stream.write(json.dumps({"type": "user", "isCompactSummary": True, "uuid": "compact",
+                                     "message": {"role": "user", "content": "COMPACT-SUMMARY decision carried forward " + "s" * 200}}) + "\n")
+        self.fill("after", 3, 500)
+        self.run_hook()
+        text = self.provider_text()
+        self.assertIn("COMPACT-SUMMARY", text)
+        self.assertIn("after0", text)
+        self.assertNotIn("before0", text)
+        self.assertEqual(self.provider_rows()[0]["mode"], "previous_summary_plus_delta")
+        self.expire()
+        self.message("after1", "after1 " + "note " * 100 + " REWRITTEN-CONCLUSION")
+        self.message("after-extra", "after-extra " + "note " * 100)
+        self.message("after-extra2", "after-extra2 " + "note " * 100)
+        self.run_hook()
+        text = self.provider_text()
+        self.assertIn("REWRITTEN-CONCLUSION", text)
+        self.assertNotIn("after2 ", text)
 
     def test_invalid_activity_configuration_and_state_fail_closed(self):
         self.config.write_text(self.config.read_text().replace("summary_interval_secs: 0", "summary_interval_secs: typo"))

@@ -138,7 +138,7 @@ print(json.dumps({"type": "result", "subtype": "success",
     write([message("user", "Earlier context " + "🦉" * 3000 + str(i)) for i in range(150)] + [
         message("assistant", "Final significant decision: cap input bytes. Commit 1234567890abcdef."),
         message("user", [{"type": "tool_result", "tool_use_id": "large", "content":
-            "head " + "z" * 18000 + " password=another-fictional-secret tail PASS"}])])
+            "head " + "z" * 40000 + " password=another-fictional-secret tail PASS"}])])
     with source.open("a") as stream:
         stream.write("{bad json}\n")
         stream.write(json.dumps(message("user", "oversized " + "x" * 1048576)) + "\n")
