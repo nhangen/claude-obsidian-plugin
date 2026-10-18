@@ -126,7 +126,7 @@ function sessionSnapshot(configuration) {
   };
 }
 
-function logSession({ action, session, configuration, reason }) {
+function logSession({ action, session, configuration, reason, inFlight }) {
   const event = {
     event: "mcp-http-session",
     action,
@@ -137,6 +137,7 @@ function logSession({ action, session, configuration, reason }) {
     ...sessionSnapshot(configuration),
   };
   if (reason) event.reason = reason;
+  if (inFlight !== undefined) event.in_flight = inFlight;
   process.stderr.write(`mcp-http-session ${JSON.stringify(event)}\n`);
 }
 
@@ -334,8 +335,9 @@ function scheduleSessionClose(session, configuration, reason) {
   session.disconnectTimer = setTimeout(() => {
     session.disconnectTimer = undefined;
     if (session.closed) return;
-    if ((session.inFlight ?? 0) > 0) {
+    if (session.inFlight > 0) {
       session.pendingDisconnect = true;
+      logSession({ action: "disconnect-deferred", session, configuration, reason: session.disconnectReason ?? reason, inFlight: session.inFlight });
       return;
     }
     const closeReason = session.disconnectReason ?? reason;
@@ -589,7 +591,7 @@ async function handleRequest(req, res, configuration) {
     if (session && session.fingerprint !== auth.fingerprint) throw new HttpBoundaryError(403, -32000, "Forbidden");
     if (session && method === "DELETE") session.closeReason = "client-delete";
     if (session) {
-      session.inFlight = (session.inFlight ?? 0) + 1;
+      session.inFlight = session.inFlight + 1;
       inFlightTracked = true;
     }
     const bodyTimer = setTimeout(() => {
@@ -624,7 +626,7 @@ async function handleRequest(req, res, configuration) {
       provisionalSession = createSession(configuration, auth);
       await provisionalSession.server.connect(provisionalSession.transport);
       session = provisionalSession;
-      session.inFlight = (session.inFlight ?? 0) + 1;
+      session.inFlight = session.inFlight + 1;
       inFlightTracked = true;
     }
     touchSession(session, configuration);
@@ -671,7 +673,7 @@ async function handleRequest(req, res, configuration) {
     }
     if (controller.signal.aborted && session && method !== "GET") await closeSession(session, configuration, "request-aborted");
     if (inFlightTracked && session) {
-      session.inFlight = Math.max(0, (session.inFlight ?? 0) - 1);
+      session.inFlight = Math.max(0, session.inFlight - 1);
       if (session.inFlight === 0 && session.pendingDisconnect && !session.closed) {
         session.pendingDisconnect = false;
         const closeReason = session.disconnectReason ?? "stream-timeout";

@@ -569,16 +569,13 @@ test("concurrent POST tool calls in flight across disconnect grace boundary comp
   const sessionId = initialized.headers.get("mcp-session-id");
   assert.ok(sessionId);
 
-  // Connect SSE stream and then disconnect it to start disconnectGraceMs (200ms)
   const streamHeaders = headers(url, bearer, { Accept: "text/event-stream", "Mcp-Session-Id": sessionId });
   const stream = await fetch(`${url}/mcp`, { headers: streamHeaders });
   assert.equal(stream.status, 200);
   await stream.body.cancel();
 
-  // Wait 80ms into the 200ms grace window (120ms remaining)
   await new Promise((done) => setTimeout(done, 80));
 
-  // Dispatch 4 concurrent tool calls that take ~250ms each (exceeding the remaining 120ms of grace)
   const sessionHeaders = headers(url, bearer, { "Mcp-Session-Id": sessionId, "MCP-Protocol-Version": "2025-11-25" });
   const calls = Array.from({ length: 4 }, (_, i) => fetch(`${url}/mcp`, {
     method: "POST",
@@ -593,7 +590,6 @@ test("concurrent POST tool calls in flight across disconnect grace boundary comp
     assert.ok(!body.error, `unexpected error: ${JSON.stringify(body.error)}`);
   }
 
-  // Verify the session was revived and subsequent calls succeed after the original grace expired
   await new Promise((done) => setTimeout(done, 250));
   const followUp = await fetch(`${url}/mcp`, {
     method: "POST",
@@ -618,16 +614,13 @@ test("rejected POST in flight across disconnect grace boundary does not revive s
   const sessionId = initialized.headers.get("mcp-session-id");
   assert.ok(sessionId);
 
-  // Disconnect stream to trigger disconnect grace (200ms)
   const streamHeaders = headers(url, bearer, { Accept: "text/event-stream", "Mcp-Session-Id": sessionId });
   const stream = await fetch(`${url}/mcp`, { headers: streamHeaders });
   assert.equal(stream.status, 200);
   await stream.body.cancel();
 
-  // Wait 150ms (50ms left of grace)
   await new Promise((done) => setTimeout(done, 150));
 
-  // Send a request spanning the grace boundary that gets rejected with 400 (invalid JSON)
   const payload = "not valid json";
   const sessionHeaders = headers(url, bearer, { "Mcp-Session-Id": sessionId, "Content-Length": String(Buffer.byteLength(payload)) });
   const req = httpRequest(`${url}/mcp`, { method: "POST", headers: sessionHeaders });
@@ -639,14 +632,19 @@ test("rejected POST in flight across disconnect grace boundary does not revive s
     });
   });
   req.write("not ");
-  // Hold request body in flight past the 50ms remaining grace
-  await new Promise((done) => setTimeout(done, 100));
+  await new Promise((done) => setTimeout(done, 300));
+  assert.match(server.stderr(), /mcp-http-session .*"action":"disconnect-deferred".*"in_flight":1/);
+  assert.doesNotMatch(server.stderr(), /mcp-http-session .*"action":"closed"/);
   req.end("valid json");
 
   const rejected = await responsePromise;
   assert.equal(rejected.status, 400);
+  const closedLine = /mcp-http-session .*"action":"closed".*"reason":"transport-disconnect"/;
+  for (let waited = 0; waited < 1000 && !closedLine.test(server.stderr()); waited += 25) {
+    await new Promise((done) => setTimeout(done, 25));
+  }
+  assert.match(server.stderr(), closedLine);
 
-  // Session must now be closed since the in-flight request was rejected
   const afterClose = await fetch(`${url}/mcp`, {
     method: "POST",
     headers: headers(url, bearer, { "Mcp-Session-Id": sessionId, "MCP-Protocol-Version": "2025-11-25" }),
