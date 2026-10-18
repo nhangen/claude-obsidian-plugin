@@ -630,7 +630,7 @@ test("rejected POST in flight across disconnect grace boundary does not revive s
 
   await new Promise((done) => setTimeout(done, 150));
 
-  const payload = '{"jsonrpc":"1.0","id":1}';
+  const payload = "not valid json";
   const sessionHeaders = headers(url, bearer, { "Mcp-Session-Id": sessionId, "Content-Length": String(Buffer.byteLength(payload)) });
   const req = httpRequest(`${url}/mcp`, { method: "POST", headers: sessionHeaders });
   const responsePromise = new Promise((resolve) => {
@@ -640,12 +640,11 @@ test("rejected POST in flight across disconnect grace boundary does not revive s
       res.on("end", () => resolve({ status: res.statusCode, body: data }));
     });
   });
-  req.write(payload.slice(0, 10));
+  req.write("not ");
   await new Promise((done) => setTimeout(done, 300));
   assert.match(server.stderr(), /mcp-http-session .*"action":"disconnect-deferred".*"in_flight":1/);
   assert.doesNotMatch(server.stderr(), /mcp-http-session .*"action":"closed"/);
-  const requestEndedAt = Date.now();
-  req.end(payload.slice(10));
+  req.end("valid json");
 
   const rejected = await responsePromise;
   assert.equal(rejected.status, 400);
@@ -854,8 +853,8 @@ test("revived session re-arms idle TTL without a follow-up request (#221)", asyn
 test("rejected POST in flight across session TTL boundary does not revive session (#221)", async (t) => {
   const { directory, config } = await fixture();
   const server = startServer(config, {
-    MCP_HTTP_REQUEST_TIMEOUT_MS: "2000",
-    MCP_HTTP_SESSION_TTL_MS: "200",
+    MCP_HTTP_REQUEST_TIMEOUT_MS: "3000",
+    MCP_HTTP_SESSION_TTL_MS: "600",
   });
   t.after(async () => { await server.stop(); await rm(directory, { recursive: true, force: true }); });
   const url = await server.ready;
@@ -886,8 +885,8 @@ test("rejected POST in flight across session TTL boundary does not revive sessio
   assert.equal(rejected.status, 400);
 
   await waitForStderr(server, /mcp-http-session .*"action":"closed".*"reason":"ttl-expired"/, 2000);
-  // A revived session would only close after a fresh 200ms idle TTL; a rejected one closes on drain.
-  assert.ok(Date.now() - requestEndedAt < 150);
+  // A revived session would only close after a fresh 600ms idle TTL; a rejected one closes on drain.
+  assert.ok(Date.now() - requestEndedAt < 400);
 
   const afterClose = await fetch(`${url}/mcp`, {
     method: "POST",
