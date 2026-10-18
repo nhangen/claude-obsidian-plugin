@@ -546,3 +546,109 @@ test("disconnect before response headers keeps wire status null", async (t) => {
   assert.equal(event.wire_status, null);
   assert.equal(event.timeout_phase, null);
 });
+
+test("concurrent POST tool calls in flight across disconnect grace boundary complete and revive session (#188)", async (t) => {
+  const { directory, config } = await fixture();
+  const bin = join(directory, "bin");
+  await mkdir(bin);
+  // Delay commit metadata by 250ms so requests remain in flight when disconnectTimer fires.
+  await writeFile(join(bin, "bash"), '#!/bin/sh\ncase "$1" in */commit-meta.sh) node -e \'setTimeout(()=>{}, 250)\' ;; esac\nexec /bin/bash "$@"\n');
+  await chmod(join(bin, "bash"), 0o755);
+  const server = startServer(config, {
+    PATH: `${bin}:${process.env.PATH}`,
+    MCP_HTTP_REQUEST_TIMEOUT_MS: "3000",
+    MCP_HTTP_DISCONNECT_GRACE_MS: "200",
+    MCP_REPOSITORY_ROOTS: directory,
+  });
+  t.after(async () => { await server.stop(); await rm(directory, { recursive: true, force: true }); });
+  const url = await server.ready;
+  const bearer = token();
+  const initialized = await fetch(`${url}/mcp`, { method: "POST", headers: headers(url, bearer), body: JSON.stringify(initialize()) });
+  assert.equal(initialized.status, 200);
+  await initialized.text();
+  const sessionId = initialized.headers.get("mcp-session-id");
+  assert.ok(sessionId);
+
+  const streamHeaders = headers(url, bearer, { Accept: "text/event-stream", "Mcp-Session-Id": sessionId });
+  const stream = await fetch(`${url}/mcp`, { headers: streamHeaders });
+  assert.equal(stream.status, 200);
+  await stream.body.cancel();
+
+  await new Promise((done) => setTimeout(done, 80));
+
+  const sessionHeaders = headers(url, bearer, { "Mcp-Session-Id": sessionId, "MCP-Protocol-Version": "2025-11-25" });
+  const calls = Array.from({ length: 4 }, (_, i) => fetch(`${url}/mcp`, {
+    method: "POST",
+    headers: sessionHeaders,
+    body: JSON.stringify({ jsonrpc: "2.0", id: 10 + i, method: "tools/call", params: { name: "obsidian_commit_meta", arguments: { repository: directory } } }),
+  }));
+
+  const responses = await Promise.all(calls);
+  for (const res of responses) {
+    assert.equal(res.status, 200);
+    const body = await res.json();
+    assert.ok(!body.error, `unexpected error: ${JSON.stringify(body.error)}`);
+  }
+
+  await new Promise((done) => setTimeout(done, 250));
+  const followUp = await fetch(`${url}/mcp`, {
+    method: "POST",
+    headers: sessionHeaders,
+    body: JSON.stringify({ jsonrpc: "2.0", id: 20, method: "tools/list", params: {} }),
+  });
+  assert.equal(followUp.status, 200);
+});
+
+test("rejected POST in flight across disconnect grace boundary does not revive session (#188)", async (t) => {
+  const { directory, config } = await fixture();
+  const server = startServer(config, {
+    MCP_HTTP_REQUEST_TIMEOUT_MS: "2000",
+    MCP_HTTP_DISCONNECT_GRACE_MS: "200",
+  });
+  t.after(async () => { await server.stop(); await rm(directory, { recursive: true, force: true }); });
+  const url = await server.ready;
+  const bearer = token();
+  const initialized = await fetch(`${url}/mcp`, { method: "POST", headers: headers(url, bearer), body: JSON.stringify(initialize()) });
+  assert.equal(initialized.status, 200);
+  await initialized.text();
+  const sessionId = initialized.headers.get("mcp-session-id");
+  assert.ok(sessionId);
+
+  const streamHeaders = headers(url, bearer, { Accept: "text/event-stream", "Mcp-Session-Id": sessionId });
+  const stream = await fetch(`${url}/mcp`, { headers: streamHeaders });
+  assert.equal(stream.status, 200);
+  await stream.body.cancel();
+
+  await new Promise((done) => setTimeout(done, 150));
+
+  const payload = "not valid json";
+  const sessionHeaders = headers(url, bearer, { "Mcp-Session-Id": sessionId, "Content-Length": String(Buffer.byteLength(payload)) });
+  const req = httpRequest(`${url}/mcp`, { method: "POST", headers: sessionHeaders });
+  const responsePromise = new Promise((resolve) => {
+    req.on("response", (res) => {
+      let data = "";
+      res.on("data", (c) => { data += c; });
+      res.on("end", () => resolve({ status: res.statusCode, body: data }));
+    });
+  });
+  req.write("not ");
+  await new Promise((done) => setTimeout(done, 300));
+  assert.match(server.stderr(), /mcp-http-session .*"action":"disconnect-deferred".*"in_flight":1/);
+  assert.doesNotMatch(server.stderr(), /mcp-http-session .*"action":"closed"/);
+  req.end("valid json");
+
+  const rejected = await responsePromise;
+  assert.equal(rejected.status, 400);
+  const closedLine = /mcp-http-session .*"action":"closed".*"reason":"transport-disconnect"/;
+  for (let waited = 0; waited < 1000 && !closedLine.test(server.stderr()); waited += 25) {
+    await new Promise((done) => setTimeout(done, 25));
+  }
+  assert.match(server.stderr(), closedLine);
+
+  const afterClose = await fetch(`${url}/mcp`, {
+    method: "POST",
+    headers: headers(url, bearer, { "Mcp-Session-Id": sessionId, "MCP-Protocol-Version": "2025-11-25" }),
+    body: JSON.stringify({ jsonrpc: "2.0", id: 30, method: "tools/list", params: {} }),
+  });
+  assert.equal(afterClose.status, 404);
+});
