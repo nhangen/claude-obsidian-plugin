@@ -1,7 +1,7 @@
 ---
 name: create-note
 description: Creates a new note, project folder, or page in the Obsidian vault. Triggers on phrases like "create a note about X", "start a new project for Y", "add a page for Z", "new obsidian note", "create project folder", "set up a new project in obsidian".
-version: 1.2.0
+version: 1.3.0
 ---
 
 # Create Note in Obsidian
@@ -29,9 +29,11 @@ native here.
      path for a page. May be omitted; the librarian routes by the taxonomy.
    - `type` — `note` (or a vault-defined type if `VAULT.md` names one).
    - `links` — any related notes the user named.
-   - `resolved: true` + `target` — set these when the exact path is already
-     known (e.g. a page in an existing project); keeper-save then writes
-     directly with no subagent.
+   - `resolved: true` + `target` — only for a page inside an existing project
+     folder whose full path you know. Run `allowlist_validate "<target>"` (step 6)
+     and check the folder for a same-name note first; `resolved` promises the
+     caller already routed and deduped. keeper-save then writes directly with
+     no subagent. Otherwise omit both and let the librarian route.
    Relay the committed path keeper-save returns. If it surfaces a
    low-confidence-routing or near-duplicate question, pass it to the user —
    do not auto-resolve. **Stop here for this type.**
