@@ -1,7 +1,7 @@
 ---
 name: keeper-save
-description: Agent-facing entry point for filing or appending a structured note through the vault keeper. Triggers when another agent or skill needs to persist a note — findings, decisions, observations, research results, daily-log entries — into the vault without back-and-forth. Humans use /obsidian:ask instead. Validates the structured payload then dispatches the vault-librarian INSERT or APPEND; routing and templates are owned by the librarian.
-version: 1.1.0
+description: Agent-facing entry point for filing or appending a structured note through the vault keeper. Triggers when another agent or skill needs to persist a note — findings, decisions, observations, research results, daily-log entries — into the vault without back-and-forth. Humans use /obsidian:ask instead. Validates the structured payload then writes it directly through the local keeper CLI (APPEND, and INSERT with `resolved: true`) with no subagent; only an unresolved INSERT dispatches the vault-librarian for routing/dedup judgment.
+version: 1.2.0
 ---
 
 # keeper-save (Agent-Facing Vault Write)
@@ -9,9 +9,19 @@ version: 1.1.0
 File or append a structured note through the vault keeper. This is the
 agent-facing door: humans use `/obsidian:ask`; agents and sub-skills use this.
 
-Dispatches the existing `vault-librarian` INSERT/APPEND — routing, dedup, and
-template selection are owned by the librarian. This skill does NOT re-implement
-any of those; a keeper-saved note is identical to a librarian-filed one.
+**Fully specified writes never spawn a model.** An APPEND, or an INSERT with
+`resolved: true`, is one local `keeper` CLI call — do not dispatch the
+`vault-librarian` (or any Task/Agent) for it. Only an INSERT whose routing or
+dedup is unresolved needs the librarian's judgment. This skill does NOT
+re-implement routing, dedup, or templates; a keeper-saved note is identical to
+a librarian-filed one.
+
+If the caller already has the body and the exact target, set `resolved: true`
+(insert) or pass `target`/`date` (append) and call this skill — do not hand the
+filing to a subagent. Use the `keeper` CLI as the single writer; do not also
+write the same note through an MCP tool. Use one MCP write only on a route where
+the keeper CLI is unavailable and the MCP write tools are actually present —
+never assume they are. Bounded MCP reads are a separate read workflow.
 
 Two operations, selected by the `op` field (default `insert`):
 - **INSERT** — file a new note (findings, decisions, observations).
@@ -98,5 +108,7 @@ is rejected, never coerced.
    one that needs judgment.
 
 5. **Relay the committed path** back to the caller: what was written and where.
+   Report keeper failures verbatim (a non-zero exit means not written); keep the
+   `--skip-if-hash` guard when the caller supplied a commit hash.
    For an unresolved insert, if the librarian reports low-confidence routing or a
    near-duplicate, surface its question — do not auto-resolve it.

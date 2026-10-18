@@ -9,8 +9,8 @@ version: 1.2.0
 Creates new notes or project structures in the vault.
 
 Single notes and pages are filed through the **keeper-save** skill — the
-vault-librarian owns routing, the `## Project Taxonomy` allow-list, the
-template, dedup, and INDEX linking. This skill does not re-implement any of
+keeper owns the write and INDEX linking; when routing is unresolved the
+vault-librarian owns routing, the `## Project Taxonomy` allow-list, and dedup. This skill does not re-implement any of
 those. Project scaffolding (a folder with README + subfolders) is the one
 shape keeper-save's single-note INSERT cannot build, so that branch stays
 native here.
@@ -29,6 +29,9 @@ native here.
      path for a page. May be omitted; the librarian routes by the taxonomy.
    - `type` — `note` (or a vault-defined type if `VAULT.md` names one).
    - `links` — any related notes the user named.
+   - `resolved: true` + `target` — set these when the exact path is already
+     known (e.g. a page in an existing project); keeper-save then writes
+     directly with no subagent.
    Relay the committed path keeper-save returns. If it surfaces a
    low-confidence-routing or near-duplicate question, pass it to the user —
    do not auto-resolve. **Stop here for this type.**

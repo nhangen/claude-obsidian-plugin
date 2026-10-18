@@ -16,6 +16,11 @@ information.
 - **INSERT**: the request asks to store something — "remember…", "file this…",
   "record this decision…", "add a note about…".
 
+**Already-resolved writes skip this skill.** If the caller already has the
+body and the exact target (append or resolved insert), use `obsidian:keeper-save`
+instead — it is one local keeper call with no subagent. Dispatch the librarian
+here only for a query, or an INSERT whose routing/dedup is unresolved.
+
 ## Steps
 
 1. Run `bash "${CLAUDE_PLUGIN_ROOT}/scripts/ask-staleness.sh"`; if it prints a

@@ -66,13 +66,16 @@ links: <optional — comma-separated wikilink targets>
 <body — required>
 ```
 
-The skill validates the payload (title + body required), then dispatches the
-`vault-librarian` INSERT with the structured fields. Routing, dedup, and template
-selection are owned by the librarian — a keeper-saved note is identical to a
-librarian-filed one.
+The skill validates the payload (title + body required), then writes through
+the local `keeper` CLI with no subagent: an APPEND, or an INSERT with
+`resolved: true` (the caller already supplied the exact `target`). Only an
+unresolved INSERT dispatches the `vault-librarian`, which owns routing, dedup,
+and template selection. A keeper-saved note is identical to a librarian-filed
+one. Callers that already have the body and target should not dispatch the
+librarian directly.
 
-**Opt-in by design.** Calling `keeper-save` routes through the librarian.
-Not calling it bypasses the librarian entirely. `create-note`, `daily-note`,
+**Opt-in by design.** Calling `keeper-save` with a resolved target writes
+directly; only unresolved routing reaches the librarian. `create-note`, `daily-note`,
 and `save-conversation` have been migrated to route their writes through
 `keeper-save` (v1.11.0–1.13.0); any other writer not yet migrated is unchanged
 until it opts in.
