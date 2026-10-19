@@ -270,7 +270,9 @@ Per-repo commit-capture overrides go in the same file under a `## Commit Capture
 
 ### Autosave: authentication and secret redaction
 
-Version 1.24.0 adds a local activity gate before automatic summaries. Bounded input, duplicate protection, session persistence
+Version 1.24.1 preserves pending summary evidence and reports incomplete coverage,
+and routes fully specified filing directly through the keeper. Version 1.24.0 added
+a local activity gate before automatic summaries. Bounded input, duplicate protection, session persistence
 and explicit model/usage accounting remain in place.
 
 - **Autosave input.** The background worker extracts user requests, assistant text and final tool-result text, excluding API-request records, progress events, tool schemas, thinking and tool-call arguments. Repeated message/tool identities are deduplicated. A native `isCompactSummary` checkpoint supplies the previous summary plus the following conversation delta; otherwise extraction uses a bounded conversation scan. Automatic Stop capture additionally selects pending activity since the last successful checkpoint; failed attempts do not acknowledge pending content.
