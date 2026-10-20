@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+"""Pin automatic checkpoints for one source/vault/day to a canonical log note via keeper."""
 import fcntl
 import hashlib
 import json
@@ -14,12 +15,17 @@ def write_record(path, value):
     descriptor, temporary = tempfile.mkstemp(dir=path.parent)
     try:
         with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
-            json.dump(value, stream)
+            json.dump(value, stream, sort_keys=True)
             stream.write("\n")
         os.replace(temporary, path)
     finally:
         if os.path.exists(temporary):
             os.unlink(temporary)
+
+
+def without_reserved_keys(frontmatter):
+    return "\n".join(line for line in frontmatter.split("\n")
+                     if not re.match(r"(capture_scope|source_session_hash):", line))
 
 
 def checkpoint_body(text):
@@ -93,6 +99,7 @@ def save(vault, source, proposed, body, title, date, daily, usage, input_file):
         if not content.startswith("---\n") or "\n---\n" not in content[4:]:
             raise ValueError("missing frontmatter")
         frontmatter, _, text = content[4:].partition("\n---\n")
+        frontmatter = without_reserved_keys(frontmatter)
         main, coverage_heading, coverage = text.rpartition("\n## Autosave Input Coverage\n")
         text = (checkpoint_body(main) + "\n### Autosave Input Coverage\n" + coverage
                 if coverage_heading else checkpoint_body(text))
@@ -100,6 +107,8 @@ def save(vault, source, proposed, body, title, date, daily, usage, input_file):
         keeper = Path(__file__).resolve().parents[1] / "keeper"
         base = ["bash", str(keeper)]
         note = vault / str(target)
+        if state["ready"] and not note.exists() and not note.is_symlink():
+            state["ready"] = False
         write_record(record, state)
         with tempfile.TemporaryDirectory(prefix="obsidian-checkpoint-") as scratch:
             staged = Path(scratch) / "body.md"
@@ -133,6 +142,7 @@ def save(vault, source, proposed, body, title, date, daily, usage, input_file):
 if __name__ == "__main__":
     try:
         sys.exit(save(*sys.argv[1:]))
-    except (OSError, ValueError, TypeError, KeyError):
-        print("summary-note: checkpoint write failed; activity remains pending", file=sys.stderr)
+    except (OSError, ValueError, TypeError, KeyError) as error:
+        reason = str(error) if type(error) is ValueError else type(error).__name__
+        print(f"summary-note: checkpoint write failed ({reason}); activity remains pending", file=sys.stderr)
         sys.exit(1)

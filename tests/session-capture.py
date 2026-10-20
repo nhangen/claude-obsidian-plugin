@@ -1,5 +1,6 @@
 import fcntl
 import hashlib
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -342,6 +343,40 @@ print(json.dumps({"type":"result", "subtype":"success", "is_error":False,
         self.assertEqual(note.read_text().count("## Checkpoint "), 2)
         daily, = (self.case / "vault/Daily").glob("*.md")
         self.assertEqual(daily.read_text().count(note.stem), 1)
+
+    def test_deleted_canonical_note_is_recreated_by_the_next_checkpoint(self):
+        self.run_hook(PROVIDER_NOTE="1")
+        note, = (self.case / "vault/Inbox").glob("*-gate-fixture-*.md")
+        note.unlink()
+        self.message("later", "Durable decision: recreate a deleted checkpoint log instead of wedging autosave. " * 5)
+        self.run_hook(PROVIDER_NOTE="1")
+        recreated, = (self.case / "vault/Inbox").glob("*-gate-fixture-*.md")
+        self.assertEqual(recreated, note)
+        self.assertEqual(note.read_text().count("## Checkpoint "), 1)
+        self.assertNotIn("process_failed", {r["status"] for r in self.receipts()})
+        daily, = (self.case / "vault/Daily").glob("*.md")
+        self.assertEqual(daily.read_text().count(note.stem), 1)
+
+    def test_checkpoint_failure_names_the_reason_without_leaking_paths(self):
+        helper = ROOT / "scripts/lib/summary-note.py"
+        secret = self.case / "sensitive-missing-vault"
+        for vault, reason in (("", "missing vault"), (str(secret), "FileNotFoundError")):
+            with self.subTest(reason=reason):
+                result = subprocess.run(
+                    ["python3", str(helper), vault, "source", "Inbox/x.md", "body", "t", "2026-01-01",
+                     "Daily", "usage", "input"],
+                    capture_output=True, text=True, env=self.env, check=False)
+                self.assertEqual(result.returncode, 1)
+                self.assertIn(f"checkpoint write failed ({reason})", result.stderr)
+                self.assertNotIn(str(secret), result.stderr)
+
+    def test_model_frontmatter_cannot_duplicate_reserved_checkpoint_keys(self):
+        spec = importlib.util.spec_from_file_location("summary_note", ROOT / "scripts/lib/summary-note.py")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        cleaned = module.without_reserved_keys(
+            "session_intent: execution\ncapture_scope: model_guess\nsource_session_hash: abc\nslug: x")
+        self.assertEqual(cleaned, "session_intent: execution\nslug: x")
 
     def test_checkpoint_symlink_does_not_write_or_acknowledge(self):
         self.run_hook(PROVIDER_NOTE="1")
