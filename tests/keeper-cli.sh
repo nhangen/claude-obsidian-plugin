@@ -321,6 +321,20 @@ bash "$KEEPER" append --vault "$V" --target "Notes/mismatched.md" \
 [ "$(cat "$V/Notes/mismatched.md")" != "$MISMATCHED_BEFORE" ] \
   || fail 'a heading after a mismatched fence pair was incorrectly treated as an un-fenced heading'
 
+printf '%s\n' '```text' '```literal' '## 4444444 illustrative heading' '```' \
+  '## 3333333 real checkpoint' > "$TMP/fence-info.md"
+bash "$KEEPER" append --vault "$V" --target "Notes/fence-info.md" \
+  --section '## init' --body-file "$TMP/fence-info.md" >/dev/null
+FENCE_INFO_BEFORE="$(cat "$V/Notes/fence-info.md")"
+bash "$KEEPER" append --vault "$V" --target "Notes/fence-info.md" \
+  --section '## 3333333 repeated checkpoint' --body-file "$TMP/b.md" --skip-if-hash 3333333 >/dev/null
+[ "$(cat "$V/Notes/fence-info.md")" = "$FENCE_INFO_BEFORE" ] \
+  || fail 'a fence-like line carrying text hid a real checkpoint from retry deduplication'
+bash "$KEEPER" append --vault "$V" --target "Notes/fence-info.md" \
+  --section '## 4444444 real checkpoint' --body-file "$TMP/b.md" --skip-if-hash 4444444 >/dev/null
+[ "$(cat "$V/Notes/fence-info.md")" != "$FENCE_INFO_BEFORE" ] \
+  || fail 'a fence-like line carrying text exposed an illustrative heading as a real capture'
+
 # 18. a malformed --skip-if-hash fails loudly. Silently treating an unusable
 #     value as "no guard" turns a typo into a duplicate note, which is the
 #     failure this flag exists to prevent.
