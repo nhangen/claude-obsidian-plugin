@@ -30,7 +30,8 @@ import json, os, pathlib, sys, time
 case = pathlib.Path(os.environ['CAPTURE_CASE'])
 with (case / 'calls').open('a') as stream:
     stream.write(json.dumps(sys.argv[1:]) + '\\n')
-(case / 'provider-input').write_text(sys.stdin.read())
+payload = sys.stdin.read()
+(case / 'provider-input').write_text(payload)
 if os.environ.get('BLOCK_PROVIDER') == '1':
     (case / 'ready').touch()
     deadline = time.monotonic() + 15
@@ -48,6 +49,10 @@ if os.environ.get('FAIL_PROVIDER') == '1':
 note = ("---\\ndate: 2026-10-18\\ndomain: dev\\nvault_folder: Inbox/\\nslug: gate-fixture\\n"
         "session_intent: execution\\ncapture_action: project_note\\nresearch_state_change: none\\n---\\n\\n"
         "# Gate fixture\\n\\n## Summary\\n- fixture\\n")
+if os.environ.get('NOTE_DELIVERED_FACTS') == '1':
+    facts = [row['text'].split()[0] for row in map(json.loads, payload.splitlines())
+             if row.get('text', '').startswith('FACT-')]
+    note += ''.join('- delivered: ' + fact + '\\n' for fact in facts)
 print(json.dumps({"type":"result", "subtype":"success", "is_error":False,
                   "result": note if os.environ.get('PROVIDER_NOTE') == '1' else "SKIP"}))
 """)
@@ -263,7 +268,7 @@ print(json.dumps({"type":"result", "subtype":"success", "is_error":False,
         self.assertFalse(metadata["context_incomplete"])
         self.assertEqual(metadata["retained_events"], 0)
         self.assertEqual(self.seen_count(), 22)
-        note, = (self.case / "vault/Inbox").glob("*-gate-fixture.md")
+        note, = (self.case / "vault/Inbox").glob("*-gate-fixture-*.md")
         self.assertIn('"context_incomplete":false', note.read_text())
 
     def test_omitted_pending_stays_unacknowledged_and_is_sent_next_capture(self):
@@ -278,7 +283,7 @@ print(json.dumps({"type":"result", "subtype":"success", "is_error":False,
         self.assertIn("FACT-00", first)
         self.assertNotIn("FACT-13", first)
         self.assertEqual(self.seen_count(), metadata["sent_events"])
-        note, = (self.case / "vault/Inbox").glob("*-gate-fixture.md")
+        note, = (self.case / "vault/Inbox").glob("*-gate-fixture-*.md")
         self.assertIn('"context_incomplete":true', note.read_text())
         self.expire()
         self.message("later", "later " + "note " * 100)
@@ -296,7 +301,143 @@ print(json.dumps({"type":"result", "subtype":"success", "is_error":False,
         metadata = self.provider_rows()[0]
         self.assertGreater(metadata["retained_events"], 0)
         self.assertEqual(self.seen_count(), metadata["sent_events"])
-        self.assertFalse(list((self.case / "vault").glob("**/*gate-fixture.md")))
+        self.assertFalse(list((self.case / "vault").glob("**/*gate-fixture*.md")))
+
+    def test_corrupt_checkpoint_pointer_preserves_unacknowledged_activity(self):
+        self.run_hook(PROVIDER_NOTE="1")
+        pointer, = (self.case / "state/claude-obsidian/summary-notes").glob("*.json")
+        original = pointer.read_text()
+        seen = self.seen_count()
+        pointer.write_text("broken json")
+        self.message("later", "Important later decision: preserve checkpoint retry evidence. " * 5)
+        self.run_hook(PROVIDER_NOTE="1")
+        self.assertEqual(self.seen_count(), seen)
+        self.assertIn("process_failed", {r["status"] for r in self.receipts()})
+        pointer.write_text(original)
+        self.run_hook("--retry", PROVIDER_NOTE="1")
+        self.assertGreater(self.seen_count(), seen)
+        note, = (self.case / "vault/Inbox").glob("*-gate-fixture-*.md")
+        self.assertEqual(note.read_text().count("## Checkpoint "), 2)
+
+    def test_later_checkpoint_appends_without_replacing_earlier_evidence(self):
+        self.run_hook(PROVIDER_NOTE="1")
+        note, = (self.case / "vault/Inbox").glob("*gate-fixture*.md")
+        first = note.read_text()
+        self.message("later", "Later decision: preserve previous checkpoints rather than replace them. " * 5)
+        self.run_hook(PROVIDER_NOTE="1")
+        self.assertTrue(note.read_text().startswith(first))
+        self.assertEqual(note.read_text().count("## Checkpoint "), 2)
+        self.assertEqual(len(list((self.case / "vault/Inbox").glob("*gate-fixture*.md"))), 1)
+
+    def test_checkpoint_pointer_recovery_does_not_duplicate_first_save(self):
+        self.run_hook(PROVIDER_NOTE="1")
+        pointer, = (self.case / "state/claude-obsidian/summary-notes").glob("*.json")
+        state = json.loads(pointer.read_text())
+        state["ready"] = False
+        pointer.write_text(json.dumps(state))
+        self.message("later", "Another durable decision: repair the saved pointer before acknowledging. " * 5)
+        self.run_hook(PROVIDER_NOTE="1")
+        self.assertTrue(json.loads(pointer.read_text())["ready"])
+        note, = (self.case / "vault/Inbox").glob("*-gate-fixture-*.md")
+        self.assertEqual(note.read_text().count("## Checkpoint "), 2)
+        daily, = (self.case / "vault/Daily").glob("*.md")
+        self.assertEqual(daily.read_text().count(note.stem), 1)
+
+    def test_checkpoint_symlink_does_not_write_or_acknowledge(self):
+        self.run_hook(PROVIDER_NOTE="1")
+        note, = (self.case / "vault/Inbox").glob("*-gate-fixture-*.md")
+        outside = self.case / "outside.md"
+        outside.write_text("must not change")
+        note.unlink()
+        note.symlink_to(outside)
+        seen = self.seen_count()
+        self.message("later", "Never follow a replaced checkpoint symlink while saving evidence. " * 5)
+        self.run_hook(PROVIDER_NOTE="1")
+        self.assertEqual(self.seen_count(), seen)
+        self.assertEqual(outside.read_text(), "must not change")
+        self.assertIn("process_failed", {r["status"] for r in self.receipts()})
+
+    def test_invalid_vault_refuses_before_provider_or_note_writes(self):
+        unavailable = self.case / "unavailable-vault"
+        unavailable.write_text("not a directory")
+        for name, vault in (("missing", str(self.case / "missing-vault")),
+                            ("unavailable", str(unavailable)), ("empty", "")):
+            with self.subTest(vault=name):
+                working = self.case / name
+                working.mkdir()
+                snapshot = working / "snapshot.jsonl"
+                snapshot.write_bytes(self.transcript.read_bytes())
+                before = set(self.case.rglob("*.md"))
+                calls = len(self.calls())
+                result = subprocess.run(
+                    ["bash", str(ROOT / "scripts/session-summarize.sh"),
+                     str(snapshot), str(self.config), vault, str(self.transcript)],
+                    cwd=working, env=dict(self.env, PROVIDER_NOTE="1"),
+                    capture_output=True, text=True, timeout=20)
+                self.assertEqual(
+                    (result.returncode != 0, len(self.calls()) - calls,
+                     set(self.case.rglob("*.md")) - before),
+                    (True, 0, set()), (result.stdout, result.stderr))
+                self.assertFalse(snapshot.exists(), "invalid vault leaked the raw snapshot")
+
+    def test_partial_save_retry_saves_changed_delivered_evidence_before_acknowledging(self):
+        self.transcript.write_text("")
+        for i in range(14):
+            self.message(f"big{i}", f"FACT-{i:02d} " + "note " * 1400)
+        provider = dict(PROVIDER_NOTE="1", NOTE_DELIVERED_FACTS="1")
+        self.run_hook(KEEPER_FAULT_INJECT="before_daily", **provider)
+        self.assertEqual(self.seen_count(), 0)
+        self.assertEqual({r["status"] for r in self.receipts()}, {"process_failed"})
+        self.assertTrue(self.provider_rows()[0]["carry_forward"])
+        self.assertGreater(self.provider_rows()[0]["retained_events"], 0)
+        self.assertIn("FACT-00", self.provider_text())
+        self.assertNotIn("FACT-13", self.provider_text())
+        note, = (self.case / "vault/Inbox").glob("*-gate-fixture-*.md")
+        original = note.read_text()
+        self.assertIn("- delivered: FACT-00", original)
+        self.assertNotIn("- delivered: FACT-13", original)
+
+        self.run_hook("--retry", KEEPER_FAULT_INJECT="before_append", **provider)
+        self.assertFalse(self.provider_rows()[0]["carry_forward"])
+        self.assertTrue(self.provider_rows()[0]["context_incomplete"])
+        self.assertIn("FACT-13", self.provider_text())
+        self.assertNotIn("FACT-00", self.provider_text())
+        self.assertEqual(self.seen_count(), 0)
+        self.assertEqual({r["status"] for r in self.receipts()}, {"process_failed"})
+        self.assertEqual(note.read_text(), original)
+
+        self.run_hook("--retry", **provider)
+        saved = note.read_text()
+        self.assertTrue(saved.startswith(original))
+        self.assertEqual(saved.count("## Checkpoint "), 2)
+        self.assertIn("- delivered: FACT-00", saved)
+        self.assertIn("- delivered: FACT-13", saved)
+        for row in self.provider_rows()[1:]:
+            if row.get("text", "").startswith("FACT-"):
+                self.assertIn("- delivered: " + row["text"].split()[0], saved)
+        self.assertEqual(self.seen_count(), self.provider_rows()[0]["sent_events"])
+        self.assertEqual({r["status"] for r in self.receipts()}, {"process_succeeded"})
+        self.assertEqual({r["ack"] for r in self.receipts()}, {"acknowledged"})
+
+    def test_partial_save_retry_with_only_instrumentation_does_not_duplicate_checkpoint(self):
+        self.run_hook(PROVIDER_NOTE="1", KEEPER_FAULT_INJECT="before_daily")
+        self.assertEqual(self.seen_count(), 0)
+        self.assertEqual({r["status"] for r in self.receipts()}, {"process_failed"})
+        first_rows = self.provider_rows()
+        note, = (self.case / "vault/Inbox").glob("*-gate-fixture-*.md")
+        original = note.read_text()
+        with self.transcript.open("a") as stream:
+            stream.write(json.dumps({"type": "progress", "data": "hook bookkeeping"}) + "\n")
+        self.run_hook("--retry", PROVIDER_NOTE="1")
+        self.assertEqual(len(self.calls()), 2)
+        self.assertEqual(self.provider_rows()[1:], first_rows[1:])
+        self.assertGreater(self.provider_rows()[0]["source_bytes"], first_rows[0]["source_bytes"])
+        self.assertEqual(note.read_text(), original)
+        self.assertEqual(note.read_text().count("## Checkpoint "), 1)
+        self.assertEqual(self.seen_count(), self.provider_rows()[0]["sent_events"])
+        self.assertEqual({r["status"] for r in self.receipts()}, {"process_succeeded"})
+        daily, = (self.case / "vault/Daily").glob("*.md")
+        self.assertEqual(daily.read_text().count(note.stem), 1)
 
     def test_oversized_event_is_clipped_flagged_and_acknowledged(self):
         self.transcript.write_text("")

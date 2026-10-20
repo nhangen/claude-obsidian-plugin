@@ -93,6 +93,9 @@ def extract(source):
             content = message.get("content", "")
             extracted = []
             text = texts(content)
+            if role == "user" and text.startswith("Base directory for this skill:"):
+                text = text.rpartition("\nARGUMENTS:")[2].strip() if "\nARGUMENTS:" in text else ""
+                counts["excluded_instruction_events"] += 1
             if text.strip():
                 extracted.append((role, text, message.get("id") or record.get("uuid")))
             if role == "user" and isinstance(content, list):

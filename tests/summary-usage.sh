@@ -60,17 +60,17 @@ sys.exit(int(os.environ.get('FIXTURE_EXIT','0')))
     def configure(self, extra=""):
         self.config.write_text("---\nvault_path: " + str(self.vault) + "\ndaily_path: Daily/\n" + extra + "---\n\n## Project Taxonomy\n\n| Domain | Vault path |\n|---|---|\n| Inbox | Inbox/ |\n| Daily | Daily/ |\n")
 
-    def invoke(self, payload=None, raw=None, exit_code=0):
+    def invoke(self, payload=None, raw=None, exit_code=0, source="private/source/session"):
         transcript = self.base / "transcript"
         transcript.write_text('RAW TRANSCRIPT SECRET')
         if payload is None:
             payload = {"type": "result", "subtype": "success", "is_error": False, "result": "SKIP"}
         (self.base / "response").write_text(raw if raw is not None else json.dumps(payload))
-        before = set((self.base / "state").rglob("*.json"))
+        before = set((self.base / "state/obsidian/summary-usage").glob("*.json"))
         result = subprocess.run(["bash", str(ROOT / "scripts/session-summarize.sh"),
-                                 str(transcript), str(self.config), str(self.vault), "private/source/session"],
+                                 str(transcript), str(self.config), str(self.vault), source],
                                 env={**self.env, "FIXTURE_EXIT": str(exit_code)}, capture_output=True, text=True)
-        records = set((self.base / "state").rglob("*.json")) - before
+        records = set((self.base / "state/obsidian/summary-usage").glob("*.json")) - before
         self.assertEqual(len(records), 1, result.stderr)
         path = records.pop()
         record = json.loads(path.read_text())
@@ -195,17 +195,17 @@ sys.exit(int(os.environ.get('FIXTURE_EXIT','0')))
         for process in processes:
             _, errors = process.communicate(timeout=30)
             self.assertEqual(process.returncode, 0, errors.decode())
-        records = [json.loads(path.read_text()) for path in (self.base / "state").rglob("*.json")]
+        records = [json.loads(path.read_text()) for path in (self.base / "state/obsidian/summary-usage").glob("*.json")]
         self.assertEqual(len(records), 2)
         self.assertEqual([r["dedup_outcome"] for r in records], ["committed_or_identical"]*2)
-        self.assertEqual(len(list((self.vault / "Inbox").glob("*-fixture-summary.md"))), 1)
+        self.assertEqual(len(list((self.vault / "Inbox").glob("*-fixture-summary*.md"))), 1)
 
     def test_keeper_insert_identical_conflict_and_usage_correlation(self):
         payload = {"type":"result", "subtype":"success", "is_error":False, "result":NOTE}
         records = []
         for expected, text in (("committed_or_identical",NOTE), ("committed_or_identical",NOTE), ("conflict",NOTE+"Different body\n")):
             payload["result"] = text
-            result, record = self.invoke(payload)
+            result, record = self.invoke(payload, source="")
             records.append(record)
             self.assertEqual(record["dedup_outcome"], expected, result.stderr)
             self.assertEqual(record["completion"], "success")

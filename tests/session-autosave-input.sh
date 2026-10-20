@@ -8,6 +8,7 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
+from datetime import date
 
 root = Path(sys.argv[1])
 with tempfile.TemporaryDirectory(prefix="autosave-input-") as temporary:
@@ -23,13 +24,15 @@ from pathlib import Path
 import sys
 
 Path(os.environ["CAPTURE_INPUT"]).write_bytes(sys.stdin.buffer.read())
+Path(os.environ["CAPTURE_PROMPT"]).write_text(sys.argv[sys.argv.index("--system-prompt") + 1])
 result = "SKIP"
 if os.environ.get("SAVE_NOTE") == "true":
     result = "\\n".join([
-        "---", "vault_folder: Inbox/", "slug: bounded-input",
+        "---", "vault_folder: " + os.environ.get("NOTE_FOLDER", "Inbox/"),
+        "slug: " + os.environ.get("NOTE_SLUG", "bounded-input"),
         "session_intent: execution", "capture_action: project_note",
         "research_state_change: none", "---", "# Bounded input",
-        "A decision survived.", ""
+        os.environ.get("NOTE_TEXT", "A decision survived."), ""
     ])
 print(json.dumps({"type": "result", "subtype": "success",
                   "is_error": False, "result": result}))
@@ -42,7 +45,8 @@ print(json.dumps({"type": "result", "subtype": "success",
     env = dict(os.environ, PATH=str(case / "bin") + os.pathsep + os.environ["PATH"],
                HOME=str(case / "home"), XDG_STATE_HOME=str(case / "state"), XDG_CONFIG_HOME=str(case / "home" / ".config"),
                OBSIDIAN_LOCAL_MD=str(config), OBSIDIAN_SUMMARIZING="",
-               ANTHROPIC_API_KEY="", CAPTURE_INPUT=str(capture), TMPDIR=str(case))
+               ANTHROPIC_API_KEY="", CAPTURE_INPUT=str(capture),
+               CAPTURE_PROMPT=str(case / "prompt.txt"), TMPDIR=str(case))
 
     def write(records):
         source.write_text("".join(json.dumps(record) + "\n" for record in records))
@@ -50,7 +54,7 @@ print(json.dumps({"type": "result", "subtype": "success",
     def message(role, text, **extra):
         return dict(type=role, message={"content": text}, **extra)
 
-    def run(hook=False, save=False):
+    def run(hook=False, save=False, identified=False):
         capture.unlink(missing_ok=True)
         if hook:
             subprocess.run(["bash", "-c", 'trap wait EXIT; source "$0" --capture',
@@ -61,7 +65,8 @@ print(json.dumps({"type": "result", "subtype": "success",
             scratch = case / "scratch.jsonl"
             scratch.write_bytes(source.read_bytes())
             subprocess.run(["bash", str(root / "scripts/session-summarize.sh"),
-                            str(scratch), str(config), str(case / "vault")],
+                            str(scratch), str(config), str(case / "vault")]
+                           + ([str(source)] if identified else []),
                            env=dict(env, SAVE_NOTE=str(save).lower()), check=True)
             assert not scratch.exists(), "worker leaked scratch file"
         data = capture.read_bytes()
@@ -155,5 +160,40 @@ print(json.dumps({"type": "result", "subtype": "success",
     assert '"context_incomplete":true' in notes[0].read_text()
     assert "## Autosave Input Coverage" in notes[0].read_text()
     assert "bounded-input" in next((case / "vault" / "Daily").glob("*.md")).read_text()
+
+    write([message("user", "Base directory for this skill: /fixture/review\n"
+                   "# Review workflow\nStop at the post-synthesis permission gate.\n\nARGUMENTS: mini 1037"),
+           message("assistant", "Silent-failure review saved. Conventions and tests are still running.")])
+    env.update(NOTE_SLUG="review-start", NOTE_TEXT="Reviewers are still running.\n\n```markdown\n## Literal example\n```\n\n```text\n```literal\nAn unclosed example.\n")
+    meta, events, text = run(save=True, identified=True)
+    assert "post-synthesis permission gate" not in text
+    assert "mini 1037" in text and "Conventions and tests are still running" in text
+    prompt = (case / "prompt.txt").read_text()
+    assert "observed completion" in prompt
+    assert "excluded_records" in prompt and "current checkpoint" in prompt
+    first = set((case / "vault").rglob("*.md")) - {
+        case / "vault/Inbox/INDEX.md", case / "vault/Daily" / (date.today().isoformat() + ".md"), notes[0]}
+    assert len(first) == 1, first
+    canonical = first.pop()
+    write([message("assistant", "Reviewers are done. Decision: preserve the original result.")])
+    env.update(NOTE_SLUG="different-title", NOTE_FOLDER="Projects/", NOTE_TEXT="Decision: preserve the original result.")
+    run(save=True, identified=True)
+    saved = canonical.read_text()
+    assert "Reviewers are still running." in saved
+    assert "```markdown\n## Literal example\n```" in saved
+    closed_example = saved.index("\n```\n", saved.index("An unclosed example."))
+    assert closed_example < saved.index("## Checkpoint ", saved.index("## Checkpoint ") + 1)
+    assert closed_example < saved.index("### Autosave Input Coverage", saved.index("An unclosed example."))
+    assert "Decision: preserve the original result." in saved
+    assert saved.count("## Checkpoint ") == 2
+    assert "capture_scope: checkpoint_log" in saved
+    assert "Checkpoint input coverage" in saved
+    assert "full-session completeness is not established" in saved
+    assert not (case / "vault/Projects").exists(), "routing drift created a second session record"
+    env.update(NOTE_TEXT="A different model paraphrase for the same delivered evidence.")
+    run(save=True, identified=True)
+    assert canonical.read_text() == saved, "retry duplicated a checkpoint"
+    daily = (case / "vault/Daily" / (date.today().isoformat() + ".md")).read_text()
+    assert daily.count(canonical.stem) == 1
 print("autosave input offline production-path tests passed")
 TEST_PY
