@@ -248,9 +248,6 @@ printf '\nCheckpoint input coverage only; full-session completeness is not estab
 TITLE=$(printf '%s\n' "$RESULT" | grep '^# ' | head -1 | sed 's/^# //')
 : "${TITLE:=$SLUG}"
 
-# Recovery is safe only when the existing note is byte-identical. A different
-# same-target note remains an explicit keeper conflict and this process exits
-# non-zero without truncating it.
 DEDUP_OUTCOME="write_failed"
 KEEPER_RC=0
 if [ -n "${4:-}" ]; then
@@ -261,10 +258,12 @@ if [ -n "${4:-}" ]; then
     0) DEDUP_OUTCOME="committed_or_identical" ;;
     3) DEDUP_OUTCOME="conflict" ;;
     2) DEDUP_OUTCOME="partial" ;;
-    *) DEDUP_OUTCOME="write_failed" ;;
   esac
   exit "$KEEPER_RC"
 fi
+# Recovery is safe only when the existing note is byte-identical. A different
+# same-target note remains an explicit keeper conflict and this process exits
+# non-zero without truncating it.
 KEEPER_RESULT=$(bash "$(dirname "$0")/keeper" insert \
   --vault "$RESOLVED_VAULT" \
   --target "$NOTE_TARGET" \
