@@ -161,6 +161,12 @@ print(json.dumps({"type": "result", "subtype": "success",
     assert "## Autosave Input Coverage" in notes[0].read_text()
     assert "bounded-input" in next((case / "vault" / "Daily").glob("*.md")).read_text()
 
+    write([message("user", "Base directory for this skill: /fixture/bare\n# Procedure only, no arguments."),
+           message("assistant", "Concrete result recorded after the bare skill load.")])
+    meta, events, text = run()
+    assert "Procedure only" not in text and "Concrete result recorded" in text
+    assert "excluded_instruction_events" in json.dumps(meta), meta
+
     write([message("user", "Base directory for this skill: /fixture/review\n"
                    "# Review workflow\nStop at the post-synthesis permission gate.\n\nARGUMENTS: mini 1037"),
            message("assistant", "Silent-failure review saved. Conventions and tests are still running.")])
@@ -176,7 +182,8 @@ print(json.dumps({"type": "result", "subtype": "success",
     assert len(first) == 1, first
     canonical = first.pop()
     write([message("assistant", "Reviewers are done. Decision: preserve the original result.")])
-    env.update(NOTE_SLUG="different-title", NOTE_FOLDER="Projects/", NOTE_TEXT="Decision: preserve the original result.")
+    env.update(NOTE_SLUG="different-title", NOTE_FOLDER="Projects/",
+               NOTE_TEXT="## Findings\n\nDecision: preserve the original result.")
     run(save=True, identified=True)
     saved = canonical.read_text()
     assert "Reviewers are still running." in saved
@@ -185,6 +192,7 @@ print(json.dumps({"type": "result", "subtype": "success",
     assert closed_example < saved.index("## Checkpoint ", saved.index("## Checkpoint ") + 1)
     assert closed_example < saved.index("### Autosave Input Coverage", saved.index("An unclosed example."))
     assert "Decision: preserve the original result." in saved
+    assert "\n### Findings\n" in saved and "\n## Findings\n" not in saved, "model headings must nest under the checkpoint"
     assert saved.count("## Checkpoint ") == 2
     assert "capture_scope: checkpoint_log" in saved
     assert "Checkpoint input coverage" in saved
