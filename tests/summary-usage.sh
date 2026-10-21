@@ -2,9 +2,10 @@
 set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 export ROOT_DIR
-python3 - <<'TESTS'
+python3 - "$@" <<'TESTS'
 import json
 import os
+import shutil
 from pathlib import Path
 import subprocess
 import tempfile
@@ -37,6 +38,7 @@ class SummaryUsage(unittest.TestCase):
         self.vault.mkdir()
         self.config = self.base / "config.md"
         self.configure()
+        self.scripts = ROOT / "scripts"
         stub = self.bin / "claude"
         stub.write_text("""#!/usr/bin/env python3
 import json,os,sys
@@ -67,7 +69,7 @@ sys.exit(int(os.environ.get('FIXTURE_EXIT','0')))
             payload = {"type": "result", "subtype": "success", "is_error": False, "result": "SKIP"}
         (self.base / "response").write_text(raw if raw is not None else json.dumps(payload))
         before = set((self.base / "state/obsidian/summary-usage").glob("*.json"))
-        result = subprocess.run(["bash", str(ROOT / "scripts/session-summarize.sh"),
+        result = subprocess.run(["bash", str(self.scripts / "session-summarize.sh"),
                                  str(transcript), str(self.config), str(self.vault), source],
                                 env={**self.env, "FIXTURE_EXIT": str(exit_code)}, capture_output=True, text=True)
         records = set((self.base / "state/obsidian/summary-usage").glob("*.json")) - before
@@ -199,6 +201,28 @@ sys.exit(int(os.environ.get('FIXTURE_EXIT','0')))
         self.assertEqual(len(records), 2)
         self.assertEqual([r["dedup_outcome"] for r in records], ["committed_or_identical"]*2)
         self.assertEqual(len(list((self.vault / "Inbox").glob("*-fixture-summary*.md"))), 1)
+
+    def test_checkpoint_keeper_partial_and_conflict_exit_mapping(self):
+        self.scripts = self.base / "scripts"
+        shutil.copytree(ROOT / "scripts", self.scripts)
+        (self.scripts / "keeper").write_text("""#!/usr/bin/env bash
+printf '%s\\n' "$@" > "$FIXTURE_BASE/keeper-args"
+exit "$KEEPER_EXIT"
+""")
+        payload = {"type": "result", "subtype": "success", "is_error": False, "result": NOTE}
+        for code, outcome in ((2, "partial"), (3, "conflict")):
+            with self.subTest(code=code):
+                self.env["KEEPER_EXIT"] = str(code)
+                result, record = self.invoke(payload, source="checkpoint-source")
+                self.assertEqual(result.returncode, code, result.stderr)
+                self.assertEqual(record["dedup_outcome"], outcome)
+                self.assertEqual(record["successful_calls"], 1)
+                pointer, = (self.base / "state/claude-obsidian/summary-notes").glob("*.json")
+                state = json.loads(pointer.read_text())
+                self.assertFalse(state["ready"])
+                args = (self.base / "keeper-args").read_text().splitlines()
+                self.assertEqual(args[0], "insert")
+                self.assertEqual(args[args.index("--target") + 1], state["target"])
 
     def test_keeper_insert_identical_conflict_and_usage_correlation(self):
         payload = {"type":"result", "subtype":"success", "is_error":False, "result":NOTE}
