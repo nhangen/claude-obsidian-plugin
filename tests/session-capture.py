@@ -314,6 +314,9 @@ print(json.dumps({"type":"result", "subtype":"success", "is_error":False,
         self.run_hook(PROVIDER_NOTE="1")
         self.assertEqual(self.seen_count(), seen)
         self.assertIn("process_failed", {r["status"] for r in self.receipts()})
+        outcomes = {json.loads(p.read_text()).get("dedup_outcome")
+                    for p in (self.case / "state/obsidian/summary-usage").glob("*.json")}
+        self.assertIn("state_invalid", outcomes)
         pointer.write_text(original)
         self.run_hook("--retry", PROVIDER_NOTE="1")
         self.assertGreater(self.seen_count(), seen)
@@ -360,13 +363,13 @@ print(json.dumps({"type":"result", "subtype":"success", "is_error":False,
     def test_checkpoint_failure_names_the_reason_without_leaking_paths(self):
         helper = ROOT / "scripts/lib/summary-note.py"
         secret = self.case / "sensitive-missing-vault"
-        for vault, reason in (("", "missing vault"), (str(secret), "FileNotFoundError")):
+        for vault, reason, code in (("", "missing vault", 4), (str(secret), "FileNotFoundError", 1)):
             with self.subTest(reason=reason):
                 result = subprocess.run(
                     ["python3", str(helper), vault, "source", "Inbox/x.md", "body", "t", "2026-01-01",
                      "Daily", "usage", "input"],
                     capture_output=True, text=True, env=self.env, check=False)
-                self.assertEqual(result.returncode, 1)
+                self.assertEqual(result.returncode, code)
                 self.assertIn(f"checkpoint write failed ({reason})", result.stderr)
                 self.assertNotIn(str(secret), result.stderr)
 
@@ -724,6 +727,106 @@ print(json.dumps({"type":"result", "subtype":"success", "is_error":False,
         finally:
             (self.case / "release").touch()
             self.wait_for(lambda: any(r["status"] == "process_succeeded" for r in self.receipts()))
+
+
+class SummaryNoteTests(unittest.TestCase):
+    helper = ROOT / "scripts/lib/summary-note.py"
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory(prefix="obsidian-summary-note-test-")
+        self.addCleanup(self.temp.cleanup)
+        self.case = Path(self.temp.name)
+        for directory in ("vault/Daily", "vault/Inbox", "state"):
+            (self.case / directory).mkdir(parents=True)
+        self.env = dict(os.environ, XDG_STATE_HOME=str(self.case / "state"), HOME=str(self.case))
+        self.pointers = self.case / "state/claude-obsidian/summary-notes"
+        self.count = 0
+
+    def command(self, date, rows, proposed, source="source.jsonl"):
+        self.count += 1
+        work = self.case / f"work{self.count}"
+        work.mkdir()
+        (work / "body.md").write_text("---\nsession_intent: execution\n---\n# Direct\nBody\n")
+        (work / "usage.json").write_text(json.dumps({"started_at": f"{date}T00:00:00Z"}))
+        lines = [{"kind": "extraction_metadata"}] + [{"text": row} for row in rows]
+        (work / "input.jsonl").write_text("".join(json.dumps(line) + "\n" for line in lines))
+        return ["python3", str(self.helper), str(self.case / "vault"), str(self.case / source), proposed,
+                str(work / "body.md"), "Direct", date, "Daily", str(work / "usage.json"),
+                str(work / "input.jsonl")]
+
+    def run_note(self, *args, **kwargs):
+        return subprocess.run(self.command(*args, **kwargs), capture_output=True, text=True,
+                              env=self.env, check=False)
+
+    def load_module(self):
+        spec = importlib.util.spec_from_file_location("summary_note", self.helper)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+
+    def test_a_new_day_starts_a_separate_log(self):
+        for day in ("2026-01-01", "2026-01-02"):
+            self.assertEqual(self.run_note(day, ["one"], f"Inbox/{day}-direct.md").returncode, 0)
+        self.assertEqual(len(list((self.case / "vault/Inbox").glob("*-direct-*.md"))), 2)
+        self.assertEqual(len(list(self.pointers.glob("*.json"))), 2)
+
+    def test_concurrent_checkpoints_serialize_on_the_pointer_lock(self):
+        processes = [subprocess.Popen(self.command("2026-01-01", [row], "Inbox/2026-01-01-direct.md"),
+                                      stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True, env=self.env)
+                     for row in ("alpha", "beta", "gamma", "delta")]
+        for process in processes:
+            _, stderr = process.communicate(timeout=60)
+            self.assertEqual(process.returncode, 0, stderr)
+        note, = (self.case / "vault/Inbox").glob("*-direct-*.md")
+        self.assertEqual(note.read_text().count("## Checkpoint "), 4)
+        daily, = (self.case / "vault/Daily").glob("*.md")
+        self.assertEqual(daily.read_text().count(note.stem), 1)
+
+    def test_pointer_target_that_escapes_the_vault_is_refused(self):
+        self.assertEqual(self.run_note("2026-01-01", ["one"], "Inbox/2026-01-01-direct.md").returncode, 0)
+        pointer, = self.pointers.glob("*.json")
+        for target in ("../escape.md", "/tmp/absolute.md", "Inbox/new\nline.md"):
+            with self.subTest(target=target):
+                pointer.write_text(json.dumps({"version": 1, "target": target, "ready": True}))
+                result = self.run_note("2026-01-01", ["two"], "Inbox/2026-01-01-direct.md")
+                self.assertEqual(result.returncode, 4)
+                self.assertIn("invalid target", result.stderr)
+        self.assertFalse((self.case / "escape.md").exists())
+
+    def test_stale_pointers_are_pruned_and_current_ones_kept(self):
+        self.assertEqual(self.run_note("2026-01-01", ["one"], "Inbox/2026-01-01-direct.md").returncode, 0)
+        stale = self.pointers / "stale-2025-01-01.json"
+        recent = self.pointers / "recent-2025-12-31.json"
+        for pointer in (stale, recent):
+            pointer.write_text("{}")
+            Path(str(pointer) + ".lock").write_text("")
+        old = time.time() - 40 * 24 * 3600
+        for path in (stale, Path(str(stale) + ".lock")):
+            os.utime(path, (old, old))
+        self.assertEqual(self.run_note("2026-01-01", ["two"], "Inbox/2026-01-01-direct.md").returncode, 0)
+        self.assertFalse(stale.exists() or Path(str(stale) + ".lock").exists())
+        self.assertTrue(recent.exists() and Path(str(recent) + ".lock").exists())
+        self.assertEqual(len([p for p in self.pointers.glob("*.json") if "-2026-01-01" in p.name]), 1)
+
+    def test_checkpoint_body_fence_syntax(self):
+        body = self.load_module().checkpoint_body
+        cases = {
+            "tilde fence may carry backticks in its info": (
+                "~~~ js `x`\n## in\n~~~\n## out\n", "~~~ js `x`\n## in\n~~~\n### out\n"),
+            "a longer closing fence closes": (
+                "```\n## in\n`````\n## out\n", "```\n## in\n`````\n### out\n"),
+            "a shorter closing fence does not close": (
+                "````\n## in\n```\n## still in\n````\n## out\n",
+                "````\n## in\n```\n## still in\n````\n### out\n"),
+            "CRLF fences": (
+                "```\r\n## in\r\n```\r\n## out\r\n", "```\r\n## in\r\n```\r\n### out\r\n"),
+            "an unclosed tilde fence is closed": ("~~~\n## in\n", "~~~\n## in\n\n~~~\n"),
+            "a backtick opener with backticks in its info is not a fence": (
+                "``` a`b\n## x\n", "``` a`b\n### x\n"),
+        }
+        for name, (text, expected) in cases.items():
+            with self.subTest(name):
+                self.assertEqual(body(text), expected)
 
 
 if __name__ == "__main__":

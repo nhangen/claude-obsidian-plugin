@@ -258,6 +258,7 @@ if [ -n "${4:-}" ]; then
     0) DEDUP_OUTCOME="committed_or_identical" ;;
     3) DEDUP_OUTCOME="conflict" ;;
     2) DEDUP_OUTCOME="partial" ;;
+    4) DEDUP_OUTCOME="state_invalid" ;;
   esac
   exit "$KEEPER_RC"
 fi

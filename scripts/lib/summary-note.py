@@ -6,21 +6,30 @@ import json
 import os
 from pathlib import Path, PurePosixPath
 import re
+import runpy
 import subprocess
 import sys
 import tempfile
+import time
+
+_statefile = runpy.run_path(str(Path(__file__).with_name("statefile.py")))
+write_record = _statefile["write_record"]
+state_home = _statefile["state_home"]
+STALE_POINTER_SECONDS = 30 * 24 * 3600
+INVALID_INPUT_EXIT = 4
 
 
-def write_record(path, value):
-    descriptor, temporary = tempfile.mkstemp(dir=path.parent)
-    try:
-        with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
-            json.dump(value, stream, sort_keys=True)
-            stream.write("\n")
-        os.replace(temporary, path)
-    finally:
-        if os.path.exists(temporary):
-            os.unlink(temporary)
+def prune_stale_pointers(directory, current):
+    cutoff = time.time() - STALE_POINTER_SECONDS
+    for pointer in directory.glob("*.json"):
+        if pointer == current:
+            continue
+        try:
+            if pointer.lstat().st_mtime < cutoff:
+                pointer.unlink()
+                Path(str(pointer) + ".lock").unlink(missing_ok=True)
+        except OSError:
+            continue
 
 
 def without_reserved_keys(frontmatter):
@@ -55,13 +64,7 @@ def save(vault, source, proposed, body, title, date, daily, usage, input_file):
     if not vault.is_dir():
         raise ValueError("invalid vault")
     key = hashlib.sha256((str(vault) + "\0" + str(Path(source).resolve())).encode()).hexdigest()
-    state_home = os.environ.get("XDG_STATE_HOME")
-    if not state_home:
-        home = os.environ.get("HOME")
-        if not home:
-            raise ValueError("missing state home")
-        state_home = str(Path(home) / ".local/state")
-    directory = Path(state_home) / "claude-obsidian/summary-notes"
+    directory = state_home() / "claude-obsidian/summary-notes"
     directory.mkdir(parents=True, mode=0o700, exist_ok=True)
     if directory.is_symlink() or not directory.is_dir():
         raise ValueError("invalid state directory")
@@ -110,6 +113,7 @@ def save(vault, source, proposed, body, title, date, daily, usage, input_file):
         if state["ready"] and not note.exists() and not note.is_symlink():
             state["ready"] = False
         write_record(record, state)
+        prune_stale_pointers(directory, record)
         with tempfile.TemporaryDirectory(prefix="obsidian-checkpoint-") as scratch:
             staged = Path(scratch) / "body.md"
             if not state["ready"]:
@@ -145,4 +149,4 @@ if __name__ == "__main__":
     except (OSError, ValueError, TypeError, KeyError) as error:
         reason = str(error) if type(error) is ValueError else type(error).__name__
         print(f"summary-note: checkpoint write failed ({reason}); activity remains pending", file=sys.stderr)
-        sys.exit(1)
+        sys.exit(1 if isinstance(error, OSError) else INVALID_INPUT_EXIT)
