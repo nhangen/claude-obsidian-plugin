@@ -9,6 +9,7 @@ import subprocess
 import tempfile
 import time
 import unittest
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -792,6 +793,63 @@ class SummaryNoteTests(unittest.TestCase):
                 self.assertEqual(result.returncode, 4)
                 self.assertIn("invalid target", result.stderr)
         self.assertFalse((self.case / "escape.md").exists())
+
+    def test_replaced_state_record_symlink_is_refused(self):
+        self.assertEqual(self.run_note("2026-01-01", ["one"], "Inbox/direct.md").returncode, 0)
+        pointer, = self.pointers.glob("*.json")
+        outside = self.case / "outside.json"
+        original = pointer.read_bytes()
+        outside.write_bytes(original)
+        pointer.unlink()
+        pointer.symlink_to(outside)
+        note, = (self.case / "vault/Inbox").glob("direct-*.md")
+        before = note.read_bytes()
+
+        result = self.run_note("2026-01-01", ["two"], "Inbox/direct.md")
+
+        self.assertEqual(result.returncode, 4, result.stderr)
+        self.assertIn("invalid state record", result.stderr)
+        self.assertTrue(pointer.is_symlink())
+        self.assertEqual(outside.read_bytes(), original)
+        self.assertEqual(note.read_bytes(), before)
+
+    def test_replaced_pointer_lock_symlink_is_not_followed(self):
+        self.assertEqual(self.run_note("2026-01-01", ["one"], "Inbox/direct.md").returncode, 0)
+        pointer, = self.pointers.glob("*.json")
+        lock = Path(str(pointer) + ".lock")
+        outside = self.case / "outside.lock"
+        outside.write_text("lock sentinel")
+        lock.unlink()
+        lock.symlink_to(outside)
+        note, = (self.case / "vault/Inbox").glob("direct-*.md")
+        before = note.read_bytes(), pointer.read_bytes()
+
+        result = self.run_note("2026-01-01", ["two"], "Inbox/direct.md")
+
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertIn("checkpoint write failed (OSError)", result.stderr)
+        self.assertTrue(lock.is_symlink())
+        self.assertEqual(outside.read_text(), "lock sentinel")
+        self.assertEqual((note.read_bytes(), pointer.read_bytes()), before)
+
+    def test_ready_note_symlink_is_rejected_before_keeper_append(self):
+        self.assertEqual(self.run_note("2026-01-01", ["one"], "Inbox/direct.md").returncode, 0)
+        note, = (self.case / "vault/Inbox").glob("direct-*.md")
+        outside = self.case / "outside.md"
+        outside.write_text("note sentinel")
+        note.unlink()
+        note.symlink_to(outside)
+        module = self.load_module()
+        arguments = self.command("2026-01-01", ["two"], "Inbox/direct.md")[2:]
+
+        # Keeper also refuses symlinks; isolate this guard so keeper cannot mask its removal.
+        with mock.patch.dict(os.environ, self.env), mock.patch.object(
+                module.subprocess, "run", return_value=subprocess.CompletedProcess([], 0)) as keeper:
+            with self.assertRaisesRegex(ValueError, "missing canonical note"):
+                module.save(*arguments)
+            keeper.assert_not_called()
+        self.assertTrue(note.is_symlink())
+        self.assertEqual(outside.read_text(), "note sentinel")
 
     def test_stale_pointers_are_pruned_and_current_ones_kept(self):
         self.assertEqual(self.run_note("2026-01-01", ["one"], "Inbox/2026-01-01-direct.md").returncode, 0)
