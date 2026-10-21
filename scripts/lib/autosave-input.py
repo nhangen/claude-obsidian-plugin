@@ -100,7 +100,6 @@ def extract(source):
                         if (isinstance(block, dict) and block.get("type") == "text"
                                 and isinstance(block.get("text"), str)
                                 and block["text"].startswith("Base directory for this skill:")):
-                            # ARGUMENTS is not a delimiter: procedures and arguments can both contain it.
                             counts["excluded_instruction_events"] += 1
                         else:
                             retained.append(block)

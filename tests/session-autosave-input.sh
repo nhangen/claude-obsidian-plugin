@@ -171,7 +171,7 @@ print(json.dumps({"type": "result", "subtype": "success",
             message("user", skill + "# Procedure\nARGUMENTS: example\nKeep this procedure private."),
             message("assistant", result)],
          [{"kind": "assistant", "text": result}], 1),
-        ("markers in body and real arguments", [
+        ("body markers dropped, separate invocation kept", [
             message("user", invocation),
             message("user", skill + "# Procedure\nARGUMENTS: example\nProcedure tail.\n\n"
                     "ARGUMENTS: mini 1037\nARGUMENTS: literal user text"),
