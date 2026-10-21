@@ -374,9 +374,16 @@ keeper_heading_sha_relation() {
     # CommonMark: a fence closes only on the same char, at least as long.
     # Indented 0-3 spaces allowed per CommonMark spec.
     /^[ ]{0,3}(```+|~~~+)/ {
-      run = $0; sub(/^[ ]*/, "", run); sub(/[^`~].*$/, "", run); ch = substr(run, 1, 1); n = length(run)
-      if (fence_ch == "") { fence_ch = ch; fence_n = n }
-      else if (ch == fence_ch && n >= fence_n) { fence_ch = ""; fence_n = 0 }
+      run = $0; sub(/^[ ]*/, "", run); ch = substr(run, 1, 1)
+      suffix = run
+      if (ch == "`") sub(/[^`].*$/, "", run)
+      else sub(/[^~].*$/, "", run)
+      n = length(run); suffix = substr(suffix, n + 1)
+      if (fence_ch == "") {
+        if (ch == "`" && index(suffix, "`") > 0) next
+        fence_ch = ch; fence_n = n
+      }
+      else if (ch == fence_ch && n >= fence_n && suffix ~ /^[[:space:]]*$/) { fence_ch = ""; fence_n = 0 }
       next
     }
     fence_ch == "" && $1 ~ /^##?#?#?#?#?$/ && NF > 1 {

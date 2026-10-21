@@ -13,22 +13,13 @@ import uuid
 
 checkpoint = runpy.run_path(str(Path(__file__).with_name("activity_gate.py")))["checkpoint"]
 redact = runpy.run_path(str(Path(__file__).with_name("autosave-input.py")))["redact"]
+_statefile = runpy.run_path(str(Path(__file__).with_name("statefile.py")))
+write_record = _statefile["write_record"]
+state_home = _statefile["state_home"]
 
 
 def digest(value):
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
-
-
-def write_record(path, record):
-    descriptor, temporary = tempfile.mkstemp(dir=path.parent)
-    try:
-        with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
-            json.dump(record, stream, sort_keys=True)
-            stream.write("\n")
-        os.replace(temporary, path)
-    finally:
-        if os.path.exists(temporary):
-            os.unlink(temporary)
 
 
 def boundary(snapshot):
@@ -85,15 +76,9 @@ def private_directory(path):
 
 
 def prepare_state(vault, source, session_id):
-    state_home = os.environ.get("XDG_STATE_HOME")
-    if not state_home:
-        home = os.environ.get("HOME")
-        if not home:
-            raise ValueError("HOME is required")
-        state_home = str(Path(home) / ".local/state")
     source_id = digest(str(vault.resolve()) + "\0" +
                        (session_id or str(source.resolve())))
-    state_root = Path(state_home) / "claude-obsidian/session-capture"
+    state_root = state_home() / "claude-obsidian/session-capture"
     private_directory(state_root)
     state = state_root / source_id
     private_directory(state)
