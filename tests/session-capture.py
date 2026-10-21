@@ -378,7 +378,7 @@ print(json.dumps({"type":"result", "subtype":"success", "is_error":False,
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
         cleaned = module.without_reserved_keys(
-            "session_intent: execution\ncapture_scope: model_guess\nsource_session_hash: abc\nslug: x")
+            "session_intent: execution\ncapture_scope: model_guess\ncheckpoint_source_key: abc\nslug: x")
         self.assertEqual(cleaned, "session_intent: execution\nslug: x")
 
     def test_checkpoint_symlink_does_not_write_or_acknowledge(self):

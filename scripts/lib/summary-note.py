@@ -34,7 +34,7 @@ def prune_stale_pointers(directory, current):
 
 def without_reserved_keys(frontmatter):
     return "\n".join(line for line in frontmatter.split("\n")
-                     if not re.match(r"(capture_scope|source_session_hash):", line))
+                     if not re.match(r"(capture_scope|checkpoint_source_key):", line))
 
 
 def checkpoint_body(text):
@@ -118,11 +118,12 @@ def save(vault, source, proposed, body, title, date, daily, usage, input_file):
             staged = Path(scratch) / "body.md"
             if not state["ready"]:
                 if note.exists():
+                    # Re-inserting the existing note lets --recover finish INDEX and the daily link after a partial first save.
                     initial_body = note
                 else:
                     staged.write_text(
                         f"---\n{frontmatter}\ncapture_scope: checkpoint_log\n"
-                        f"source_session_hash: {key}\n---\n\n# {title}\n\n"
+                        f"checkpoint_source_key: {key}\n---\n\n# {title}\n\n"
                         "Chronological checkpoint log, oldest first. Each checkpoint records only its "
                         "observed input; full-session completeness is not established.\n\n"
                         f"{section}\n\n{text}")

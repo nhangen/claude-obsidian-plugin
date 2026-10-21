@@ -195,6 +195,7 @@ print(json.dumps({"type": "result", "subtype": "success",
     assert "\n### Findings\n" in saved and "\n## Findings\n" not in saved, "model headings must nest under the checkpoint"
     assert saved.count("## Checkpoint ") == 2
     assert "capture_scope: checkpoint_log" in saved
+    assert "checkpoint_source_key: " in saved and "source_session_hash" not in saved
     assert "Checkpoint input coverage" in saved
     assert "full-session completeness is not established" in saved
     assert not (case / "vault/Projects").exists(), "routing drift created a second session record"
