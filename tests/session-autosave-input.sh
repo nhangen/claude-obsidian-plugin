@@ -161,13 +161,69 @@ print(json.dumps({"type": "result", "subtype": "success",
     assert "## Autosave Input Coverage" in notes[0].read_text()
     assert "bounded-input" in next((case / "vault" / "Daily").glob("*.md")).read_text()
 
+    invocation = ("<command-message>review</command-message>\n"
+                  "<command-name>/review</command-name>\n"
+                  "<command-args>mini 1037\nARGUMENTS: literal user text</command-args>")
+    skill = "Base directory for this skill: /fixture/review\n"
+    result = "Concrete result after the skill load."
+    for label, records, expected, excluded in [
+        ("body marker without arguments", [
+            message("user", skill + "# Procedure\nARGUMENTS: example\nKeep this procedure private."),
+            message("assistant", result)],
+         [{"kind": "assistant", "text": result}], 1),
+        ("body markers dropped, separate invocation kept", [
+            message("user", invocation),
+            message("user", skill + "# Procedure\nARGUMENTS: example\nProcedure tail.\n\n"
+                    "ARGUMENTS: mini 1037\nARGUMENTS: literal user text"),
+            message("assistant", result)],
+         [{"kind": "user", "text": invocation}, {"kind": "assistant", "text": result}], 1),
+        ("mixed content blocks", [message("user", [
+            {"type": "text", "text": "Independent user evidence."},
+            {"type": "text", "text": skill + "# Procedure without arguments."},
+            {"type": "text", "text": skill + "# Procedure\nARGUMENTS: example\nProcedure tail."},
+            {"type": "image", "source": {"data": "excluded image"}},
+            {"type": "text", "text": invocation},
+            {"type": "tool_result", "tool_use_id": "skill-result", "content": [
+                {"type": "text", "text": "Tool evidence survives."}]}])],
+         [{"kind": "user", "text": "Independent user evidence.\n" + invocation},
+          {"kind": "tool_result", "text": "Tool evidence survives."}], 2),
+        ("ordinary marker and assistant text", [
+            message("user", "An ordinary request.\nARGUMENTS: literal evidence"),
+            message("assistant", skill + "Assistant explanation.")],
+         [{"kind": "user", "text": "An ordinary request.\nARGUMENTS: literal evidence"},
+          {"kind": "assistant", "text": skill + "Assistant explanation."}], 0),
+        ("tool-invoked skill arguments", [
+            message("assistant", [
+                {"type": "tool_use", "id": "skill-call", "name": "Skill", "input": {
+                    "skill": "review", "args": 'mini 1037\nARGUMENTS: literal user text\nAPI_KEY="fictional-skill-secret"'}},
+                {"type": "tool_use", "name": "Bash", "input": {"args": "private command"}},
+                {"type": "tool_use", "name": "Skill", "input": {"skill": "review"}},
+                {"type": "tool_use", "name": "Skill", "input": {"skill": "review", "args": []}},
+                {"type": "tool_use", "name": "Skill", "input": {"skill": "review", "args": " "}}]),
+            message("user", skill + "# Procedure\nARGUMENTS: example\n\n"
+                    "ARGUMENTS: mini 1037\nARGUMENTS: literal user text")],
+         [{"kind": "assistant", "text": "Skill invocation: review\n"
+           "Arguments: mini 1037\nARGUMENTS: literal user text\nAPI_KEY=[REDACTED]"}], 1),
+    ]:
+        write(records)
+        output = case / "extracted.jsonl"
+        subprocess.run(["python3", str(root / "scripts/lib/autosave-input.py"),
+                        str(source), str(output)], check=True, env=env)
+        metadata, *evidence = [json.loads(line) for line in output.read_text().splitlines()]
+        assert evidence == expected, (label, evidence)
+        assert metadata["omissions"].get("excluded_instruction_events", 0) == excluded, (label, metadata)
+        assert metadata["extracted_events"] == len(expected), (label, metadata)
+        assert not metadata["context_incomplete"], (label, metadata)
+
     write([message("user", "Base directory for this skill: /fixture/bare\n# Procedure only, no arguments."),
            message("assistant", "Concrete result recorded after the bare skill load.")])
     meta, events, text = run()
     assert "Procedure only" not in text and "Concrete result recorded" in text
-    assert "excluded_instruction_events" in json.dumps(meta), meta
+    assert meta["omissions"]["excluded_instruction_events"] == 1, meta
 
-    write([message("user", "Base directory for this skill: /fixture/review\n"
+    write([message("user", "<command-message>review</command-message>\n"
+                   "<command-name>/review</command-name>\n<command-args>mini 1037</command-args>"),
+           message("user", "Base directory for this skill: /fixture/review\n"
                    "# Review workflow\nStop at the post-synthesis permission gate.\n\nARGUMENTS: mini 1037"),
            message("assistant", "Silent-failure review saved. Conventions and tests are still running.")])
     env.update(NOTE_SLUG="review-start", NOTE_TEXT="Reviewers are still running.\n\n```markdown\n## Literal example\n```\n\n```text\n```literal\nAn unclosed example.\n")

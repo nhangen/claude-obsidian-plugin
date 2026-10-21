@@ -92,12 +92,31 @@ def extract(source):
                 continue
             content = message.get("content", "")
             extracted = []
+            if role == "user":
+                blocks = [{"type": "text", "text": content}] if isinstance(content, str) else content
+                if isinstance(blocks, list):
+                    retained = []
+                    for block in blocks:
+                        if (isinstance(block, dict) and block.get("type") == "text"
+                                and isinstance(block.get("text"), str)
+                                and block["text"].startswith("Base directory for this skill:")):
+                            counts["excluded_instruction_events"] += 1
+                        else:
+                            retained.append(block)
+                    content = retained
             text = texts(content)
-            if role == "user" and text.startswith("Base directory for this skill:"):
-                text = text.rpartition("\nARGUMENTS:")[2].strip() if "\nARGUMENTS:" in text else ""
-                counts["excluded_instruction_events"] += 1
             if text.strip():
                 extracted.append((role, text, message.get("id") or record.get("uuid")))
+            if role == "assistant" and isinstance(content, list):
+                for block in content:
+                    if (not isinstance(block, dict) or block.get("type") != "tool_use"
+                            or block.get("name") != "Skill"):
+                        continue
+                    invocation = block.get("input")
+                    if (isinstance(invocation, dict) and isinstance(invocation.get("skill"), str)
+                            and isinstance(invocation.get("args"), str) and invocation["args"].strip()):
+                        extracted.append(("assistant", f"Skill invocation: {invocation['skill']}\n"
+                                          f"Arguments: {invocation['args']}", block.get("id")))
             if role == "user" and isinstance(content, list):
                 for block in content:
                     if isinstance(block, dict) and block.get("type") == "tool_result":
