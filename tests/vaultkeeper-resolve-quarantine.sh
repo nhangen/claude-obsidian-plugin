@@ -254,4 +254,16 @@ grep -qF -- "refusing symlink" <<<"$ERR" || fail "leaf symlink refusal message m
 [ -L "$Q/$QF_LEAF_SYM" ] || fail "leaf symlink was removed"
 rm -f "$Q/$QF_LEAF_SYM"
 
+# 23. diff refuses a live note that is a symlink and reads nothing through it
+QF_LIVE_SYM="1700000024-LiveLink.sync-conflict-20261010-161616-MBP.md"
+printf 'conflict body\n' > "$Q/$QF_LIVE_SYM"
+printf 'outside live content\n' > "$TMP/outside-live.md"
+ln -s "$TMP/outside-live.md" "$V/LiveLink.md"
+if ERR="$("$SCRIPT" diff "$QF_LIVE_SYM" --vault "$V" 2>&1)"; then
+  fail "diff should refuse a symlinked live note"
+fi
+grep -qE -- "refusing symlink .*/vault/LiveLink\.md$" <<<"$ERR" || fail "live symlink refusal message missing; got: $ERR"
+grep -qF -- "outside live content" <<<"$ERR" && fail "diff leaked content through the live symlink"
+rm -f "$Q/$QF_LIVE_SYM" "$V/LiveLink.md"
+
 echo "PASS: vaultkeeper-resolve-quarantine"
