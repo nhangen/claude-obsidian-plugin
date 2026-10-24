@@ -15,6 +15,103 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "${ROOT}/lib/surfacing.sh"
 . "${ROOT}/lib/resolve-config.sh"
 
+# Returns 0 when q_dir is a real directory at its canonical path, 2 when it does not
+# exist, 1 (after printing why) when it is or sits behind a symlink.
+_check_quarantine_dir() {
+  local q_dir="$1" canonical_q
+  if [ -L "$q_dir" ]; then
+    printf 'error: refusing symlink %s\n' "$q_dir" >&2
+    return 1
+  fi
+  [ -d "$q_dir" ] || return 2
+  canonical_q="$(cd "$q_dir" 2>/dev/null && pwd -P)" || {
+    printf 'error: refusing symlink %s\n' "$q_dir" >&2
+    return 1
+  }
+  if [ "$canonical_q" != "$q_dir" ]; then
+    printf 'error: refusing symlink %s\n' "$q_dir" >&2
+    return 1
+  fi
+}
+
+_validate_quarantine_file() {
+  local vault="$1" target="$2"
+  local q_dir="$vault/.vaultkeeper-quarantine"
+
+  local dir_rc=0
+  _check_quarantine_dir "$q_dir" || dir_rc=$?
+  if [ "$dir_rc" -eq 2 ]; then
+    printf 'error: quarantined file not found: %s\n' "$target" >&2
+  fi
+  [ "$dir_rc" -eq 0 ] || return 1
+
+  case "/$target/" in
+    */../*)
+      printf 'error: refusing path traversal in target: %s\n' "$target" >&2
+      return 1
+      ;;
+  esac
+
+  local rel="$target"
+  if [ "${rel#/}" != "$rel" ]; then
+    local target_dir canonical_target_dir
+    target_dir="$(dirname "$rel")"
+    canonical_target_dir="$(cd "$target_dir" 2>/dev/null && pwd -P)" || {
+      printf 'error: quarantined file not found: %s\n' "$target" >&2
+      return 1
+    }
+    if [ "$canonical_target_dir" != "$q_dir" ]; then
+      printf 'error: refusing path outside .vaultkeeper-quarantine: %s\n' "$target" >&2
+      return 1
+    fi
+    rel="$(basename "$rel")"
+  else
+    while [ "${rel#./}" != "$rel" ]; do
+      rel="${rel#./}"
+    done
+    if [ "${rel#"$q_dir/"}" != "$rel" ]; then
+      rel="${rel#"$q_dir/"}"
+    elif [ "${rel#".vaultkeeper-quarantine/"}" != "$rel" ]; then
+      rel="${rel#".vaultkeeper-quarantine/"}"
+    fi
+
+    case "$rel" in
+      */*)
+        printf 'error: refusing directory path in quarantine file: %s\n' "$target" >&2
+        return 1
+        ;;
+    esac
+  fi
+
+  if [ -z "$rel" ]; then
+    printf 'error: quarantined file not found: %s\n' "$target" >&2
+    return 1
+  fi
+
+  local q_file="$q_dir/$rel"
+
+  if [ -L "$q_file" ]; then
+    printf 'error: refusing symlink %s\n' "$q_file" >&2
+    return 1
+  fi
+  if [ ! -f "$q_file" ]; then
+    printf 'error: quarantined file not found: %s\n' "$target" >&2
+    return 1
+  fi
+
+  local parent_dir
+  parent_dir="$(cd "$(dirname "$q_file")" 2>/dev/null && pwd -P)" || {
+    printf 'error: could not resolve parent of %s\n' "$q_file" >&2
+    return 1
+  }
+  if [ "$parent_dir" != "$q_dir" ]; then
+    printf 'error: refusing symlink %s\n' "$q_file" >&2
+    return 1
+  fi
+
+  printf '%s\n' "$q_file"
+}
+
 _resolve_vault() {
   local v="${1:-}"
   if [ -z "$v" ]; then
@@ -69,10 +166,13 @@ _resolve_target_live() {
 cmd_list() {
   local vault="$1"
   local q_dir="$vault/.vaultkeeper-quarantine"
-  if [ ! -d "$q_dir" ]; then
+  local dir_rc=0
+  _check_quarantine_dir "$q_dir" || dir_rc=$?
+  if [ "$dir_rc" -eq 2 ]; then
     printf 'Quarantine directory does not exist: %s\n' "$q_dir"
     return 0
   fi
+  [ "$dir_rc" -eq 0 ] || return 1
   local files
   files="$(find "$q_dir" -maxdepth 1 -type f ! -name '.*' 2>/dev/null | sort)"
   if [ -z "$files" ]; then
@@ -93,11 +193,14 @@ cmd_list() {
 
 cmd_diff() {
   local vault="$1" target="$2"
-  local q_dir="$vault/.vaultkeeper-quarantine"
-  local q_file="$q_dir/$(basename "$target")"
-  [ -f "$q_file" ] || { printf 'error: quarantined file not found: %s\n' "$target" >&2; exit 1; }
+  local q_file
+  q_file="$(_validate_quarantine_file "$vault" "$target")" || return 1
   local live
   live="$(_resolve_target_live "$vault" "$(basename "$q_file")")"
+  if [ -L "$live" ]; then
+    printf 'error: refusing symlink %s\n' "$live" >&2
+    return 1
+  fi
   if [ ! -f "$live" ]; then
     printf 'Live note does not exist at %s\nShowing full quarantined copy (%s):\n' "$live" "$(basename "$q_file")"
     cat "$q_file"
@@ -107,14 +210,17 @@ cmd_diff() {
   diff -u "$live" "$q_file" || [ $? -eq 1 ]
 }
 
-cmd_discard() {
+_discard_locked() {
   local vault="$1" target="$2"
-  local q_dir="$vault/.vaultkeeper-quarantine"
-  local q_file="$q_dir/$(basename "$target")"
-  [ -f "$q_file" ] || { printf 'error: quarantined file not found: %s\n' "$target" >&2; exit 1; }
-  [ ! -L "$q_file" ] || { printf 'error: refusing symlink %s\n' "$q_file" >&2; exit 1; }
+  local q_file
+  q_file="$(_validate_quarantine_file "$vault" "$target")" || return 1
   rm -f "$q_file"
   printf 'Discarded %s\n' "$(basename "$q_file")"
+}
+
+cmd_discard() {
+  local vault="$1" target="$2"
+  keeper_with_lock "$vault" _discard_locked "$vault" "$target"
 }
 
 # Runs under keeper_with_lock, same as the tick's Pending.md writer, so a merge cannot
@@ -155,12 +261,10 @@ _merge_pending_locked() {
   keeper_swap_or_clean "$tmp" "$pending"
 }
 
-cmd_merge() {
+_merge_locked() {
   local vault="$1" target="$2"
-  local q_dir="$vault/.vaultkeeper-quarantine"
-  local q_file="$q_dir/$(basename "$target")"
-  [ -f "$q_file" ] || { printf 'error: quarantined file not found: %s\n' "$target" >&2; exit 1; }
-  [ ! -L "$q_file" ] || { printf 'error: refusing symlink %s\n' "$q_file" >&2; exit 1; }
+  local q_file
+  q_file="$(_validate_quarantine_file "$vault" "$target")" || return 1
   local b
   b="$(basename "$q_file")"
 
@@ -176,11 +280,9 @@ cmd_merge() {
   # Pending.md: merge checklist items
   case "$b" in
     *[0-9]-Pending.sync-conflict-*)
-      local canonical
-      canonical="$(cd "$vault" 2>/dev/null && pwd -P)" || return 1
       MERGE_ADDED=0
       MERGE_SKIPPED=""
-      keeper_with_lock "$canonical" _merge_pending_locked "$canonical" "$q_file" || {
+      _merge_pending_locked "$vault" "$q_file" || {
         printf 'error: could not merge %s into Pending.md; quarantine copy kept\n' "$b" >&2
         return 1
       }
@@ -198,6 +300,11 @@ cmd_merge() {
   # Other files: show diff and instruction
   printf 'Manual resolution required for note %s.\n' "$b"
   cmd_diff "$vault" "$target"
+}
+
+cmd_merge() {
+  local vault="$1" target="$2"
+  keeper_with_lock "$vault" _merge_locked "$vault" "$target"
 }
 
 main() {
@@ -223,18 +330,18 @@ main() {
   vault="$(_resolve_vault "$vault")"
 
   case "$action" in
-    list) cmd_list "$vault" ;;
+    list) cmd_list "$vault" || exit 1 ;;
     diff)
       [ -n "$target" ] || { printf 'error: diff requires <quarantine_file>\n' >&2; exit 1; }
-      cmd_diff "$vault" "$target"
+      cmd_diff "$vault" "$target" || exit 1
       ;;
     discard)
       [ -n "$target" ] || { printf 'error: discard requires <quarantine_file>\n' >&2; exit 1; }
-      cmd_discard "$vault" "$target"
+      cmd_discard "$vault" "$target" || exit 1
       ;;
     merge)
       [ -n "$target" ] || { printf 'error: merge requires <quarantine_file>\n' >&2; exit 1; }
-      cmd_merge "$vault" "$target"
+      cmd_merge "$vault" "$target" || exit 1
       ;;
     *)
       printf 'unknown action: %s\n' "$action" >&2

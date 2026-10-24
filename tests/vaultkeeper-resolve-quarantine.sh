@@ -154,4 +154,125 @@ grep -qF -- "mode probe" "$V/Pending.md" && fail "Pending.md swapped without its
 grep -qF -- "could not read mode" <<<"$ERR" || fail "mode failure not reported; got: $ERR"
 rm -f "$Q/$QF"
 
+# 16. discard with symlinked quarantine parent refuses and leaves outside sentinel byte-identical
+OUTSIDE="$TMP/outside"
+mkdir -p "$OUTSIDE" "$TMP/outside-baseline"
+SENTINEL_DISCARD="1700000010-Live.sync-conflict-20261010-090909-MBP.md"
+printf 'outside live sentinel content\n' > "$OUTSIDE/$SENTINEL_DISCARD"
+cp "$OUTSIDE/$SENTINEL_DISCARD" "$TMP/outside-baseline/$SENTINEL_DISCARD"
+
+V_SYM="$TMP/vault-sym"
+mkdir -p "$V_SYM"
+ln -s "$OUTSIDE" "$V_SYM/.vaultkeeper-quarantine"
+
+if ERR="$("$SCRIPT" discard "$SENTINEL_DISCARD" --vault "$V_SYM" 2>&1)"; then
+  fail "discard should refuse symlinked quarantine parent"
+fi
+grep -qF -- "refusing symlink" <<<"$ERR" || fail "discard did not report refusing symlink; got: $ERR"
+cmp -s "$OUTSIDE/$SENTINEL_DISCARD" "$TMP/outside-baseline/$SENTINEL_DISCARD" || fail "outside sentinel modified by discard"
+
+# 17. machine-owned merge with symlinked quarantine parent refuses and leaves outside sentinel byte-identical
+SENTINEL_LIBRARIAN="1700000011-Librarian.sync-conflict-20261010-101010-MBP.md"
+printf 'outside librarian sentinel content\n' > "$OUTSIDE/$SENTINEL_LIBRARIAN"
+cp "$OUTSIDE/$SENTINEL_LIBRARIAN" "$TMP/outside-baseline/$SENTINEL_LIBRARIAN"
+
+if ERR="$("$SCRIPT" merge "$SENTINEL_LIBRARIAN" --vault "$V_SYM" 2>&1)"; then
+  fail "machine-owned merge should refuse symlinked quarantine parent"
+fi
+grep -qF -- "refusing symlink" <<<"$ERR" || fail "machine-owned merge did not report refusing symlink; got: $ERR"
+cmp -s "$OUTSIDE/$SENTINEL_LIBRARIAN" "$TMP/outside-baseline/$SENTINEL_LIBRARIAN" || fail "outside sentinel modified by machine-owned merge"
+
+# 18. Pending merge with symlinked quarantine parent refuses and leaves outside sentinel and Pending.md byte-identical
+SENTINEL_PENDING="1700000012-Pending.sync-conflict-20261010-111111-MBP.md"
+printf -- '- [ ] outside task\n' > "$OUTSIDE/$SENTINEL_PENDING"
+cp "$OUTSIDE/$SENTINEL_PENDING" "$TMP/outside-baseline/$SENTINEL_PENDING"
+printf -- '- [ ] vault task\n' > "$V_SYM/Pending.md"
+cp "$V_SYM/Pending.md" "$TMP/outside-baseline/Pending.md"
+
+if ERR="$("$SCRIPT" merge "$SENTINEL_PENDING" --vault "$V_SYM" 2>&1)"; then
+  fail "Pending merge should refuse symlinked quarantine parent"
+fi
+grep -qF -- "refusing symlink" <<<"$ERR" || fail "Pending merge did not report refusing symlink; got: $ERR"
+cmp -s "$OUTSIDE/$SENTINEL_PENDING" "$TMP/outside-baseline/$SENTINEL_PENDING" || fail "outside sentinel modified by Pending merge"
+cmp -s "$V_SYM/Pending.md" "$TMP/outside-baseline/Pending.md" || fail "Pending.md modified by refused Pending merge"
+
+# 19. diff and list with symlinked quarantine parent refuse and exit non-zero
+if ERR="$("$SCRIPT" diff "$SENTINEL_DISCARD" --vault "$V_SYM" 2>&1)"; then
+  fail "diff should refuse symlinked quarantine parent"
+fi
+grep -qF -- "refusing symlink" <<<"$ERR" || fail "diff did not report refusing symlink; got: $ERR"
+
+if ERR="$("$SCRIPT" list --vault "$V_SYM" 2>&1)"; then
+  fail "list should refuse symlinked quarantine parent"
+fi
+grep -qF -- "refusing symlink" <<<"$ERR" || fail "list did not report refusing symlink; got: $ERR"
+
+# 20. discard and machine-owned merge are performed under the keeper lock
+QF_DISCARD="1700000020-Live.sync-conflict-20261010-121212-MBP.md"
+printf 'lock test discard\n' > "$Q/$QF_DISCARD"
+(
+  . "$ROOT_DIR/scripts/lib/note-hash.sh"
+  LOCK="$(keeper_lock_acquire "$(cd "$V" && pwd -P)")" || exit 9
+  if KEEPER_LOCK_TIMEOUT_SECONDS=1 "$SCRIPT" discard "$QF_DISCARD" --vault "$V" >/dev/null 2>&1; then
+    keeper_lock_release "$LOCK"; exit 8
+  fi
+  keeper_lock_release "$LOCK"
+) || fail "discard ran while the keeper lock was held (rc=$?)"
+[ -f "$Q/$QF_DISCARD" ] || fail "discard removed file although the lock was held"
+rm -f "$Q/$QF_DISCARD"
+
+QF_MACHINE="1700000021-Librarian.sync-conflict-20261010-131313-MBP.md"
+printf 'lock test librarian\n' > "$Q/$QF_MACHINE"
+(
+  . "$ROOT_DIR/scripts/lib/note-hash.sh"
+  LOCK="$(keeper_lock_acquire "$(cd "$V" && pwd -P)")" || exit 9
+  if KEEPER_LOCK_TIMEOUT_SECONDS=1 "$SCRIPT" merge "$QF_MACHINE" --vault "$V" >/dev/null 2>&1; then
+    keeper_lock_release "$LOCK"; exit 8
+  fi
+  keeper_lock_release "$LOCK"
+) || fail "machine merge ran while the keeper lock was held (rc=$?)"
+[ -f "$Q/$QF_MACHINE" ] || fail "machine merge removed file although the lock was held"
+rm -f "$Q/$QF_MACHINE"
+
+# 21. target paths prefixed with .vaultkeeper-quarantine/ or absolute path resolve; traversal is refused
+QF_PREFIX="1700000022-Live.sync-conflict-20261010-141414-MBP.md"
+printf 'prefix test\n' > "$Q/$QF_PREFIX"
+"$SCRIPT" diff ".vaultkeeper-quarantine/$QF_PREFIX" --vault "$V" >/dev/null || fail "prefixed target failed to resolve"
+"$SCRIPT" diff "$V/.vaultkeeper-quarantine/$QF_PREFIX" --vault "$V" >/dev/null || fail "absolute target failed to resolve"
+if "$SCRIPT" diff "../outside/sentinel" --vault "$V" >/dev/null 2>&1; then
+  fail "path traversal target should be refused"
+fi
+rm -f "$Q/$QF_PREFIX"
+
+# 22. leaf symlinks are refused
+QF_LEAF_SYM="1700000023-Live.sync-conflict-20261010-151515-MBP.md"
+ln -s "$V/Pending.md" "$Q/$QF_LEAF_SYM"
+if ERR="$("$SCRIPT" discard "$QF_LEAF_SYM" --vault "$V" 2>&1)"; then
+  fail "discard should refuse leaf symlink"
+fi
+grep -qF -- "refusing symlink" <<<"$ERR" || fail "leaf symlink refusal message missing; got: $ERR"
+[ -L "$Q/$QF_LEAF_SYM" ] || fail "leaf symlink was removed"
+rm -f "$Q/$QF_LEAF_SYM"
+
+# 23. diff refuses a live note that is a symlink and reads nothing through it
+QF_LIVE_SYM="1700000024-LiveLink.sync-conflict-20261010-161616-MBP.md"
+printf 'conflict body\n' > "$Q/$QF_LIVE_SYM"
+printf 'outside live content\n' > "$TMP/outside-live.md"
+ln -s "$TMP/outside-live.md" "$V/LiveLink.md"
+if ERR="$("$SCRIPT" diff "$QF_LIVE_SYM" --vault "$V" 2>&1)"; then
+  fail "diff should refuse a symlinked live note"
+fi
+grep -qE -- "refusing symlink .*/vault/LiveLink\.md$" <<<"$ERR" || fail "live symlink refusal message missing; got: $ERR"
+grep -qF -- "outside live content" <<<"$ERR" && fail "diff leaked content through the live symlink"
+rm -f "$Q/$QF_LIVE_SYM" "$V/LiveLink.md"
+
+# 24. an absolute path outside the quarantine is refused with a containment message
+printf 'elsewhere\n' > "$V/elsewhere.md"
+if ERR="$("$SCRIPT" discard "$V/elsewhere.md" --vault "$V" 2>&1)"; then
+  fail "discard should refuse an absolute path outside the quarantine"
+fi
+grep -qF -- "refusing path outside .vaultkeeper-quarantine" <<<"$ERR" || fail "outside-path refusal message missing; got: $ERR"
+[ -f "$V/elsewhere.md" ] || fail "file outside the quarantine was removed"
+rm -f "$V/elsewhere.md"
+
 echo "PASS: vaultkeeper-resolve-quarantine"
