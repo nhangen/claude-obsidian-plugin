@@ -15,20 +15,15 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "${ROOT}/lib/surfacing.sh"
 . "${ROOT}/lib/resolve-config.sh"
 
-_validate_quarantine_file() {
-  local vault="$1" target="$2"
-  local q_dir="$vault/.vaultkeeper-quarantine"
-
+# Returns 0 when q_dir is a real directory at its canonical path, 2 when it does not
+# exist, 1 (after printing why) when it is or sits behind a symlink.
+_check_quarantine_dir() {
+  local q_dir="$1" canonical_q
   if [ -L "$q_dir" ]; then
     printf 'error: refusing symlink %s\n' "$q_dir" >&2
     return 1
   fi
-  if [ ! -d "$q_dir" ]; then
-    printf 'error: quarantined file not found: %s\n' "$target" >&2
-    return 1
-  fi
-
-  local canonical_q
+  [ -d "$q_dir" ] || return 2
   canonical_q="$(cd "$q_dir" 2>/dev/null && pwd -P)" || {
     printf 'error: refusing symlink %s\n' "$q_dir" >&2
     return 1
@@ -37,6 +32,18 @@ _validate_quarantine_file() {
     printf 'error: refusing symlink %s\n' "$q_dir" >&2
     return 1
   fi
+}
+
+_validate_quarantine_file() {
+  local vault="$1" target="$2"
+  local q_dir="$vault/.vaultkeeper-quarantine"
+
+  local dir_rc=0
+  _check_quarantine_dir "$q_dir" || dir_rc=$?
+  if [ "$dir_rc" -eq 2 ]; then
+    printf 'error: quarantined file not found: %s\n' "$target" >&2
+  fi
+  [ "$dir_rc" -eq 0 ] || return 1
 
   case "/$target/" in
     */../*)
@@ -159,23 +166,13 @@ _resolve_target_live() {
 cmd_list() {
   local vault="$1"
   local q_dir="$vault/.vaultkeeper-quarantine"
-  if [ -L "$q_dir" ]; then
-    printf 'error: refusing symlink %s\n' "$q_dir" >&2
-    return 1
-  fi
-  if [ ! -d "$q_dir" ]; then
+  local dir_rc=0
+  _check_quarantine_dir "$q_dir" || dir_rc=$?
+  if [ "$dir_rc" -eq 2 ]; then
     printf 'Quarantine directory does not exist: %s\n' "$q_dir"
     return 0
   fi
-  local canonical_q
-  canonical_q="$(cd "$q_dir" 2>/dev/null && pwd -P)" || {
-    printf 'error: refusing symlink %s\n' "$q_dir" >&2
-    return 1
-  }
-  if [ "$canonical_q" != "$q_dir" ]; then
-    printf 'error: refusing symlink %s\n' "$q_dir" >&2
-    return 1
-  fi
+  [ "$dir_rc" -eq 0 ] || return 1
   local files
   files="$(find "$q_dir" -maxdepth 1 -type f ! -name '.*' 2>/dev/null | sort)"
   if [ -z "$files" ]; then
