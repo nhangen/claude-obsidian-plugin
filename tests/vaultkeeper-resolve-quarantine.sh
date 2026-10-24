@@ -266,4 +266,13 @@ grep -qE -- "refusing symlink .*/vault/LiveLink\.md$" <<<"$ERR" || fail "live sy
 grep -qF -- "outside live content" <<<"$ERR" && fail "diff leaked content through the live symlink"
 rm -f "$Q/$QF_LIVE_SYM" "$V/LiveLink.md"
 
+# 24. an absolute path outside the quarantine is refused with a containment message
+printf 'elsewhere\n' > "$V/elsewhere.md"
+if ERR="$("$SCRIPT" discard "$V/elsewhere.md" --vault "$V" 2>&1)"; then
+  fail "discard should refuse an absolute path outside the quarantine"
+fi
+grep -qF -- "refusing path outside .vaultkeeper-quarantine" <<<"$ERR" || fail "outside-path refusal message missing; got: $ERR"
+[ -f "$V/elsewhere.md" ] || fail "file outside the quarantine was removed"
+rm -f "$V/elsewhere.md"
+
 echo "PASS: vaultkeeper-resolve-quarantine"

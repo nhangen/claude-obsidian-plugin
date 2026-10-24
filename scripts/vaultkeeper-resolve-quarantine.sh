@@ -54,7 +54,7 @@ _validate_quarantine_file() {
       return 1
     }
     if [ "$canonical_target_dir" != "$q_dir" ]; then
-      printf 'error: quarantined file not found: %s\n' "$target" >&2
+      printf 'error: refusing path outside .vaultkeeper-quarantine: %s\n' "$target" >&2
       return 1
     fi
     rel="$(basename "$rel")"
@@ -93,7 +93,10 @@ _validate_quarantine_file() {
   fi
 
   local parent_dir
-  parent_dir="$(cd "$(dirname "$q_file")" 2>/dev/null && pwd -P)" || return 1
+  parent_dir="$(cd "$(dirname "$q_file")" 2>/dev/null && pwd -P)" || {
+    printf 'error: could not resolve parent of %s\n' "$q_file" >&2
+    return 1
+  }
   if [ "$parent_dir" != "$q_dir" ]; then
     printf 'error: refusing symlink %s\n' "$q_file" >&2
     return 1
