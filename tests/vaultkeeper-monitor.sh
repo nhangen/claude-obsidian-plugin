@@ -125,7 +125,7 @@ ln -s "$SENTINEL7" "$V7/CEO/inbox.md"
 echo c > "$V7/.vaultkeeper-quarantine/1700000000-Pending.sync-conflict-20261010-010101-MBP.md"
 ERR7="$(keeper_monitor_tick "$V7" "" "test-host" 2>&1 >/dev/null)" && fail "symlinked inbox tick reported success"
 [ "$(grep -c . "$SENTINEL7")" -eq 0 ] || fail "symlinked inbox followed; outside sentinel has: $(cat "$SENTINEL7")"
-grep -qF "resolves outside the vault" <<<"$ERR7" || fail "symlinked inbox refusal was silent; got: $ERR7"
+grep -qF "is a symlink or does not resolve to itself" <<<"$ERR7" || fail "symlinked inbox refusal was silent; got: $ERR7"
 
 # 10b. Once the leaf is repaired the refused transition must still refire, so the
 # refused tick (which saves no state — see #237) does not eat the escalation
@@ -153,10 +153,10 @@ ERR9="$(keeper_monitor_tick "$V9" "$HUNDRED" "test-host" 2>&1 >/dev/null)" && fa
 grep -qF "CEO/alerts resolves outside" <<<"$ERR9" || fail "symlinked gaps refusal was silent; got: $ERR9"
 
 # 13. A symlinked CEO itself is caught by the same guard, for the whole parent chain:
-# quarantine alert, gap alert, and inbox escalation all stay off the resolved target.
-# Seed the gap baseline while the tree is real; the outside target mirrors the
-# attacker's shape (their own alerts/ and inbox.md) so the tick would publish there
-# if the guard did not refuse it.
+# quarantine alert and inbox escalation stay off the resolved target.
+# The outside target mirrors the attacker's shape (their own alerts/ and inbox.md) so
+# the tick would publish there if the guard did not refuse it. The alerts guard refuses
+# first, so this pins the quarantine alert and inbox only; the inbox guard is pinned by 14.
 V10="$TMP/vault10"; mkdir -p "$V10/.vaultkeeper-quarantine" "$V10/CEO/alerts"
 CEO10="$TMP/ceo10"; mkdir -p "$CEO10/alerts"; : > "$CEO10/inbox.md"
 rm -rf "$V10/CEO"; ln -s "$CEO10" "$V10/CEO"
@@ -165,5 +165,39 @@ ERR10="$(keeper_monitor_tick "$V10" "$HUNDRED" "test-host" 2>&1 >/dev/null)" && 
 [ -z "$(ls -A "$CEO10/alerts")" ] || fail "symlinked CEO received alert files: $(ls -A "$CEO10/alerts")"
 [ ! -s "$CEO10/inbox.md" ] || fail "symlinked CEO received inbox escalation bytes"
 grep -qF "CEO/alerts resolves outside" <<<"$ERR10" || fail "symlinked CEO refusal was silent; got: $ERR10"
+
+# 14. The inbox guard on its own: a CEO that resolves elsewhere, an inbox leaf symlink,
+# and a missing parent are each refused, and a real inbox passes. The tick never reaches
+# the inbox guard behind a symlinked CEO (13), so call it directly.
+V11="$TMP/vault11"; mkdir -p "$V11/CEO"; : > "$V11/CEO/inbox.md"
+C11="$(cd "$V11" && pwd -P)"
+_km_inbox_guarded "$C11" "$C11/CEO/inbox.md" || fail "real inbox refused by guard"
+V12="$TMP/vault12"; mkdir -p "$V12"; OUT12="$TMP/out12"; mkdir -p "$OUT12"; : > "$OUT12/inbox.md"
+ln -s "$OUT12" "$V12/CEO"; C12="$(cd "$V12" && pwd -P)"
+! _km_inbox_guarded "$C12" "$C12/CEO/inbox.md" || fail "symlinked CEO passed inbox guard"
+V13="$TMP/vault13"; mkdir -p "$V13"; C13="$(cd "$V13" && pwd -P)"
+! _km_inbox_guarded "$C13" "$C13/CEO/inbox.md" || fail "missing CEO passed inbox guard"
+
+# 15. The under-lock re-guard returns 3 and leaves an outside target untouched, and the
+# escalate wrapper surfaces a refusal as 3 (not the 1 an append failure returns)
+V14="$TMP/vault14"; mkdir -p "$V14/CEO"; S14="$TMP/sentinel14"; : > "$S14"
+ln -s "$S14" "$V14/CEO/inbox.md"; C14="$(cd "$V14" && pwd -P)"
+RC15=0; _km_inbox_escalate_locked "$C14" "$C14/CEO/inbox.md" '^- ' '- [ ] x' || RC15=$?
+[ "$RC15" -eq 3 ] || fail "locked escalate on symlinked leaf returned $RC15, want 3"
+RC15=0; _km_inbox_escalate "$C14" '^- ' '- [ ] x' 2>/dev/null || RC15=$?
+[ "$RC15" -eq 3 ] || fail "escalate on symlinked leaf returned $RC15, want 3"
+[ ! -s "$S14" ] || fail "outside sentinel received bytes: $(cat "$S14")"
+
+# 16. A failed inbox append is not a refusal: the tick fails but still saves state
+# (#237 withholds state only for refused destinations)
+if [ "$(id -u)" -ne 0 ]; then
+  V15="$TMP/vault15"; mkdir -p "$V15/.vaultkeeper-quarantine" "$V15/CEO/alerts"
+  : > "$V15/CEO/inbox.md"; chmod 444 "$V15/CEO/inbox.md"
+  echo c > "$V15/.vaultkeeper-quarantine/1700000000-Pending.sync-conflict-20261010-010101-MBP.md"
+  ERR16="$(keeper_monitor_tick "$V15" "" "test-host" 2>&1 >/dev/null)" && fail "unwritable inbox tick reported success"
+  ! grep -qF "alert destinations refused" <<<"$ERR16" || fail "append failure reported as a refusal; got: $ERR16"
+  [ -f "$(keeper_cache_dir "$V15")/monitor.state" ] || fail "state not saved after an append failure"
+  chmod 644 "$V15/CEO/inbox.md"
+fi
 
 echo "PASS: vaultkeeper-monitor"
