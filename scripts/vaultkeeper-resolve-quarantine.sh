@@ -47,7 +47,6 @@ _validate_quarantine_file() {
 
   local rel="$target"
   if [ "${rel#/}" != "$rel" ]; then
-    # Absolute path
     local target_dir canonical_target_dir
     target_dir="$(dirname "$rel")"
     canonical_target_dir="$(cd "$target_dir" 2>/dev/null && pwd -P)" || {
@@ -60,7 +59,6 @@ _validate_quarantine_file() {
     fi
     rel="$(basename "$rel")"
   else
-    # Relative path or filename
     while [ "${rel#./}" != "$rel" ]; do
       rel="${rel#./}"
     done
