@@ -6,26 +6,71 @@
 #
 # Bash 3.2 and zsh clean. Requires note-hash.sh and keeper-state.sh.
 
+_km_inbox_refuse() {
+  printf 'vaultkeeper: monitor refusing inbox escalation; %s is a symlink or does not resolve to itself under the vault\n' "$1" >&2
+}
+
+# A destination that does not resolve to a real path under the canonical vault is
+# refused rather than followed (#237): >> follows a symlinked CEO/inbox.md leaf and
+# an escalation lands in an outside sentinel, while cd+pwd -P resolves every parent
+# symlink at once, so both guards check where a write would land at check time;
+# alert publication is unlocked, so a swap after the check is a residual window.
+# Resolving onto a different directory that is still inside the vault is also
+# refused; fail closed is cheap here and keeps every write on the named path.
+_km_inbox_guarded() {
+  local canonical="$1" inbox="$2" leaf leaf_parent
+  [ ! -L "$inbox" ] || return 1
+  leaf_parent="$(dirname "$inbox")"
+  leaf="$(cd "$leaf_parent" 2>/dev/null && pwd -P)" || return 1
+  [ "$leaf" = "$canonical/CEO" ] || return 1
+}
+
+_km_alerts_guarded() {
+  local canonical="$1" resolved
+  resolved="$(cd "$canonical/CEO/alerts" 2>/dev/null && pwd -P)" || {
+    printf 'vaultkeeper: monitor cannot read %s/CEO/alerts\n' "$canonical" >&2
+    return 1
+  }
+  [ "$resolved" = "$canonical/CEO/alerts" ] || return 1
+}
+
 # Two ticks can both see the line missing and both append it, so the check is
 # repeated under the keeper lock (#190). Returns 2 when the append itself fails, which
-# keeper_with_lock passes through; its own 1 means the lock was never taken.
+# keeper_with_lock passes through, and 3 when the destination fails the guard under
+# the lock; its own 1 means the lock was never taken.
 _km_inbox_escalate_locked() {
-  local inbox="$1" pattern="$2" item="$3"
+  local canonical="$1" inbox="$2" pattern="$3" item="$4"
+  # Re-guard under the lock: the pre-lock check crosses the acquire-wait window.
+  _km_inbox_guarded "$canonical" "$inbox" || return 3
   grep -qE "$pattern" "$inbox" 2>/dev/null && return 0
   printf '\n%s\n' "$item" >> "$inbox" || return 2
 }
 
 # Without the lock the task is still appended: a duplicate line beats a dropped one.
+# Returns 3 when the destination is refused and 1 when the append itself fails, so the
+# tick withholds state only for a refusal.
 _km_inbox_escalate() {
-  local vault="$1" pattern="$2" item="$3" inbox="$1/CEO/inbox.md" canonical rc=1
+  local canonical="$1" pattern="$2" item="$3" inbox="$1/CEO/inbox.md" rc
+  if ! _km_inbox_guarded "$canonical" "$inbox"; then
+    _km_inbox_refuse "$inbox"
+    return 3
+  fi
   grep -qE "$pattern" "$inbox" 2>/dev/null && return 0
-  if canonical="$(cd "$vault" 2>/dev/null && pwd -P)"; then
-    if keeper_with_lock "$canonical" _km_inbox_escalate_locked "$inbox" "$pattern" "$item"; then
-      return 0
-    else
-      rc=$?
-    fi
-    [ "$rc" -eq 2 ] && return 1
+  if keeper_with_lock "$canonical" _km_inbox_escalate_locked "$canonical" "$inbox" "$pattern" "$item"; then
+    return 0
+  else
+    rc=$?
+  fi
+  # 3: the leaf or a parent escaped after the pre-lock guard; re-appending through
+  # the unlocked fallback would follow exactly the symlink the guard caught.
+  if [ "$rc" -eq 3 ]; then
+    _km_inbox_refuse "$inbox"
+    return 3
+  fi
+  [ "$rc" -eq 2 ] && return 1
+  if ! _km_inbox_guarded "$canonical" "$inbox"; then
+    _km_inbox_refuse "$inbox"
+    return 3
   fi
   printf 'vaultkeeper: inbox lock unavailable; appending to %s without it\n' "$inbox" >&2
   printf '\n%s\n' "$item" >> "$inbox"
@@ -123,8 +168,23 @@ keeper_monitor_tick() {
     new_gap_status="$prev_gap_status"
   fi
 
-  # 5. Alerting: gated strictly on $vault/CEO/alerts existence
+  # 5. Alerting: gated strictly on $vault/CEO/alerts being a real directory under
+  # the canonical vault (#237) — a symlinked CEO/alerts publishing outside is
+  # refused as a whole rather than followed component by component.
+  local canonical="" refused_writes=0 erc
+  canonical="$(cd "$vault" 2>/dev/null && pwd -P)" || canonical=""
   if [ -d "$vault/CEO/alerts" ]; then
+    if [ -z "$canonical" ]; then
+      printf 'vaultkeeper: monitor refusing alert writes; %s itself is not resolvable\n' "$vault" >&2
+      rc=1
+      refused_writes=1
+    elif ! _km_alerts_guarded "$canonical"; then
+      printf 'vaultkeeper: monitor refusing alert writes; CEO/alerts resolves outside %s\n' "$canonical" >&2
+      rc=1
+      refused_writes=1
+    fi
+  fi
+  if [ "$refused_writes" = 0 ] && [ -d "$vault/CEO/alerts" ]; then
     # Quarantine alert
     if [ "$q_transition" -eq 1 ] || [ "$new_q_status" = "firing" ]; then
       local q_alert_file="$vault/CEO/alerts/vaultkeeper-quarantine.md"
@@ -161,9 +221,9 @@ EOF
 
       # Escalate to inbox.md strictly on clear -> firing transition
       if [ "$q_transition" -eq 1 ] && [ "$new_q_status" = "firing" ] && [ -f "$vault/CEO/inbox.md" ]; then
-        _km_inbox_escalate "$vault" '^- \[ \] Resolve [0-9]+ quarantined sync conflict' \
+        _km_inbox_escalate "$canonical" '^- \[ \] Resolve [0-9]+ quarantined sync conflict' \
           "- [ ] Resolve ${cur_q_count} quarantined sync conflict(s) in .vaultkeeper-quarantine/ (run scripts/vaultkeeper-resolve-quarantine.sh)" \
-          || rc=1
+          || { erc=$?; rc=1; [ "$erc" -ne 3 ] || refused_writes=1; }
       fi
     fi
 
@@ -201,14 +261,20 @@ EOF
 
       # Escalate to inbox.md strictly on clear -> firing transition
       if [ "$gap_transition" -eq 1 ] && [ "$new_gap_status" = "firing" ] && [ -f "$vault/CEO/inbox.md" ]; then
-        _km_inbox_escalate "$vault" '^- \[ \] Frontmatter gaps grew' \
+        _km_inbox_escalate "$canonical" '^- \[ \] Frontmatter gaps grew' \
           "- [ ] Frontmatter gaps grew (+${gap_delta}, total ${cur_gap_count}) (run scripts/vaultkeeper-backfill-frontmatter.sh)" \
-          || rc=1
+          || { erc=$?; rc=1; [ "$erc" -ne 3 ] || refused_writes=1; }
       fi
     fi
   fi
 
-  # 6. Save state in cache
+  # 6. Save state in cache. A refused alert destination is not persisted: the
+  # transition it belongs to must still be refirable on the next tick, or a
+  # repaired symlink would lose the escalation for that incident forever (#237).
+  if [ "$refused_writes" = 1 ]; then
+    printf 'vaultkeeper: monitor state not saved: alert destinations refused\n' >&2
+    return "$rc"
+  fi
   local s_tmp
   s_tmp="$(mktemp "$cache_dir/.state-XXXXXX" 2>/dev/null)" || {
     printf 'vaultkeeper: monitor state not saved: cannot write %s\n' "$cache_dir" >&2; return 0; }
