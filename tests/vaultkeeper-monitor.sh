@@ -188,13 +188,36 @@ RC15=0; _km_inbox_escalate "$C14" '^- ' '- [ ] x' 2>/dev/null || RC15=$?
 [ "$RC15" -eq 3 ] || fail "escalate on symlinked leaf returned $RC15, want 3"
 [ ! -s "$S14" ] || fail "outside sentinel received bytes: $(cat "$S14")"
 
+# 15b. Both post-lock re-guards: the pre-lock guard passes, then the destination goes bad.
+# The guard is stubbed to pass its first PASS_N calls so each branch is reached alone;
+# the inbox is a real file, so a branch that fell through to the append would write to it.
+eval "$(declare -f _km_inbox_guarded | sed '1s/_km_inbox_guarded/_km_inbox_guarded_real/')"
+_km_inbox_guarded() { GUARD_N=$((GUARD_N + 1)); [ "$GUARD_N" -le "$PASS_N" ]; }
+V16="$TMP/vault16"; mkdir -p "$V16/CEO"; C16="$(cd "$V16" && pwd -P)"
+# lock unavailable (keeper_with_lock rc 1): the unlocked fallback must re-guard before appending
+: > "$C16/CEO/inbox.md"; GUARD_N=0; PASS_N=1
+keeper_with_lock() { return 1; }
+RC15=0; ERR15="$(_km_inbox_escalate "$C16" '^- ' '- [ ] x' 2>&1 >/dev/null)" || RC15=$?
+[ "$RC15" -eq 3 ] || fail "fallback re-guard returned $RC15, want 3"
+[ ! -s "$C16/CEO/inbox.md" ] || fail "fallback appended past a failed re-guard"
+! grep -qF "appending to" <<<"$ERR15" || fail "fallback announced an append it should have refused"
+# locked callback refused (rc 3): the wrapper must refuse, not fall back to the unlocked append
+: > "$C16/CEO/inbox.md"; GUARD_N=0; PASS_N=2
+keeper_with_lock() { return 3; }
+RC15=0; _km_inbox_escalate "$C16" '^- ' '- [ ] x' 2>/dev/null || RC15=$?
+[ "$RC15" -eq 3 ] || fail "locked-refusal branch returned $RC15, want 3"
+[ ! -s "$C16/CEO/inbox.md" ] || fail "locked refusal fell through to an append"
+eval "$(declare -f _km_inbox_guarded_real | sed '1s/_km_inbox_guarded_real/_km_inbox_guarded/')"
+. "${ROOT_DIR}/scripts/lib/note-hash.sh"
+
 # 16. A failed inbox append is not a refusal: the tick fails but still saves state
 # (#237 withholds state only for refused destinations)
-if [ "$(id -u)" -ne 0 ]; then
-  V15="$TMP/vault15"; mkdir -p "$V15/.vaultkeeper-quarantine" "$V15/CEO/alerts"
-  : > "$V15/CEO/inbox.md"; chmod 444 "$V15/CEO/inbox.md"
+V15="$TMP/vault15"; mkdir -p "$V15/CEO"; : > "$V15/CEO/inbox.md"; chmod 444 "$V15/CEO/inbox.md"
+if [ ! -w "$V15/CEO/inbox.md" ]; then
+  mkdir -p "$V15/.vaultkeeper-quarantine" "$V15/CEO/alerts"
   echo c > "$V15/.vaultkeeper-quarantine/1700000000-Pending.sync-conflict-20261010-010101-MBP.md"
   ERR16="$(keeper_monitor_tick "$V15" "" "test-host" 2>&1 >/dev/null)" && fail "unwritable inbox tick reported success"
+  grep -qF "Permission denied" <<<"$ERR16" || fail "append failure cause not surfaced; got: $ERR16"
   ! grep -qF "alert destinations refused" <<<"$ERR16" || fail "append failure reported as a refusal; got: $ERR16"
   [ -f "$(keeper_cache_dir "$V15")/monitor.state" ] || fail "state not saved after an append failure"
   chmod 644 "$V15/CEO/inbox.md"
