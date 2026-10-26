@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
+import { spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, copyFile, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { test } from "node:test";
@@ -30,6 +31,36 @@ test("release revisions are exact commits or the package version tag", () => {
   assert.throws(() => validateExactRevision("mcp-v0.2.0", "0.1.0"), /full commit SHA or mcp-v0\.1\.0/);
   assert.equal(releaseTagForRevision("mcp-v0.1.0", "0.1.0"), "mcp-v0.1.0");
   assert.equal(releaseTagForRevision("a".repeat(40), "0.1.0"), undefined);
+});
+
+test("release runner stops before tests and packaging when the runtime dependency audit fails", async (t) => {
+  const fixture = await mkdtemp(join(tmpdir(), "mcp-release-audit-"));
+  t.after(() => rm(fixture, { recursive: true, force: true }));
+  await mkdir(join(fixture, "scripts"));
+  for (const relative of ["package.json", "scripts/release.mjs", "scripts/release-lib.mjs"]) {
+    await copyFile(join(packageRoot, relative), join(fixture, relative));
+  }
+  const commands = join(fixture, "commands");
+  const revision = "a".repeat(40);
+  await writeFile(join(fixture, "git"), `#!/bin/sh
+if [ "$2" = --show-toplevel ]; then pwd -P; elif [ "$1" = rev-parse ]; then printf '%s\\n' '${revision}'; fi
+`);
+  await writeFile(join(fixture, "npm"), `#!/bin/sh
+printf '%s\\n' "$*" >> "$MCP_RELEASE_TEST_COMMANDS"
+if [ "$1" = audit ]; then exit 42; fi
+`);
+  await chmod(join(fixture, "git"), 0o755);
+  await chmod(join(fixture, "npm"), 0o755);
+  const result = spawnSync(process.execPath, [join(fixture, "scripts/release.mjs"), "--revision", revision], {
+    env: { ...process.env, PATH: `${fixture}:${process.env.PATH}`, MCP_RELEASE_TEST_COMMANDS: commands },
+    encoding: "utf8",
+  });
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /Command failed: npm audit --omit=dev --audit-level=high/);
+  assert.deepEqual((await readFile(commands, "utf8")).trim().split("\n"), [
+    "ci",
+    "audit --omit=dev --audit-level=high",
+  ]);
 });
 
 test("release metadata is derived from packed files and serializes deterministically", async (t) => {

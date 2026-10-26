@@ -224,7 +224,8 @@ ls -l release/
 Use the full checked-out commit SHA instead of the tag when preparing a bundle
 before tagging. The command refuses branch names and refuses a revision that does
 not resolve to the checked-out commit. It also requires a clean worktree so the
-recorded commit identifies every packed file. It runs `npm ci`, the package tests,
+recorded commit identifies every packed file. It runs `npm ci`, a runtime dependency
+audit that blocks high/critical advisories, the package tests,
 and the same pack and metadata path used by CI.
 
 ## Self-Host Deployment and Service Management
