@@ -4,6 +4,7 @@ vault_name: Obsidian
 daily_path: Daily/
 auto_save: false
 summary_capture: stop
+capture_transport: legacy
 summary_model: claude-haiku-5-5
 summary_effort: low
 auto_open: false

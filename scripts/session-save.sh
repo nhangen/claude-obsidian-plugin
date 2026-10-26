@@ -48,6 +48,43 @@ case "$SUMMARY_CAPTURE" in
   *) exit 1 ;;
 esac
 
+# Transport gate (issue #254, stage one of the reversible writer handoff).
+# capture_transport decides who owns automatic session capture, so the legacy
+# direct-vault writer can be switched off without uninstalling anything:
+#
+#   legacy    (or unset) — this hook's summarizer, as before.
+#   disabled  — automatic capture is OFF. The hook says so on stderr and exits
+#               before any state is touched: nothing is queued and nothing is
+#               lost, because no capture was started. Explicit --capture/--retry
+#               invocations are still honored, so the handoff stays reversible.
+#
+# Anything else fails loud per write-side policy: an unknown or configured-
+# empty value skips capture with a diagnostic naming it, and never falls back
+# to writing — an explicitly empty capture_transport is operator error, not the
+# default. Only a genuinely absent key defaults to legacy. The diagnostic is
+# stderr-only and the exit stays 0 — a hook must never error the session for a
+# config choice (#1442 session semantics), but it must not be silent, either.
+# The reader's exit status is the absent/present distinction, so it is kept:
+# a found-but-empty key returns success with an empty value (#255 review) and
+# must land in the reject arm below, not in legacy.
+TRANSPORT=legacy
+if TRANSPORT_READ=$(OBSIDIAN_LOCAL_MD="$CONFIG_FILE" obsidian_config_value capture_transport); then
+  TRANSPORT="$TRANSPORT_READ"
+fi
+case "$TRANSPORT" in
+  legacy) ;;
+  disabled)
+    if [ "$CAPTURE_REQUESTED" = false ]; then
+      printf 'session-save: automatic session capture is OFF (capture_transport: disabled)\n' >&2
+      exit 0
+    fi
+    ;;
+  *)
+    printf 'session-save: unknown capture_transport %s (use legacy or disabled); skipping capture\n' "${TRANSPORT:-<empty>}" >&2
+    exit 0
+    ;;
+esac
+
 # The shared reader: this hook is the autosave path, and a config with a
 # trailing comment or quoted path parsed to a directory that does not exist,
 # which the guard below turns into a silent exit 0 — the session is simply
@@ -59,7 +96,9 @@ fi
 
 # Self-activate the vaultkeeper watcher on this host if it isn't scheduled yet.
 # Cheap no-op once installed; never blocks autosave (opt out: keeper_autostart: false).
-if [ "$AUTO_SAVE" != false ]; then
+# The bootstrap also stays off while capture_transport disables the legacy
+# writer — a writer being retired must not re-arm maintenance on its way out.
+if [ "$AUTO_SAVE" != false ] && [ "$TRANSPORT" != disabled ]; then
   . "${SCRIPT_DIR}/lib/keeper-bootstrap.sh"
   KEEPER_INTERVAL=$(grep '^keeper_interval_secs:' "$CONFIG_FILE" | head -1 | sed 's/^keeper_interval_secs:[[:space:]]*//')
   keeper_ensure_active "$CONFIG_FILE" "$VAULT_PATH" "${KEEPER_INTERVAL:-900}" || true
