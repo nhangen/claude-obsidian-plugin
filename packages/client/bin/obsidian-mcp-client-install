@@ -1,0 +1,1074 @@
+#!/usr/bin/env python3
+"""Install and switch immutable Obsidian MCP client releases."""
+
+from __future__ import annotations
+
+import argparse
+import fcntl
+import hashlib
+import json
+import os
+import re
+import shutil
+import stat
+import sys
+import tempfile
+import uuid
+from pathlib import Path, PurePosixPath
+from typing import NoReturn
+
+
+MAX_METADATA_BYTES = 1024 * 1024
+MAX_BUNDLE_FILE_BYTES = 64 * 1024 * 1024
+MAX_BUNDLE_BYTES = 128 * 1024 * 1024
+CHUNK_BYTES = 1024 * 1024
+HEX64 = re.compile(r"^[0-9a-f]{64}$")
+SLOTS = ("current", "previous", "disabled")
+JOURNAL = ".transition.json"
+TRUST = ".trust.json"
+ROOT_ALIAS_PATHS = {Path("/etc"), Path("/tmp"), Path("/var")}
+EXIT_FAILURE = 64
+
+
+class InstallError(Exception):
+    pass
+
+
+def fail(message: str) -> NoReturn:
+    raise InstallError(message)
+
+
+class ArgumentParser(argparse.ArgumentParser):
+    def error(self, message: str) -> NoReturn:
+        self.print_usage(sys.stderr)
+        fail(message)
+
+
+def canonical(value: object) -> bytes:
+    return json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
+
+
+def digest(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
+def open_regular(
+    path: Path,
+    label: str,
+    *,
+    limit: int | None = None,
+    expected_size: int | None = None,
+    expected_mode: int | None = None,
+    require_owner: bool = False,
+) -> tuple[int, os.stat_result]:
+    try:
+        descriptor = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW)
+    except OSError as error:
+        fail(f"cannot read {label}: {error.strerror}")
+    try:
+        item = os.fstat(descriptor)
+        if not stat.S_ISREG(item.st_mode) or item.st_nlink != 1:
+            fail(f"{label} is not a private regular file")
+        if require_owner and item.st_uid != os.getuid():
+            fail(f"{label} has an unsafe owner")
+        if expected_mode is not None and stat.S_IMODE(item.st_mode) != expected_mode:
+            fail(f"{label} has an unsafe mode")
+        if limit is not None and item.st_size > limit:
+            fail(f"{label} exceeds the size limit")
+        if expected_size is not None and item.st_size != expected_size:
+            fail(f"{label} size mismatch")
+        return descriptor, item
+    except Exception:
+        os.close(descriptor)
+        raise
+
+
+def read_regular(
+    path: Path,
+    label: str,
+    limit: int,
+    *,
+    expected_size: int | None = None,
+    expected_mode: int | None = None,
+    require_owner: bool = False,
+) -> bytes:
+    descriptor, item = open_regular(
+        path,
+        label,
+        limit=limit,
+        expected_size=expected_size,
+        expected_mode=expected_mode,
+        require_owner=require_owner,
+    )
+    try:
+        chunks: list[bytes] = []
+        remaining = item.st_size
+        while remaining:
+            chunk = os.read(descriptor, min(CHUNK_BYTES, remaining))
+            if not chunk:
+                fail(f"{label} changed while being read")
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        if os.read(descriptor, 1):
+            fail(f"{label} changed while being read")
+        return b"".join(chunks)
+    finally:
+        os.close(descriptor)
+
+
+def read_bounded(
+    path: Path,
+    label: str,
+    *,
+    expected_mode: int | None = None,
+    require_owner: bool = False,
+) -> bytes:
+    return read_regular(
+        path,
+        label,
+        MAX_METADATA_BYTES,
+        expected_mode=expected_mode,
+        require_owner=require_owner,
+    )
+
+
+def verify_payload(path: Path, entry: dict, label: str) -> None:
+    descriptor, _ = open_regular(
+        path,
+        label,
+        limit=MAX_BUNDLE_FILE_BYTES,
+        expected_size=entry["size"],
+        expected_mode=entry["mode"],
+    )
+    hasher = hashlib.sha256()
+    total = 0
+    try:
+        while total < entry["size"]:
+            chunk = os.read(descriptor, min(CHUNK_BYTES, entry["size"] - total))
+            if not chunk:
+                fail(f"{label} changed while being hashed")
+            hasher.update(chunk)
+            total += len(chunk)
+        if os.read(descriptor, 1):
+            fail(f"{label} changed while being hashed")
+    finally:
+        os.close(descriptor)
+    if hasher.hexdigest() != entry["sha256"]:
+        fail(f"{label} digest mismatch")
+
+
+def copy_payload(source: Path, target: Path, entry: dict, label: str) -> None:
+    source_descriptor, _ = open_regular(
+        source,
+        label,
+        limit=MAX_BUNDLE_FILE_BYTES,
+        expected_size=entry["size"],
+        expected_mode=entry["mode"],
+    )
+    try:
+        target_descriptor = os.open(
+            target,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+            entry["mode"],
+        )
+    except Exception:
+        os.close(source_descriptor)
+        raise
+    hasher = hashlib.sha256()
+    total = 0
+    try:
+        while total < entry["size"]:
+            chunk = os.read(source_descriptor, min(CHUNK_BYTES, entry["size"] - total))
+            if not chunk:
+                fail(f"{label} changed while being copied")
+            hasher.update(chunk)
+            view = memoryview(chunk)
+            while view:
+                written = os.write(target_descriptor, view)
+                if written == 0:
+                    fail(f"{label} could not be copied")
+                view = view[written:]
+            total += len(chunk)
+        if os.read(source_descriptor, 1):
+            fail(f"{label} changed while being copied")
+        if hasher.hexdigest() != entry["sha256"]:
+            fail(f"{label} digest mismatch")
+        os.fchmod(target_descriptor, entry["mode"])
+        os.fsync(target_descriptor)
+    finally:
+        os.close(source_descriptor)
+        os.close(target_descriptor)
+
+
+def read_json_bytes(data: bytes, label: str) -> dict:
+    try:
+        value = json.loads(data)
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        fail(f"{label} is not valid JSON")
+    if not isinstance(value, dict):
+        fail(f"{label} must be a JSON object")
+    return value
+
+
+def safe_relative(value: object) -> str:
+    if not isinstance(value, str) or not value or "\\" in value:
+        fail("release inventory contains an unsafe path")
+    path = PurePosixPath(value)
+    if path.is_absolute() or any(part in ("", ".", "..") for part in path.parts):
+        fail("release inventory contains an unsafe path")
+    return value
+
+
+def parse_release(
+    bundle: Path,
+    expected_digest: str,
+    *,
+    expected_release_id: str | None = None,
+    require_owner: bool = False,
+) -> tuple[dict, bytes]:
+    if not HEX64.fullmatch(expected_digest):
+        fail("release digest is invalid; expected 64 lowercase hexadecimal characters")
+    metadata_path = bundle / "release.json"
+    metadata_bytes = read_bounded(
+        metadata_path,
+        "release metadata",
+        expected_mode=0o644,
+        require_owner=require_owner,
+    )
+    if digest(metadata_bytes) != expected_digest:
+        fail("release metadata digest mismatch")
+    metadata = read_json_bytes(metadata_bytes, "release metadata")
+    expected_keys = {
+        "captureDefaults",
+        "files",
+        "formatVersion",
+        "inventorySha256",
+        "pinnedServer",
+        "readBridge",
+        "releaseId",
+    }
+    if set(metadata) != expected_keys:
+        fail("release metadata schema is invalid")
+    if metadata.get("formatVersion") != 1:
+        fail("unsupported release metadata format")
+    entries = metadata.get("files")
+    if not isinstance(entries, list) or not entries:
+        fail("release inventory is missing")
+    normalized: list[dict[str, object]] = []
+    exact: set[str] = set()
+    folded: set[str] = set()
+    for entry in entries:
+        if not isinstance(entry, dict) or set(entry) != {
+            "mode",
+            "path",
+            "sha256",
+            "size",
+        }:
+            fail("release inventory entry is invalid")
+        relative = safe_relative(entry["path"])
+        folded_path = relative.casefold()
+        if relative in exact or folded_path in folded:
+            fail("release inventory contains duplicate or case-colliding paths")
+        if entry["mode"] not in (0o644, 0o755):
+            fail("release inventory contains an unsupported mode")
+        if not isinstance(entry["sha256"], str) or not HEX64.fullmatch(entry["sha256"]):
+            fail("release inventory contains an invalid digest")
+        if (
+            isinstance(entry["size"], bool)
+            or not isinstance(entry["size"], int)
+            or entry["size"] < 0
+            or entry["size"] > MAX_BUNDLE_FILE_BYTES
+        ):
+            fail("release inventory contains an invalid size")
+        exact.add(relative)
+        folded.add(folded_path)
+        normalized.append(
+            {
+                "mode": entry["mode"],
+                "path": relative,
+                "sha256": entry["sha256"],
+                "size": entry["size"],
+            }
+        )
+    if sum(int(entry["size"]) for entry in normalized) > MAX_BUNDLE_BYTES:
+        fail("release inventory exceeds the bundle size limit")
+    normalized.sort(key=lambda item: str(item["path"]))
+    inventory_digest = digest(canonical(normalized))
+    if (
+        metadata.get("inventorySha256") != inventory_digest
+        or metadata.get("releaseId") != inventory_digest
+    ):
+        fail("release identity does not match its content inventory")
+    if not HEX64.fullmatch(str(metadata["releaseId"])):
+        fail("release identity is invalid")
+    if expected_release_id is not None and metadata["releaseId"] != expected_release_id:
+        fail("installed release identity does not match its directory")
+    return metadata, metadata_bytes
+
+
+def inventory_paths(entries: list[dict]) -> tuple[set[str], set[str]]:
+    files = {str(entry["path"]) for entry in entries}
+    directories: set[str] = set()
+    for relative in files:
+        parent = PurePosixPath(relative).parent
+        while parent != PurePosixPath("."):
+            directories.add(parent.as_posix())
+            parent = parent.parent
+    return files, directories
+
+
+def verify_tree(root: Path, metadata: dict, *, installed: bool) -> None:
+    root_item = root.lstat()
+    if (
+        not stat.S_ISDIR(root_item.st_mode)
+        or stat.S_IMODE(root_item.st_mode) != 0o755
+        or (installed and root_item.st_uid != os.getuid())
+    ):
+        fail("bundle root mode is unsafe")
+    entries = metadata["files"]
+    expected_files, expected_dirs = inventory_paths(entries)
+    expected_files.add("release.json")
+    if installed:
+        expected_files.add(TRUST)
+    actual_files: set[str] = set()
+    actual_dirs: set[str] = set()
+    try:
+        iterator = root.rglob("*")
+        for path in iterator:
+            relative = path.relative_to(root).as_posix()
+            item = path.lstat()
+            if stat.S_ISREG(item.st_mode):
+                if item.st_nlink != 1:
+                    fail(f"bundle contains a hard-linked file: {relative}")
+                actual_files.add(relative)
+            elif stat.S_ISDIR(item.st_mode):
+                if stat.S_IMODE(item.st_mode) != 0o755:
+                    fail(f"bundle directory mode mismatch: {relative}")
+                actual_dirs.add(relative)
+            else:
+                fail(f"bundle contains an unsafe entry: {relative}")
+    except OSError as error:
+        fail(f"cannot inspect bundle: {error.strerror}")
+    if actual_files != expected_files or actual_dirs != expected_dirs:
+        fail("bundle inventory does not match release metadata")
+    by_path = {str(entry["path"]): entry for entry in entries}
+    for relative, entry in by_path.items():
+        path = root / relative
+        verify_payload(path, entry, f"bundle file {relative}")
+
+
+def verify_contract(bundle: Path, metadata: dict) -> None:
+    entries = {entry["path"]: entry for entry in metadata["files"]}
+    manifest_entry = entries.get("manifest.json")
+    contract_entry = entries.get("contract.json")
+    if manifest_entry is None or contract_entry is None:
+        fail("release manifest or contract is missing from inventory")
+    manifest_bytes = read_regular(
+        bundle / "manifest.json",
+        "client manifest",
+        MAX_METADATA_BYTES,
+        expected_size=manifest_entry["size"],
+        expected_mode=manifest_entry["mode"],
+    )
+    if digest(manifest_bytes) != manifest_entry["sha256"]:
+        fail("client manifest digest mismatch")
+    manifest = read_json_bytes(manifest_bytes, "client manifest")
+    contract_bytes = read_regular(
+        bundle / "contract.json",
+        "server contract",
+        MAX_METADATA_BYTES,
+        expected_size=contract_entry["size"],
+        expected_mode=contract_entry["mode"],
+    )
+    if digest(contract_bytes) != contract_entry["sha256"]:
+        fail("server contract digest mismatch")
+    if manifest.get("pinnedServer") != metadata.get("pinnedServer"):
+        fail("release server pin does not match client manifest")
+    pin = metadata.get("pinnedServer")
+    if not isinstance(pin, dict) or pin.get("contractSha256") != digest(contract_bytes):
+        fail("release server pin does not match contract bytes")
+    bridge = metadata.get("readBridge")
+    manifest_bridge = manifest.get("readBridge")
+    if not isinstance(bridge, dict) or not isinstance(manifest_bridge, dict):
+        fail("release read bridge pin is missing")
+    if bridge.get("provenanceSha256") != manifest_bridge.get("provenanceSha256"):
+        fail("release read bridge pin does not match client manifest")
+    defaults = metadata.get("captureDefaults")
+    if (
+        not isinstance(defaults, dict)
+        or set(defaults) != {"automaticHistoricalBackfill", "defaultActivated"}
+        or any(value is not False for value in defaults.values())
+    ):
+        fail("release capture defaults are unsafe")
+
+
+def lexical_absolute(path: Path) -> Path:
+    expanded = path.expanduser()
+    if expanded.is_absolute():
+        return Path(os.path.abspath(expanded))
+    return Path(os.path.abspath(Path.cwd() / expanded))
+
+
+def validate_path_ancestors(path: Path, label: str) -> None:
+    current = Path(path.anchor)
+    for part in path.parts[1:-1]:
+        current /= part
+        if not current.exists() and not current.is_symlink():
+            continue
+        try:
+            item = current.lstat()
+        except OSError as error:
+            fail(f"cannot inspect {label}: {error.strerror}")
+        if stat.S_ISLNK(item.st_mode):
+            if current in ROOT_ALIAS_PATHS and item.st_uid == 0:
+                continue
+            fail(f"{label} contains an unsafe ancestor")
+        if not stat.S_ISDIR(item.st_mode):
+            fail(f"{label} contains an unsafe ancestor")
+
+
+def source_identity(bundle: Path) -> tuple[int, int]:
+    validate_path_ancestors(bundle, "bundle path")
+    try:
+        item = bundle.lstat()
+    except OSError as error:
+        fail(f"cannot inspect bundle: {error.strerror}")
+    if not stat.S_ISDIR(item.st_mode) or bundle.is_symlink():
+        fail("bundle must be a real directory")
+    return item.st_dev, item.st_ino
+
+
+def verify_source(
+    bundle: Path, expected_digest: str
+) -> tuple[dict, bytes, tuple[int, int]]:
+    identity = source_identity(bundle)
+    metadata, metadata_bytes = parse_release(bundle, expected_digest)
+    verify_tree(bundle, metadata, installed=False)
+    verify_contract(bundle, metadata)
+    if source_identity(bundle) != identity:
+        fail("bundle root changed during verification")
+    return metadata, metadata_bytes, identity
+
+
+def validate_prefix(prefix: Path, home: Path) -> Path:
+    prefix = lexical_absolute(prefix)
+    normalized_home = Path(os.path.abspath(home.expanduser()))
+    if (
+        prefix == Path(prefix.anchor)
+        or prefix == normalized_home
+        or prefix in normalized_home.parents
+        or len(prefix.parts) <= 2
+        or (prefix.exists() and os.path.ismount(prefix))
+    ):
+        fail("managed prefix is too broad")
+    validate_path_ancestors(prefix, "managed prefix")
+    try:
+        relative = prefix.relative_to(normalized_home)
+        current = normalized_home
+        parts = relative.parts
+    except ValueError:
+        current = Path(prefix.anchor)
+        parts = prefix.parts[1:]
+    for part in parts:
+        current /= part
+        if current.exists() or current.is_symlink():
+            item = current.lstat()
+            if (
+                stat.S_ISLNK(item.st_mode)
+                and current in ROOT_ALIAS_PATHS
+                and item.st_uid == 0
+            ):
+                continue
+            if stat.S_ISLNK(item.st_mode) or not stat.S_ISDIR(item.st_mode):
+                fail("managed prefix contains an unsafe ancestor")
+    return prefix
+
+
+def validate_managed_directory(path: Path, label: str) -> None:
+    item = path.lstat()
+    if (
+        not stat.S_ISDIR(item.st_mode)
+        or stat.S_ISLNK(item.st_mode)
+        or item.st_uid != os.getuid()
+        or stat.S_IMODE(item.st_mode) & 0o022
+    ):
+        fail(f"{label} is unsafe")
+
+
+def fsync_dir(path: Path) -> None:
+    descriptor = os.open(path, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def atomic_json(path: Path, value: dict, mode: int = 0o600) -> None:
+    descriptor, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+    try:
+        os.fchmod(descriptor, mode)
+        with os.fdopen(descriptor, "wb", closefd=True) as handle:
+            handle.write(canonical(value) + b"\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+        fsync_dir(path.parent)
+    finally:
+        try:
+            os.unlink(temporary)
+        except FileNotFoundError:
+            pass
+
+
+def trust_value(release_id: str, external_digest: str) -> dict:
+    return {
+        "externalReleaseJsonSha256": external_digest,
+        "formatVersion": 1,
+        "releaseId": release_id,
+    }
+
+
+def read_trust_record(release: Path, release_id: str) -> dict:
+    trust_bytes = read_bounded(
+        release / TRUST,
+        "installed trust record",
+        expected_mode=0o644,
+        require_owner=True,
+    )
+    trust = read_json_bytes(trust_bytes, "installed trust record")
+    if set(trust) != {"externalReleaseJsonSha256", "formatVersion", "releaseId"}:
+        fail("installed trust record schema is invalid")
+    trusted_digest = trust.get("externalReleaseJsonSha256")
+    if (
+        trust.get("formatVersion") != 1
+        or trust.get("releaseId") != release_id
+        or not isinstance(trusted_digest, str)
+        or not HEX64.fullmatch(trusted_digest)
+    ):
+        fail("installed trust record mismatch")
+    expected_trust = trust_value(release_id, trusted_digest)
+    if trust_bytes != canonical(expected_trust) + b"\n":
+        fail("installed trust record is not canonical")
+    return trust
+
+
+def verify_installed_release(
+    root: Path, release_id: str, external_digest: str | None = None
+) -> dict:
+    if not HEX64.fullmatch(release_id):
+        fail("managed release identity is invalid")
+    release = root / "releases" / release_id
+    if release.is_symlink() or not release.is_dir():
+        fail("managed release is missing or unsafe")
+    trust = read_trust_record(release, release_id)
+    trusted_digest = trust.get("externalReleaseJsonSha256")
+    if external_digest is not None and trusted_digest != external_digest:
+        fail("installed release was authorized by a different release.json digest")
+    metadata, _ = parse_release(
+        release,
+        trusted_digest,
+        expected_release_id=release_id,
+        require_owner=True,
+    )
+    verify_tree(release, metadata, installed=True)
+    verify_contract(release, metadata)
+    return metadata
+
+
+def validate_completed_slots(result: dict[str, str | None]) -> None:
+    selected = result["current"] or result["disabled"]
+    if result["current"] is not None and result["disabled"] is not None:
+        fail("current and disabled slots cannot both be active")
+    if selected is None and result["previous"] is not None:
+        fail("previous slot requires a selected release")
+    if selected is not None and result["previous"] == selected:
+        fail("selected and previous slots must be distinct")
+
+
+def slot_map(
+    root: Path, *, verify: bool = True, allow_intermediate: bool = False
+) -> dict[str, str | None]:
+    result: dict[str, str | None] = {}
+    for name in SLOTS:
+        path = root / name
+        if not path.exists() and not path.is_symlink():
+            result[name] = None
+            continue
+        if not path.is_symlink():
+            fail(f"managed slot is not a symlink: {name}")
+        target = os.readlink(path)
+        expected_prefix = "releases/"
+        if (
+            not target.startswith(expected_prefix)
+            or "/" in target[len(expected_prefix) :]
+        ):
+            fail(f"managed slot target is unsafe: {name}")
+        release_id = target[len(expected_prefix) :]
+        if not HEX64.fullmatch(release_id):
+            fail(f"managed slot target is invalid: {name}")
+        if verify:
+            verify_installed_release(root, release_id)
+        result[name] = release_id
+    if not allow_intermediate:
+        validate_completed_slots(result)
+    return result
+
+
+def replace_slot(root: Path, name: str, release_id: str | None) -> None:
+    destination = root / name
+    temporary = root / f".{name}.{uuid.uuid4().hex}"
+    if release_id is None:
+        if destination.is_symlink():
+            destination.unlink()
+            fsync_dir(root)
+        elif destination.exists():
+            fail(f"managed slot is unsafe: {name}")
+        return
+    temporary.symlink_to(f"releases/{release_id}")
+    try:
+        os.replace(temporary, destination)
+        fsync_dir(root)
+    finally:
+        if temporary.is_symlink():
+            temporary.unlink()
+
+
+def transition_steps(before: dict, after: dict) -> list[dict]:
+    state = dict(before)
+    steps: list[dict] = []
+    if state["previous"] != after["previous"]:
+        state["previous"] = after["previous"]
+        steps.append(dict(state))
+    active_names = [
+        name
+        for name in ("current", "disabled")
+        if state[name] != after[name] and after[name] is None
+    ] + [
+        name
+        for name in ("current", "disabled")
+        if state[name] != after[name] and after[name] is not None
+    ]
+    for name in active_names:
+        state[name] = after[name]
+        steps.append(dict(state))
+    return steps
+
+
+def maybe_fail(root: Path, checkpoint: str) -> None:
+    test_root = os.environ.get("OBSIDIAN_MCP_CLIENT_TEST_ROOT")
+    if (
+        not test_root
+        or os.environ.get("OBSIDIAN_MCP_CLIENT_TEST_FAIL_AFTER") != checkpoint
+    ):
+        return
+    try:
+        root.relative_to(Path(test_root))
+    except ValueError:
+        return
+    os._exit(86)
+
+
+def apply_steps(root: Path, journal: dict) -> None:
+    steps = journal["steps"]
+    before = journal["before"]
+    observed = slot_map(root, allow_intermediate=True)
+    known = [before, *steps]
+    if observed not in known:
+        fail("managed slots are not in a recoverable transition state")
+    start = known.index(observed)
+    for target in steps[start:]:
+        current = slot_map(root, allow_intermediate=True)
+        changed = [name for name in SLOTS if current[name] != target[name]]
+        if len(changed) != 1:
+            fail("transition step is invalid")
+        slot_name = changed[0]
+        maybe_fail(root, f"before_{slot_name}_pointer_replace")
+        replace_slot(root, changed[0], target[changed[0]])
+        maybe_fail(root, f"{slot_name}_pointer_replaced")
+        journal["phase"] = "pointers"
+        atomic_json(root / JOURNAL, journal)
+    if slot_map(root) != journal["after"]:
+        fail("managed slots did not reach the intended state")
+    journal["phase"] = "complete"
+    atomic_json(root / JOURNAL, journal)
+    (root / JOURNAL).unlink()
+    fsync_dir(root)
+
+
+def validate_map(
+    value: object, *, allow_intermediate: bool = False
+) -> dict[str, str | None]:
+    if not isinstance(value, dict) or set(value) != set(SLOTS):
+        fail("transition contains an invalid slot map")
+    result: dict[str, str | None] = {}
+    for name in SLOTS:
+        item = value[name]
+        if item is not None and (
+            not isinstance(item, str) or not HEX64.fullmatch(item)
+        ):
+            fail("transition contains an invalid release identity")
+        result[name] = item
+    if not allow_intermediate:
+        validate_completed_slots(result)
+    return result
+
+
+def recover(root: Path) -> None:
+    path = root / JOURNAL
+    if not path.exists() and not path.is_symlink():
+        return
+    if (
+        path.is_symlink()
+        or not path.is_file()
+        or stat.S_IMODE(path.stat().st_mode) != 0o600
+    ):
+        fail("transition journal is unsafe")
+    journal = read_json_bytes(
+        read_bounded(path, "transition journal"), "transition journal"
+    )
+    required = {
+        "version",
+        "operationId",
+        "operation",
+        "trustedReleaseId",
+        "externalReleaseJsonSha256",
+        "before",
+        "after",
+        "enabledState",
+        "phase",
+        "steps",
+    }
+    if set(journal) != required or journal.get("version") != 1:
+        fail("transition journal schema is invalid")
+    if not isinstance(journal.get("operationId"), str) or not re.fullmatch(
+        r"[0-9a-f]{32}", journal["operationId"]
+    ):
+        fail("transition operation identity is invalid")
+    release_id = journal.get("trustedReleaseId")
+    external_digest = journal.get("externalReleaseJsonSha256")
+    if not isinstance(release_id, str) or not HEX64.fullmatch(release_id):
+        fail("transition release identity is invalid")
+    if not isinstance(external_digest, str) or not HEX64.fullmatch(external_digest):
+        fail("transition trust digest is invalid")
+    journal["before"] = validate_map(journal["before"])
+    journal["after"] = validate_map(journal["after"])
+    if not isinstance(journal["steps"], list):
+        fail("transition steps are invalid")
+    journal["steps"] = [
+        validate_map(step, allow_intermediate=True) for step in journal["steps"]
+    ]
+    if journal["steps"] != transition_steps(journal["before"], journal["after"]):
+        fail("transition steps are not canonical")
+    if journal["before"] == journal["after"] or not journal["steps"]:
+        fail("transition journal does not describe a state change")
+    if journal.get("enabledState") not in ("enabled", "disabled"):
+        fail("transition enabled state is invalid")
+    if journal.get("operation") not in ("install", "disable", "enable", "rollback"):
+        fail("transition operation is invalid")
+    if journal.get("phase") not in ("intent", "pointers", "complete"):
+        fail("transition phase is invalid")
+    expected_after, expected_enabled = desired_state(
+        journal["operation"], journal["before"], release_id
+    )
+    if (
+        expected_after != journal["after"]
+        or expected_enabled != journal["enabledState"]
+        or (journal["after"]["current"] or journal["after"]["disabled"]) != release_id
+    ):
+        fail("transition semantics do not match the recorded operation")
+    observed = slot_map(root, allow_intermediate=True)
+    known = [journal["before"], *journal["steps"]]
+    allowed_by_phase = {
+        "intent": known[:2],
+        "pointers": journal["steps"],
+        "complete": [journal["after"]],
+    }
+    if observed not in allowed_by_phase[journal["phase"]]:
+        fail("transition phase does not match the observed slots")
+    referenced = {
+        value
+        for mapping in (journal["before"], journal["after"], *journal["steps"])
+        for value in mapping.values()
+        if value is not None
+    }
+    for referenced_id in sorted(referenced):
+        verify_installed_release(
+            root,
+            referenced_id,
+            external_digest if referenced_id == release_id else None,
+        )
+    apply_steps(root, journal)
+
+
+def persist_release(
+    root: Path,
+    bundle: Path,
+    metadata: dict,
+    metadata_bytes: bytes,
+    external_digest: str,
+    expected_source_identity: tuple[int, int],
+) -> None:
+    release_id = metadata["releaseId"]
+    destination = root / "releases" / release_id
+    if destination.exists() or destination.is_symlink():
+        verify_installed_release(root, release_id, external_digest)
+        return
+    staging = root / f".release-{release_id}-{uuid.uuid4().hex}"
+    staging.mkdir(mode=0o700)
+    try:
+        if source_identity(bundle) != expected_source_identity:
+            fail("bundle root changed before persistence")
+        for entry in metadata["files"]:
+            relative = entry["path"]
+            target = staging / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            copy_payload(
+                bundle / relative,
+                target,
+                entry,
+                f"bundle file {relative}",
+            )
+            maybe_fail(root, "release_payload_copied")
+        for path in staging.rglob("*"):
+            if path.is_dir():
+                path.chmod(0o755)
+        (staging / "release.json").write_bytes(metadata_bytes)
+        (staging / "release.json").chmod(0o644)
+        atomic_json(staging / TRUST, trust_value(release_id, external_digest), 0o644)
+        staging.chmod(0o755)
+        verify_tree(staging, metadata, installed=True)
+        verify_contract(staging, metadata)
+        for path in sorted(staging.rglob("*"), reverse=True):
+            if path.is_file():
+                descriptor = os.open(path, os.O_RDONLY)
+                try:
+                    os.fsync(descriptor)
+                finally:
+                    os.close(descriptor)
+            elif path.is_dir():
+                fsync_dir(path)
+        fsync_dir(staging)
+        maybe_fail(root, "release_staged")
+        os.replace(staging, destination)
+        fsync_dir(destination.parent)
+        maybe_fail(root, "release_persisted")
+    finally:
+        try:
+            try:
+                # exists() suppresses inspection errors on Python 3.14 and later.
+                staging.stat()
+            except FileNotFoundError:
+                pass
+            else:
+                shutil.rmtree(staging)
+        except OSError as error:
+            print(
+                f"obsidian-mcp-client: could not remove staging directory "
+                f"{staging}: {error}; remove it manually before retrying",
+                file=sys.stderr,
+            )
+    verify_installed_release(root, release_id, external_digest)
+
+
+def desired_state(
+    operation: str, before: dict, release_id: str | None = None
+) -> tuple[dict, str]:
+    after = dict(before)
+    selected = (
+        before["current"] if before["current"] is not None else before["disabled"]
+    )
+    enabled = before["disabled"] is None
+    if operation == "install":
+        if release_id is None:
+            fail("install requires a release identity")
+        if selected == release_id:
+            return after, "enabled" if enabled else "disabled"
+        after["previous"] = selected
+        after["current" if enabled else "disabled"] = release_id
+    elif operation == "disable":
+        if before["current"] is None:
+            fail("client is already disabled or not installed")
+        after["disabled"] = before["current"]
+        after["current"] = None
+        enabled = False
+    elif operation == "enable":
+        if before["disabled"] is None:
+            fail("client is already enabled or not installed")
+        after["current"] = before["disabled"]
+        after["disabled"] = None
+        enabled = True
+    elif operation == "rollback":
+        if selected is None or before["previous"] is None:
+            fail("rollback requires an active and previous release")
+        after["previous"] = selected
+        after["current" if enabled else "disabled"] = before["previous"]
+    return after, "enabled" if enabled else "disabled"
+
+
+def lifecycle(args: argparse.Namespace) -> str:
+    prefix = validate_prefix(args.prefix, Path(os.environ["HOME"]))
+    operation = "install" if args.bundle is not None else args.operation
+    metadata = metadata_bytes = None
+    bundle = None
+    bundle_identity = None
+    if operation == "install":
+        if args.release_sha256 is None:
+            fail("install requires --release-sha256")
+        if not HEX64.fullmatch(args.release_sha256):
+            fail(
+                "release digest is invalid; expected 64 lowercase hexadecimal characters"
+            )
+        bundle = lexical_absolute(args.bundle)
+        metadata, metadata_bytes, bundle_identity = verify_source(
+            bundle, args.release_sha256
+        )
+    elif args.release_sha256 is not None:
+        fail("--release-sha256 is only valid with --bundle")
+    if args.dry_run:
+        if (prefix / JOURNAL).exists() or (prefix / JOURNAL).is_symlink():
+            fail("dry run cannot proceed while recovery is required")
+        before = slot_map(prefix) if prefix.exists() else {name: None for name in SLOTS}
+        release_id = metadata["releaseId"] if metadata else None
+        after, _ = desired_state(operation, before, release_id)
+        if after == before and operation == "install":
+            verify_installed_release(prefix, release_id, args.release_sha256)
+        return json.dumps(
+            {
+                "after": after,
+                "before": before,
+                "dryRun": True,
+                "operation": operation,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+
+    journal_path = prefix / JOURNAL
+    if (
+        operation != "install"
+        and not journal_path.exists()
+        and not journal_path.is_symlink()
+        and not any(os.path.lexists(prefix / name) for name in SLOTS)
+    ):
+        desired_state(operation, {name: None for name in SLOTS}, None)
+
+    prefix.mkdir(parents=True, exist_ok=True, mode=0o700)
+    validate_managed_directory(prefix, "managed prefix")
+    releases = prefix / "releases"
+    if releases.exists() and (releases.is_symlink() or not releases.is_dir()):
+        fail("managed releases directory is unsafe")
+    releases.mkdir(mode=0o755, exist_ok=True)
+    validate_managed_directory(releases, "managed releases directory")
+    lock_path = prefix / ".install.lock"
+    try:
+        descriptor = os.open(lock_path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+    except OSError as error:
+        fail(f"cannot open installer lock: {error.strerror}")
+    try:
+        lock_item = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(lock_item.st_mode)
+            or lock_item.st_uid != os.getuid()
+            or stat.S_IMODE(lock_item.st_mode) != 0o600
+        ):
+            fail("installer lock is unsafe")
+        fcntl.flock(descriptor, fcntl.LOCK_EX)
+        recover(prefix)
+        before = slot_map(prefix)
+        release_id = metadata["releaseId"] if metadata else None
+        after, enabled_state = desired_state(operation, before, release_id)
+        if after == before:
+            if operation == "install":
+                verify_installed_release(prefix, release_id, args.release_sha256)
+                return f"release {release_id} already installed"
+            return f"client already in requested {operation} state"
+        if operation == "install":
+            persist_release(
+                prefix,
+                bundle,
+                metadata,
+                metadata_bytes,
+                args.release_sha256,
+                bundle_identity,
+            )
+            trusted_release = release_id
+            trusted_digest = args.release_sha256
+        else:
+            trusted_release = after["current"] or after["disabled"] or after["previous"]
+            trust = read_trust_record(
+                prefix / "releases" / trusted_release,
+                trusted_release,
+            )
+            trusted_digest = trust["externalReleaseJsonSha256"]
+        journal = {
+            "after": after,
+            "before": before,
+            "enabledState": enabled_state,
+            "externalReleaseJsonSha256": trusted_digest,
+            "operation": operation,
+            "operationId": uuid.uuid4().hex,
+            "phase": "intent",
+            "steps": transition_steps(before, after),
+            "trustedReleaseId": trusted_release,
+            "version": 1,
+        }
+        atomic_json(prefix / JOURNAL, journal)
+        maybe_fail(prefix, "intent_persisted")
+        apply_steps(prefix, journal)
+        return f"{operation} installed release {trusted_release}"
+    finally:
+        os.close(descriptor)
+
+
+def parse_args() -> argparse.Namespace:
+    home = os.environ.get("HOME")
+    if not home:
+        fail("HOME is required")
+    parser = ArgumentParser()
+    parser.add_argument(
+        "--prefix", type=Path, default=Path(home) / ".local/share/obsidian-mcp-client"
+    )
+    parser.add_argument("--bundle", type=Path)
+    parser.add_argument("--release-sha256")
+    parser.add_argument("--dry-run", action="store_true")
+    actions = parser.add_mutually_exclusive_group()
+    actions.add_argument(
+        "--disable", dest="operation", action="store_const", const="disable"
+    )
+    actions.add_argument(
+        "--enable", dest="operation", action="store_const", const="enable"
+    )
+    actions.add_argument(
+        "--rollback", dest="operation", action="store_const", const="rollback"
+    )
+    parser.set_defaults(operation=None)
+    args = parser.parse_args()
+    if (args.bundle is None) == (args.operation is None):
+        parser.error(
+            "choose exactly one of --bundle, --disable, --enable, or --rollback"
+        )
+    return args
+
+
+def main() -> int:
+    args = parse_args()
+    message = lifecycle(args)
+    if args.dry_run:
+        print(message)
+    else:
+        print(f"obsidian-mcp-client: {message}")
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        raise SystemExit(main())
+    except InstallError as error:
+        print(f"obsidian-mcp-client: {error}", file=sys.stderr)
+        raise SystemExit(EXIT_FAILURE)
+    except OSError as error:
+        detail = error.strerror or str(error)
+        if error.filename is not None:
+            detail = f"{detail}: {error.filename}"
+        print(f"obsidian-mcp-client: {detail}", file=sys.stderr)
+        raise SystemExit(EXIT_FAILURE)

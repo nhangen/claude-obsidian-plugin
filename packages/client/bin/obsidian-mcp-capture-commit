@@ -1,0 +1,841 @@
+#!/usr/bin/env python3
+import datetime
+import hashlib
+import json
+import os
+import re
+import selectors
+import signal
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+
+INPUT_LIMIT = 65536
+INPUT_TIMEOUT = 5.0
+CONTEXT_LIMIT = 32768
+CONTEXT_ITEMS = 8
+CONTEXT_ITEM_LIMIT = 4096
+PRODUCER_TIMEOUT = 15.0
+BRIDGE_TIMEOUT_DEFAULT = 120
+BRIDGE_TIMEOUT_MIN = 1
+BRIDGE_TIMEOUT_MAX = 300
+BRIDGE_GRACE = 2.0
+BRIDGE_OUTPUT_LIMIT = 262144
+BRIDGE_LINE_LIMIT = 65536
+FILE_LIMIT = 1048576
+HASH_PATTERN = re.compile(r"(?:[0-9a-f]{40}|[0-9a-f]{64})\Z")
+DATE_PATTERN = re.compile(r"\d{4}-\d{2}-\d{2}\Z")
+TIME_PATTERN = re.compile(r"\d{2}:\d{2}\Z")
+ORG_REPO_PATTERN = re.compile(
+    r"[A-Za-z0-9][A-Za-z0-9._-]{0,99}/[A-Za-z0-9][A-Za-z0-9._-]{0,99}\Z"
+)
+REQUIRED_TOOL_FIELDS = {
+    "target_path",
+    "skip_if_hash",
+    "section",
+    "idempotency_key",
+}
+IMPLEMENTED_INITIALIZE_PROTOCOLS = ("2025-11-25",)
+REQUIRED_INITIALIZE_TRANSPORTS = ("stdio", "streamable-http")
+MATRIX_STATUSES = {"supported", "compatibility", "planned"}
+MTF_REPOSITORIES = {
+    "altamira2/mtf-builder",
+    "altamira2_mtf-builder",
+    "local/mtf-builder",
+}
+
+
+class CaptureError(Exception):
+    def __init__(self, code, envelope=None):
+        self.code = code
+        self.envelope = envelope
+
+
+def bounded_utf8(value, maximum, allow_empty=True):
+    if not isinstance(value, str) or (not allow_empty and not value):
+        return False
+    try:
+        size = len(value.encode("utf-8"))
+    except UnicodeEncodeError:
+        return False
+    return size <= maximum
+
+
+def read_input():
+    def expire(_signum, _frame):
+        raise CaptureError("INPUT_TIMEOUT")
+
+    previous = signal.signal(signal.SIGALRM, expire)
+    signal.setitimer(signal.ITIMER_REAL, INPUT_TIMEOUT)
+    try:
+        raw = sys.stdin.buffer.read(INPUT_LIMIT + 1)
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, previous)
+    if len(raw) > INPUT_LIMIT:
+        raise CaptureError("INPUT_TOO_LARGE")
+    if not raw.strip():
+        raise CaptureError("INPUT_EMPTY")
+    try:
+        payload = json.loads(raw)
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        raise CaptureError("INPUT_INVALID") from None
+    required = {
+        "schemaVersion",
+        "event",
+        "outcome",
+        "repository",
+        "commit",
+        "context",
+    }
+    if not isinstance(payload, dict) or set(payload) != required:
+        raise CaptureError("EVENT_INVALID")
+    if type(payload["schemaVersion"]) is not int or payload["schemaVersion"] != 1:
+        raise CaptureError("EVENT_INVALID")
+    if payload["event"] != "git.commit" or payload["outcome"] != "success":
+        raise CaptureError("EVENT_INVALID")
+    if not isinstance(payload["repository"], str) or not os.path.isabs(
+        payload["repository"]
+    ):
+        raise CaptureError("EVENT_INVALID")
+    if (
+        not isinstance(payload["commit"], str)
+        or HASH_PATTERN.fullmatch(payload["commit"]) is None
+    ):
+        raise CaptureError("EVENT_INVALID")
+    context = payload["context"]
+    if not isinstance(context, list) or not 1 <= len(context) <= CONTEXT_ITEMS:
+        raise CaptureError("CONTEXT_INVALID")
+    total = 0
+    for item in context:
+        if not bounded_utf8(item, CONTEXT_ITEM_LIMIT, allow_empty=False):
+            raise CaptureError("CONTEXT_INVALID")
+        if any(ord(character) < 32 or ord(character) == 127 for character in item):
+            raise CaptureError("CONTEXT_INVALID")
+        total += len(item.encode("utf-8"))
+    if total > CONTEXT_LIMIT:
+        raise CaptureError("CONTEXT_INVALID")
+    event = {key: payload[key] for key in required if key != "context"}
+    return event, context
+
+
+def read_json_file(path, limit, code):
+    try:
+        if path.is_symlink() or not path.is_file() or path.stat().st_size > limit:
+            raise CaptureError(code)
+        raw = path.read_bytes()
+        value = json.loads(raw)
+    except CaptureError:
+        raise
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        raise CaptureError(code) from None
+    if not isinstance(value, dict):
+        raise CaptureError(code)
+    return value, raw
+
+
+def validate_tool_schema(schema):
+    if not isinstance(schema, dict):
+        raise CaptureError("CAPABILITY_UNAVAILABLE")
+    properties = schema.get("properties")
+    if not isinstance(properties, dict):
+        raise CaptureError("CAPABILITY_UNAVAILABLE")
+    for field in REQUIRED_TOOL_FIELDS:
+        descriptor = properties.get(field)
+        if not isinstance(descriptor, dict) or descriptor.get("type") != "string":
+            raise CaptureError("CAPABILITY_UNAVAILABLE")
+
+
+def select_initialize_protocol(contract):
+    protocol = contract.get("protocol")
+    if not isinstance(protocol, dict):
+        raise CaptureError("BUNDLE_INVALID")
+    compatibility = protocol.get("compatibilityRevisions")
+    matrix = protocol.get("clientMatrix")
+    if (
+        not isinstance(compatibility, list)
+        or not all(isinstance(value, str) and value for value in compatibility)
+        or len(set(compatibility)) != len(compatibility)
+        or not isinstance(matrix, list)
+        or not matrix
+    ):
+        raise CaptureError("BUNDLE_INVALID")
+    approvals = {}
+    for entry in matrix:
+        if not isinstance(entry, dict) or set(entry) != {
+            "protocolRevision",
+            "transport",
+            "status",
+        }:
+            raise CaptureError("BUNDLE_INVALID")
+        revision = entry["protocolRevision"]
+        transport = entry["transport"]
+        status = entry["status"]
+        if (
+            not isinstance(revision, str)
+            or DATE_PATTERN.fullmatch(revision) is None
+            or not isinstance(transport, str)
+            or not transport
+            or status not in MATRIX_STATUSES
+            or (revision, transport) in approvals
+        ):
+            raise CaptureError("BUNDLE_INVALID")
+        approvals[(revision, transport)] = status
+    for revision in IMPLEMENTED_INITIALIZE_PROTOCOLS:
+        if revision not in compatibility:
+            continue
+        if all(
+            approvals.get((revision, transport)) in {"supported", "compatibility"}
+            for transport in REQUIRED_INITIALIZE_TRANSPORTS
+        ):
+            return revision
+    raise CaptureError("CAPABILITY_UNAVAILABLE")
+
+
+def load_bundle():
+    bundle = Path(__file__).resolve().parent.parent
+    manifest, _ = read_json_file(bundle / "manifest.json", 65536, "BUNDLE_INVALID")
+    capture = manifest.get("commitCapture")
+    pinned = manifest.get("pinnedServer")
+    if not isinstance(capture, dict) or not isinstance(pinned, dict):
+        raise CaptureError("BUNDLE_INVALID")
+    expected_capture = {
+        "consumer": "bin/obsidian-mcp-capture-commit",
+        "eventProducer": "bin/obsidian-mcp-commit-event",
+        "writeLauncher": "bin/obsidian-mcp-write",
+        "contract": "contract.json",
+        "inputSchemaVersion": 1,
+        "writesVault": True,
+        "defaultActivated": False,
+        "legacyHashInteroperability": "unproven",
+        "automaticHistoricalBackfill": False,
+    }
+    if capture != expected_capture:
+        raise CaptureError("BUNDLE_INVALID")
+    release = pinned.get("release")
+    contract_hash = pinned.get("contractSha256")
+    contract_version = pinned.get("contractVersion")
+    if (
+        not isinstance(release, str)
+        or not release.startswith("mcp-v")
+        or len(release) <= 5
+        or not isinstance(contract_hash, str)
+        or re.fullmatch(r"[0-9a-f]{64}", contract_hash) is None
+        or not isinstance(contract_version, str)
+        or not contract_version
+    ):
+        raise CaptureError("BUNDLE_INVALID")
+    contract, contract_bytes = read_json_file(
+        bundle / capture["contract"], FILE_LIMIT, "BUNDLE_INVALID"
+    )
+    if hashlib.sha256(contract_bytes).hexdigest() != contract_hash:
+        raise CaptureError("BUNDLE_INVALID")
+    if contract.get("contractVersion") != contract_version:
+        raise CaptureError("BUNDLE_INVALID")
+    try:
+        schema = contract["tools"]["obsidian_daily_append"]["inputSchema"]
+    except (KeyError, TypeError):
+        raise CaptureError("CAPABILITY_UNAVAILABLE") from None
+    validate_tool_schema(schema)
+    protocol = select_initialize_protocol(contract)
+    errors = contract.get("tools", {}).get("obsidian_daily_append", {}).get("errors")
+    if (
+        not isinstance(errors, list)
+        or not errors
+        or not all(
+            isinstance(code, str)
+            and re.fullmatch(r"[A-Z][A-Z0-9_]{0,63}", code) is not None
+            for code in errors
+        )
+    ):
+        raise CaptureError("BUNDLE_INVALID")
+    return bundle, release[5:], protocol, frozenset(errors)
+
+
+def group_exists(process):
+    try:
+        os.killpg(process.pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+
+
+def wait_group(process, timeout):
+    deadline = time.monotonic() + timeout
+    while group_exists(process):
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(0.02)
+    return True
+
+
+def kill_group(process):
+    try:
+        os.killpg(process.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        return
+    except PermissionError:
+        pass
+    try:
+        process.wait(timeout=0.5)
+    except subprocess.TimeoutExpired:
+        pass
+    if wait_group(process, 0.5):
+        return
+    try:
+        os.killpg(process.pid, signal.SIGKILL)
+    except OSError:
+        return
+    try:
+        process.wait(timeout=1.0)
+    except subprocess.TimeoutExpired:
+        pass
+    wait_group(process, 1.0)
+
+
+def bounded_exchange(process, payload):
+    selector = selectors.DefaultSelector()
+    stdin = process.stdin
+    stdout = process.stdout
+    os.set_blocking(stdin.fileno(), False)
+    os.set_blocking(stdout.fileno(), False)
+    selector.register(stdin, selectors.EVENT_WRITE, "stdin")
+    selector.register(stdout, selectors.EVENT_READ, "stdout")
+    offset = 0
+    output = bytearray()
+    deadline = time.monotonic() + PRODUCER_TIMEOUT
+    stdin_open = True
+    stdout_open = True
+    try:
+        while stdin_open or stdout_open:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise CaptureError("EVENT_TIMEOUT")
+            events = selector.select(remaining)
+            if not events:
+                raise CaptureError("EVENT_TIMEOUT")
+            for key, _ in events:
+                if key.data == "stdin":
+                    try:
+                        written = os.write(key.fd, payload[offset:])
+                    except BlockingIOError:
+                        continue
+                    except OSError:
+                        raise CaptureError("EVENT_REJECTED") from None
+                    if written <= 0:
+                        raise CaptureError("EVENT_REJECTED")
+                    offset += written
+                    if offset == len(payload):
+                        selector.unregister(stdin)
+                        stdin.close()
+                        stdin_open = False
+                else:
+                    try:
+                        chunk = os.read(key.fd, 8192)
+                    except BlockingIOError:
+                        continue
+                    except OSError:
+                        raise CaptureError("EVENT_REJECTED") from None
+                    if chunk:
+                        output.extend(chunk)
+                        if len(output) > BRIDGE_LINE_LIMIT:
+                            raise CaptureError("EVENT_REJECTED")
+                    else:
+                        selector.unregister(stdout)
+                        stdout.close()
+                        stdout_open = False
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise CaptureError("EVENT_TIMEOUT")
+        process.wait(timeout=remaining)
+    except subprocess.TimeoutExpired:
+        kill_group(process)
+        raise CaptureError("EVENT_TIMEOUT") from None
+    except CaptureError:
+        kill_group(process)
+        raise
+    finally:
+        selector.close()
+        for stream in (stdin, stdout):
+            try:
+                stream.close()
+            except OSError:
+                pass
+    return bytes(output)
+
+
+def run_producer(bundle, event, python_executable=None):
+    try:
+        process = subprocess.Popen(
+            ([python_executable] if python_executable else [])
+            + [str(bundle / "bin/obsidian-mcp-commit-event")],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+    except (OSError, ValueError):
+        raise CaptureError("EVENT_REJECTED") from None
+    encoded = json.dumps(event, separators=(",", ":")).encode() + b"\n"
+    stdout = bounded_exchange(process, encoded)
+    if process.returncode != 0:
+        raise CaptureError("EVENT_REJECTED")
+    try:
+        metadata = json.loads(stdout)
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        raise CaptureError("EVENT_REJECTED") from None
+    validate_metadata(metadata, event)
+    return metadata
+
+
+def validate_metadata(metadata, event):
+    fields = {
+        "schemaVersion",
+        "hash",
+        "branch",
+        "files",
+        "org_repo",
+        "repo_name",
+        "ticket",
+        "date",
+        "time",
+    }
+    if not isinstance(metadata, dict) or set(metadata) != fields:
+        raise CaptureError("EVENT_REJECTED")
+    if type(metadata["schemaVersion"]) is not int or metadata["schemaVersion"] != 1:
+        raise CaptureError("EVENT_REJECTED")
+    if (
+        metadata["hash"] != event["commit"]
+        or HASH_PATTERN.fullmatch(metadata["hash"]) is None
+    ):
+        raise CaptureError("EVENT_REJECTED")
+    if not isinstance(metadata["branch"], str) or any(
+        ord(character) < 32 or ord(character) == 127 for character in metadata["branch"]
+    ):
+        raise CaptureError("EVENT_REJECTED")
+    if not isinstance(metadata["files"], list) or not all(
+        isinstance(item, str) for item in metadata["files"]
+    ):
+        raise CaptureError("EVENT_REJECTED")
+    if (
+        not isinstance(metadata["org_repo"], str)
+        or ORG_REPO_PATTERN.fullmatch(metadata["org_repo"]) is None
+    ):
+        raise CaptureError("EVENT_REJECTED")
+    if not isinstance(metadata["repo_name"], str) or not metadata["repo_name"]:
+        raise CaptureError("EVENT_REJECTED")
+    if not isinstance(metadata["ticket"], str):
+        raise CaptureError("EVENT_REJECTED")
+    if (
+        not isinstance(metadata["date"], str)
+        or DATE_PATTERN.fullmatch(metadata["date"]) is None
+    ):
+        raise CaptureError("EVENT_REJECTED")
+    if (
+        not isinstance(metadata["time"], str)
+        or TIME_PATTERN.fullmatch(metadata["time"]) is None
+    ):
+        raise CaptureError("EVENT_REJECTED")
+    try:
+        datetime.date.fromisoformat(metadata["date"])
+        datetime.time.fromisoformat(metadata["time"])
+    except ValueError:
+        raise CaptureError("EVENT_REJECTED") from None
+
+
+def capture_target(metadata):
+    repository = metadata["org_repo"]
+    if repository in MTF_REPOSITORIES:
+        return f"Altamira/mtf-builder/commits/{metadata['date']}-mtf-builder-commits.md"
+    return f"Projects/Development/{repository}/{metadata['date']}.md"
+
+
+def capture_arguments(metadata, context):
+    target = capture_target(metadata)
+    commit_hash = metadata["hash"]
+    key_digest = hashlib.sha256(
+        f"{metadata['org_repo']}\0{commit_hash}".encode("utf-8")
+    ).hexdigest()
+    body = [f"- Branch: {json.dumps(metadata['branch'], ensure_ascii=False)}"]
+    body.extend(f"- {item}" for item in context)
+    return target, {
+        "content": "\n".join(body),
+        "section": f"## {metadata['time']} - {commit_hash}",
+        "target_path": target,
+        "skip_if_hash": commit_hash,
+        "idempotency_key": f"commit-capture:{key_digest}",
+    }
+
+
+def bridge_timeout():
+    raw = os.environ.get("OBSIDIAN_MCP_CAPTURE_BRIDGE_TIMEOUT_SECONDS")
+    if raw is None:
+        return float(BRIDGE_TIMEOUT_DEFAULT)
+    if re.fullmatch(r"[1-9][0-9]{0,2}", raw) is None:
+        raise CaptureError("CONFIG_INVALID")
+    value = int(raw)
+    if not BRIDGE_TIMEOUT_MIN <= value <= BRIDGE_TIMEOUT_MAX:
+        raise CaptureError("CONFIG_INVALID")
+    return float(value)
+
+
+class Bridge:
+    def __init__(self, path, timeout):
+        try:
+            self.process = subprocess.Popen(
+                [str(path)],
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True,
+            )
+        except (OSError, ValueError):
+            raise CaptureError("BRIDGE_FAILED") from None
+        self.selector = selectors.DefaultSelector()
+        try:
+            self.selector.register(self.process.stdout, selectors.EVENT_READ)
+            os.set_blocking(self.process.stdin.fileno(), False)
+            os.set_blocking(self.process.stdout.fileno(), False)
+        except (OSError, ValueError):
+            self.selector.close()
+            kill_group(self.process)
+            raise CaptureError("BRIDGE_FAILED") from None
+        self.buffer = bytearray()
+        self.total = 0
+        self.deadline = time.monotonic() + timeout
+        self.closed = False
+
+    def send(self, value):
+        write_selector = selectors.DefaultSelector()
+        try:
+            encoded = json.dumps(value, separators=(",", ":")).encode() + b"\n"
+            offset = 0
+            write_selector.register(self.process.stdin, selectors.EVENT_WRITE)
+            while offset < len(encoded):
+                remaining = self.deadline - time.monotonic()
+                if remaining <= 0 or not write_selector.select(remaining):
+                    raise CaptureError("BRIDGE_TIMEOUT")
+                try:
+                    written = os.write(self.process.stdin.fileno(), encoded[offset:])
+                except BlockingIOError:
+                    continue
+                if written <= 0:
+                    raise CaptureError("BRIDGE_PROTOCOL")
+                offset += written
+        except CaptureError:
+            raise
+        except (BrokenPipeError, OSError, ValueError):
+            raise CaptureError("BRIDGE_PROTOCOL") from None
+        finally:
+            write_selector.close()
+
+    def response(self, request_id):
+        for _ in range(64):
+            message = self.message()
+            if "id" not in message:
+                continue
+            if message.get("id") != request_id or message.get("jsonrpc") != "2.0":
+                raise CaptureError("BRIDGE_PROTOCOL")
+            if "error" in message or not isinstance(message.get("result"), dict):
+                raise CaptureError("BRIDGE_PROTOCOL")
+            return message["result"]
+        raise CaptureError("BRIDGE_PROTOCOL")
+
+    def message(self):
+        while b"\n" not in self.buffer:
+            remaining = self.deadline - time.monotonic()
+            if remaining <= 0:
+                raise CaptureError("BRIDGE_TIMEOUT")
+            events = self.selector.select(remaining)
+            if not events:
+                raise CaptureError("BRIDGE_TIMEOUT")
+            for key, _ in events:
+                chunk = os.read(key.fd, 8192)
+                if not chunk:
+                    raise CaptureError("BRIDGE_PROTOCOL")
+                self.buffer.extend(chunk)
+                self.total += len(chunk)
+                if (
+                    self.total > BRIDGE_OUTPUT_LIMIT
+                    or len(self.buffer) > BRIDGE_LINE_LIMIT
+                ):
+                    raise CaptureError("BRIDGE_OUTPUT_LIMIT")
+        raw, _, remainder = self.buffer.partition(b"\n")
+        self.buffer = bytearray(remainder)
+        try:
+            value = json.loads(raw)
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            raise CaptureError("BRIDGE_PROTOCOL") from None
+        if not isinstance(value, dict):
+            raise CaptureError("BRIDGE_PROTOCOL")
+        return value
+
+    def close_gracefully(self):
+        if self.closed:
+            return
+        self.closed = True
+        self.selector.close()
+        deadline = time.monotonic() + BRIDGE_GRACE
+        try:
+            self.process.stdin.close()
+        except (BrokenPipeError, OSError):
+            pass
+        try:
+            returncode = self.process.wait(
+                timeout=max(0.01, deadline - time.monotonic())
+            )
+        except subprocess.TimeoutExpired:
+            kill_group(self.process)
+            raise CaptureError("BRIDGE_SHUTDOWN") from None
+        if returncode != 0:
+            kill_group(self.process)
+            raise CaptureError("BRIDGE_SHUTDOWN")
+        remaining = max(0.0, deadline - time.monotonic())
+        if not wait_group(self.process, remaining):
+            kill_group(self.process)
+        if group_exists(self.process):
+            raise CaptureError("BRIDGE_SHUTDOWN")
+        self.process.stdout.close()
+
+    def abort(self):
+        if self.closed:
+            return
+        self.closed = True
+        self.selector.close()
+        kill_group(self.process)
+        for stream in (self.process.stdin, self.process.stdout):
+            try:
+                stream.close()
+            except (BrokenPipeError, OSError):
+                pass
+
+
+def discovered_schema(result):
+    tools = result.get("tools")
+    if not isinstance(tools, list):
+        raise CaptureError("CAPABILITY_UNAVAILABLE")
+    matches = [
+        tool
+        for tool in tools
+        if isinstance(tool, dict) and tool.get("name") == "obsidian_daily_append"
+    ]
+    if len(matches) != 1:
+        raise CaptureError("CAPABILITY_UNAVAILABLE")
+    validate_tool_schema(matches[0].get("inputSchema"))
+
+
+def recovery_guidance(status, retryable, error_code):
+    if status == "partial":
+        return "verify_authoritative_path_then_retry_same_key"
+    if status == "conflict":
+        if error_code == "CONFLICT":
+            return "verify_existing_note_commit_identity"
+        return "verify_existing_idempotency_record"
+    if retryable:
+        return "verify_failure_then_retry_same_key"
+    return "inspect_failure_before_retry"
+
+
+def unknown_outcome(code, target, arguments):
+    return {
+        "client_error": code,
+        "status": "ambiguous",
+        "error_code": "OUTCOME_UNKNOWN",
+        "retryable": False,
+        "idempotency_key": arguments["idempotency_key"],
+        "path": target,
+        "affected_paths": [],
+        "recovery": {
+            "required": True,
+            "guidance": "verify_authoritative_path_then_retry_same_key",
+        },
+        "manual_verification_required": True,
+    }
+
+
+def validate_outcome(result, target, arguments, allowed_errors):
+    outcome = result.get("structuredContent")
+    required = {
+        "status",
+        "request_id",
+        "idempotency_key",
+        "path",
+        "affected_paths",
+        "warnings",
+        "recovery",
+        "error_code",
+        "retryable",
+    }
+    if not isinstance(outcome, dict) or set(outcome) != required:
+        raise CaptureError("WRITE_REJECTED")
+    status = outcome.get("status")
+    recovery = outcome.get("recovery")
+    affected_paths = outcome.get("affected_paths")
+    warnings = outcome.get("warnings")
+    common_valid = (
+        bounded_utf8(outcome.get("request_id"), 240, allow_empty=False)
+        and outcome.get("idempotency_key") == arguments["idempotency_key"]
+        and outcome.get("path") == target
+        and isinstance(affected_paths, list)
+        and len(affected_paths) <= 1
+        and all(path == target for path in affected_paths)
+        and isinstance(warnings, list)
+        and len(warnings) <= 32
+        and all(bounded_utf8(warning, 240) for warning in warnings)
+        and isinstance(recovery, dict)
+        and set(recovery) == {"required", "action"}
+        and isinstance(recovery.get("required"), bool)
+        and bounded_utf8(recovery.get("action"), 240)
+        and isinstance(outcome.get("retryable"), bool)
+    )
+    if not common_valid:
+        raise CaptureError("WRITE_REJECTED")
+    if status in {"committed", "skipped"}:
+        valid = (
+            result.get("isError") is False
+            and outcome.get("error_code") is None
+            and outcome.get("retryable") is False
+            and recovery.get("required") is False
+            and recovery.get("action") == ""
+            and affected_paths == [target]
+        )
+        if not valid:
+            raise CaptureError("WRITE_REJECTED")
+        return status
+    error_code = outcome.get("error_code")
+    if (
+        status not in {"partial", "conflict", "failed"}
+        or result.get("isError") is not True
+        or error_code not in allowed_errors
+    ):
+        raise CaptureError("WRITE_REJECTED")
+    envelope = {
+        "client_error": "WRITE_REJECTED",
+        "status": status,
+        "error_code": error_code,
+        "retryable": outcome["retryable"],
+        "idempotency_key": arguments["idempotency_key"],
+        "path": target,
+        "affected_paths": affected_paths,
+        "recovery": {
+            "required": recovery["required"],
+            "guidance": recovery_guidance(status, outcome["retryable"], error_code),
+        },
+        "manual_verification_required": recovery["required"]
+        or status in {"partial", "conflict"},
+    }
+    raise CaptureError("WRITE_REJECTED", envelope)
+
+
+def invoke(bundle, expected_version, protocol, allowed_errors, arguments, target):
+    bridge = Bridge(bundle / "bin/obsidian-mcp-write", bridge_timeout())
+    dispatched = False
+    try:
+        bridge.send(
+            {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "initialize",
+                "params": {
+                    "protocolVersion": protocol,
+                    "capabilities": {},
+                    "clientInfo": {
+                        "name": "obsidian-mcp-capture-commit",
+                        "version": "1",
+                    },
+                },
+            }
+        )
+        initialized = bridge.response(1)
+        if initialized.get("protocolVersion") != protocol:
+            raise CaptureError("PROTOCOL_VERSION_MISMATCH")
+        capabilities = initialized.get("capabilities")
+        if not isinstance(capabilities, dict) or not isinstance(
+            capabilities.get("tools"), dict
+        ):
+            raise CaptureError("CAPABILITY_UNAVAILABLE")
+        server_info = initialized.get("serverInfo")
+        if (
+            not isinstance(server_info, dict)
+            or server_info.get("version") != expected_version
+        ):
+            raise CaptureError("SERVER_VERSION_MISMATCH")
+        bridge.send({"jsonrpc": "2.0", "method": "notifications/initialized"})
+        bridge.send({"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}})
+        discovered_schema(bridge.response(2))
+        dispatched = True
+        bridge.send(
+            {
+                "jsonrpc": "2.0",
+                "id": 3,
+                "method": "tools/call",
+                "params": {
+                    "name": "obsidian_daily_append",
+                    "arguments": arguments,
+                },
+            }
+        )
+        result = bridge.response(3)
+        try:
+            status = validate_outcome(result, target, arguments, allowed_errors)
+        except CaptureError as error:
+            if error.envelope is not None:
+                try:
+                    bridge.close_gracefully()
+                except CaptureError:
+                    pass
+            raise
+        bridge.close_gracefully()
+        return status
+    except CaptureError as error:
+        bridge.abort()
+        if dispatched and error.envelope is None:
+            raise CaptureError(
+                error.code, unknown_outcome(error.code, target, arguments)
+            ) from None
+        raise
+    except Exception:
+        bridge.abort()
+        if dispatched:
+            raise CaptureError(
+                "INTERNAL", unknown_outcome("INTERNAL", target, arguments)
+            ) from None
+        raise CaptureError("INTERNAL") from None
+
+
+def capture():
+    event, context = read_input()
+    bundle, expected_version, protocol, allowed_errors = load_bundle()
+    metadata = run_producer(bundle, event)
+    target, arguments = capture_arguments(metadata, context)
+    status = invoke(
+        bundle, expected_version, protocol, allowed_errors, arguments, target
+    )
+    return {"status": status, "path": target}
+
+
+def main():
+    if len(sys.argv) != 1:
+        sys.stderr.write("error:CLI_INVALID\n")
+        return 64
+    try:
+        result = capture()
+    except CaptureError as error:
+        if error.envelope is None:
+            sys.stderr.write(f"error:{error.code}\n")
+        else:
+            sys.stderr.write(json.dumps(error.envelope, separators=(",", ":")) + "\n")
+        return 64
+    except Exception:
+        sys.stderr.write("error:INTERNAL\n")
+        return 64
+    sys.stdout.write(json.dumps(result, separators=(",", ":")) + "\n")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -1,0 +1,149 @@
+{
+  "catalogVersion": 1,
+  "contract": {
+    "repository": "nhangen/claude-obsidian-plugin",
+    "commit": "b1bb8bc29593c7c37ccbead8bf1f3d778faf903a",
+    "path": "packages/mcp-server/contract.json",
+    "contractVersion": "0.1.3",
+    "sha256": "bc2000589e90ac8306fdc8516ab3a5bfb7e1657eb3d9197548103ab74d6fe324"
+  },
+  "release": {
+    "tag": "mcp-v0.2.0",
+    "url": "https://github.com/nhangen/claude-obsidian-plugin/releases/tag/mcp-v0.2.0",
+    "sourceCommit": "b1bb8bc29593c7c37ccbead8bf1f3d778faf903a",
+    "asset": {
+      "name": "claude-obsidian-mcp-server-0.2.0.tgz",
+      "url": "https://github.com/nhangen/claude-obsidian-plugin/releases/download/mcp-v0.2.0/claude-obsidian-mcp-server-0.2.0.tgz",
+      "sha256": "b78c0dfaa0f03456dff107bf8c93d54d22b945fb0b911010058f2505def584a4"
+    },
+    "metadata": {
+      "name": "claude-obsidian-mcp-server-0.2.0.release.json",
+      "url": "https://github.com/nhangen/claude-obsidian-plugin/releases/download/mcp-v0.2.0/claude-obsidian-mcp-server-0.2.0.release.json",
+      "sha256": "7bf5436f720468073889ef200a3d01a272660b8a76a69280ae5ceca5702b464e"
+    }
+  },
+  "server": {
+    "launcher": "claude-obsidian-mcp",
+    "readHttpLauncher": "obsidian-mcp-remote",
+    "writeHttpLauncher": "obsidian-mcp-remote-write",
+    "httpClientPackage": "mcp-remote@0.14.3",
+    "readHttpBridge": {
+      "package": "mcp-remote@0.14.3",
+      "path": "vendor/mcp-remote-read",
+      "provenanceSha256": "de5c5cd467b1a78408c25e3579086f86bec1482a8d84844545ef571d9006a77c",
+      "retryableTools": [
+        "obsidian_find_notes"
+      ]
+    },
+    "readHostServer": "obsidian",
+    "writeHostServer": "obsidian-write",
+    "defaultStdioProfile": "read",
+    "writeStdioProfile": "write",
+    "hostApprovalModes": {
+      "read": "auto",
+      "write": "auto"
+    },
+    "hostApprovalRequiredForWrites": false,
+    "existingClaudePluginDefault": "unchanged-for-unmodeled-workflows",
+    "sessionNoteAndCommitCaptureWriter": "plugin-keeper",
+    "nativeCapture": {
+      "launcher": "bin/obsidian-mcp-native",
+      "host": "codex",
+      "activation": "new-isolated-profile-only",
+      "writer": "mcp",
+      "defaultActivated": false,
+      "otherHosts": "pending"
+    },
+    "mcpOutOfContractPolicy": "fail-closed"
+  },
+  "hosts": {
+    "codex": {
+      "projection": "integrations/codex/skills/obsidian-mcp/SKILL.md",
+      "nativeMechanism": "codex-skill-and-mcp-commands",
+      "changesExistingPlugin": false,
+      "writeApprovalRule": "default_tools_approval_mode = auto for obsidian-write"
+    },
+    "claude": {
+      "projection": "integrations/claude/skills/obsidian-mcp/SKILL.md",
+      "nativeMechanism": "claude-skill-and-mcp-commands",
+      "changesExistingPlugin": false,
+      "writeApprovalRule": "permissions.allow includes mcp__obsidian-write__*"
+    },
+    "opencode": {
+      "projection": "integrations/opencode/skills/obsidian-mcp/SKILL.md",
+      "nativeMechanism": "claude-compatible-skill-and-mcp-commands",
+      "changesExistingPlugin": false,
+      "writeApprovalRule": "permission includes obsidian-write_* = allow"
+    }
+  },
+  "workflows": {
+    "bounded-read": {
+      "access": "read",
+      "approval": "none",
+      "route": "default",
+      "tool": "obsidian_find_notes",
+      "requiredArguments": [
+        "query"
+      ]
+    },
+    "resource-read": {
+      "access": "read",
+      "approval": "none",
+      "route": "default",
+      "resources": [
+        "obsidian://daily/{date}",
+        "obsidian://librarian",
+        "obsidian://pending",
+        "obsidian://taxonomy"
+      ]
+    },
+    "commit-metadata": {
+      "access": "read",
+      "approval": "none",
+      "route": "default",
+      "tool": "obsidian_commit_meta",
+      "requiredArguments": [
+        "repository"
+      ]
+    },
+    "guarded-note-save": {
+      "access": "write",
+      "approval": "policy-authorized",
+      "route": "opt-in",
+      "tool": "obsidian_keeper_save",
+      "requiredArguments": [
+        "title",
+        "body",
+        "resolved",
+        "folder_hint",
+        "idempotency_key"
+      ]
+    },
+    "daily-append": {
+      "access": "write",
+      "approval": "policy-authorized",
+      "route": "opt-in",
+      "tool": "obsidian_daily_append",
+      "requiredArguments": [
+        "content",
+        "idempotency_key"
+      ]
+    },
+    "ask-vault-librarian": {
+      "access": "read",
+      "approval": "none",
+      "route": "default",
+      "prompt": "ask_vault_librarian"
+    },
+    "summarize-session": {
+      "access": "read",
+      "approval": "none",
+      "route": "default",
+      "prompt": "summarize_session"
+    }
+  },
+  "promptRetention": [
+    "ask_vault_librarian",
+    "summarize_session"
+  ]
+}

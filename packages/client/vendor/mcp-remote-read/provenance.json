@@ -1,0 +1,78 @@
+{
+  "package": "mcp-remote@0.14.3",
+  "repository": {
+    "url": "https://github.com/punkpeye/mcp-remote.git",
+    "tag": "v0.14.3",
+    "commit": "6a06aca546a8fd3b7beb040f39761b364893198d"
+  },
+  "source": {
+    "tarball": "https://registry.npmjs.org/mcp-remote/-/mcp-remote-0.14.3.tgz",
+    "integrity": "sha512-M8eMA+LQIYbVNpntDhbCzFYNxwF9O9KozOuDxOrGTtRXbHRq/m4NuFZ6892hmJcU4Zhv4qPfpxrXyG2FPWNMKg==",
+    "sha1": "09dcf2580097c60bf3238bd46b17ddf08378909c",
+    "sha256": "f4ab0e33b38b24fff6a8b3234f9d683e47995ca44f3186481716d444836f7254"
+  },
+  "build": {
+    "script": "build.py",
+    "lockfile": "build-package-lock.json",
+    "format": "esm",
+    "nodeTarget": "node22",
+    "externalImports": "node-builtins-only",
+    "dependencies": {
+      "esbuild": {
+        "version": "0.25.1",
+        "integrity": "sha512-BGO5LtrGC7vxnqucAe/rmvKdJllfGaYWdyABvyMoXQlfYMb2bbRuReWR5tEGE//4LcNJj9XrkovTqNYRFZHAMQ=="
+      },
+      "express": {
+        "version": "4.21.2",
+        "integrity": "sha512-28HqgMZAmih1Czt9ny7qr6ek2qddF4FclbMzwhCREB6OFfH+rXAnuNCwo1/wFvrtbgsQDb4kSbX9de9lFbrXnA=="
+      },
+      "open": {
+        "version": "10.1.0",
+        "integrity": "sha512-mnkeQ1qP5Ue2wd+aivTD3NHd/lZ96Lu0jgf0pwktLPtx6cTZiH7tyeGRRHs0zX0rbrahXPnXlUnbeXyaBBuIaw=="
+      },
+      "strict-url-sanitise": {
+        "version": "0.0.1",
+        "integrity": "sha512-nuFtF539K8jZg3FjaWH/L8eocCR6gegz5RDOsaWxfdbF5Jqr2VXWxZayjTwUzsWJDC91k2EbnJXp6FuWW+Z4hg=="
+      },
+      "undici": {
+        "version": "7.12.0",
+        "integrity": "sha512-GrKEsc3ughskmGA9jevVlIOPMiiAHJ4OFUtaAH+NhfTUSiZ1wMPIQqQvAJUrJspFXJt3EBWgpAeoHEDVT1IBug=="
+      }
+    }
+  },
+  "patch": {
+    "path": "mcp-remote-0.14.3-session-recovery.patch",
+    "sha256": "25d7dd54ce16767362119b415e6525da232126fd47b29dc563c6b7364faba870"
+  },
+  "runtime": {
+    "entry": "mcp-remote-read.mjs",
+    "xdgOpen": "xdg-open",
+    "requiresNode": ">=22",
+    "requiresNpm": false,
+    "retryableTools": [
+      "obsidian_find_notes"
+    ]
+  },
+  "files": {
+    "LICENSE": "5514f48637fa1d8fed2256d12d322009a75962e6111370755fc5b20773db67ad",
+    "THIRD_PARTY_LICENSES.txt": "a1145fb157088280fa7b26a44fe81126adfeb3fd21c875cea95a6596fa01d8c9",
+    "build-package.json": "df12ca9e8a29d52763a8aa1d4c112319b661c8ca00172bae419d0f475d744a57",
+    "build-package-lock.json": "fa39f93a41b29214de2edd24016ef713d23e1dfbfc689bb526d8882f6220b33f",
+    "build.py": "30f530202e3d16263da68e5dba5cd0b1e9b36217dcbeba3ca6d406ac2bda7f78",
+    "mcp-remote-read.mjs": "51b26bf819545f6f500943ae319ce343314d18adb8dfdf8e5c1d1169865b1510",
+    "mcp-remote-read.mjs.LEGAL.txt": "489d46f1c4bc6b64f180b587335e9fcfad45895bd86d822695447c29a1ac9987",
+    "xdg-open": "7d759d54f0d4ce1beeb34ee62c587985b5042374e8de237b0dcb8cd47aa698cf"
+  },
+  "fileModes": {
+    "mcp-remote-read.mjs": "0755",
+    "xdg-open": "0755"
+  },
+  "upstreamFiles": {
+    "LICENSE": "5514f48637fa1d8fed2256d12d322009a75962e6111370755fc5b20773db67ad",
+    "package.json": "7f1705bd2699b69515127ae3a140ad5d24d7d17ec0cbfe8c1fd3d8d9e12a22b0",
+    "dist/proxy.js": "db2c09216a1d394d425ecdebb6386b5c435ef8c51c08a8db19a15360f60c3b4a",
+    "dist/chunk-CGVEK4Z7.js": "c2317039772cf79bdba4da9349bde030c7e7f83cef702321600f3cf2be755451",
+    "dist/chunk-MLKGABMK.js": "30c77128186890ab8043f3a2502ab91c7d9dec358dd35ee0d89835189b1caa03",
+    "dist/webapi-WW3GGD26.js": "ec84e09fb4aeb7b465796cc8e9f7788d8e4365d4c63bc5bbcb52876247cb6bc6"
+  }
+}

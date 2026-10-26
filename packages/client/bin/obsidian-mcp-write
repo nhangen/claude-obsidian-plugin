@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=../lib/launch-profile.sh
+source "$script_dir/../lib/launch-profile.sh"
+launch_profile write "$@"

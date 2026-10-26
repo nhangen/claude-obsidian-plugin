@@ -1,0 +1,1492 @@
+#!/usr/bin/env python3
+"""Opt-in native capture in a new, isolated Codex profile."""
+
+import argparse
+from contextlib import contextmanager
+import datetime
+import fcntl
+import hashlib
+import json
+import os
+from pathlib import Path
+import re
+import runpy
+import shlex
+import signal
+import stat
+import subprocess
+import sys
+import tempfile
+try:
+    import tomllib
+except ImportError:
+    print("obsidian-mcp-native: Python 3.11 or newer is required", file=sys.stderr)
+    raise SystemExit(64) from None
+
+
+BUNDLE = Path(__file__).resolve().parent.parent
+HEX = re.compile(r"[0-9a-f]{64}\Z")
+HASH = re.compile(r"(?:[0-9a-f]{40}|[0-9a-f]{64})\Z")
+LIMIT = 262144
+MAX_PENDING = 16
+ACTIVE = "active.json"
+OWNED = ("config.toml", "hooks.json", "AGENTS.md")
+ENVIRONMENT = (
+    "PATH",
+    "HOME",
+    "USER",
+    "OBSIDIAN_MCP_ALLOW_HTTP",
+    "OBSIDIAN_MCP_ALLOW_TAILNET_HTTP",
+    "OBSIDIAN_MCP_NPX",
+    "OBSIDIAN_MCP_READ_ENDPOINT",
+    "OBSIDIAN_MCP_WRITE_ENDPOINT",
+    "OBSIDIAN_MCP_READ_CREDENTIAL_PROVIDER",
+    "OBSIDIAN_MCP_WRITE_CREDENTIAL_PROVIDER",
+    "OBSIDIAN_MCP_READ_TOKEN_ENV",
+    "OBSIDIAN_MCP_WRITE_TOKEN_ENV",
+    "OBSIDIAN_MCP_READ_TOKEN_FILE",
+    "OBSIDIAN_MCP_WRITE_TOKEN_FILE",
+    "OBSIDIAN_MCP_READ_KEYCHAIN_SERVICE",
+    "OBSIDIAN_MCP_WRITE_KEYCHAIN_SERVICE",
+    "OBSIDIAN_MCP_READ_KEYCHAIN_ACCOUNT",
+    "OBSIDIAN_MCP_WRITE_KEYCHAIN_ACCOUNT",
+)
+
+
+class NativeError(Exception):
+    pass
+
+
+class ArgumentParser(argparse.ArgumentParser):
+    def error(self, message):
+        raise NativeError("CLI_INVALID")
+
+
+def digest(value):
+    return hashlib.sha256(value).hexdigest()
+
+
+def encode(value):
+    return json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
+
+
+def identifier(value):
+    if (
+        not isinstance(value, str)
+        or not 1 <= len(value) <= 200
+        or any(ord(c) < 32 for c in value)
+    ):
+        raise NativeError("EVENT_ID_INVALID")
+    return value
+
+
+def private_read(path):
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    with os.fdopen(fd, "rb") as stream:
+        item = os.fstat(stream.fileno())
+        if (
+            not stat.S_ISREG(item.st_mode)
+            or item.st_uid != os.getuid()
+            or item.st_nlink != 1
+            or stat.S_IMODE(item.st_mode) != 0o600
+        ):
+            raise NativeError("PRIVATE_FILE_INVALID")
+        value = stream.read(LIMIT + 1)
+    if len(value) > LIMIT:
+        raise NativeError("STATE_TOO_LARGE")
+    return value
+
+
+def atomic_write(path, value):
+    if len(value) > LIMIT:
+        raise NativeError("STATE_TOO_LARGE")
+    fd, temporary = tempfile.mkstemp(dir=path.parent, prefix=".capture-")
+    try:
+        with os.fdopen(fd, "wb") as stream:
+            stream.write(value)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+        directory = os.open(path.parent, os.O_RDONLY)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+
+
+def clean_project(project):
+    root = Path(project).resolve(strict=True)
+    if not root.is_dir() or git(root, "rev-parse", "--show-toplevel").strip() != str(
+        root
+    ):
+        raise NativeError("PROJECT_ROOT_REQUIRED")
+    for directory in (root, *root.parents):
+        if any(
+            (directory / p).exists()
+            for p in (
+                ".codex",
+                ".claude",
+                ".opencode",
+                ".agents",
+                "AGENTS.md",
+                "CLAUDE.md",
+            )
+        ):
+            raise NativeError("CLEAN_PROJECT_REQUIRED")
+    return root
+
+
+def git(root, *args, allow_failure=False):
+    producer = runpy.run_path(str(BUNDLE / "bin/obsidian-mcp-commit-event"))
+    result = subprocess.run(
+        ["git", "-C", str(root), *args],
+        capture_output=True,
+        timeout=5,
+        env=dict(producer["isolated_environment"](), GIT_OPTIONAL_LOCKS="0"),
+    )
+    if len(result.stdout) > LIMIT or len(result.stderr) > LIMIT:
+        raise NativeError("GIT_OUTPUT_LIMIT")
+    if result.returncode:
+        if allow_failure:
+            return ""
+        raise NativeError("GIT_FAILED")
+    return result.stdout.decode("utf-8")
+
+
+def trusted_bundle(expected):
+    installer = runpy.run_path(str(BUNDLE / "bin/obsidian-mcp-client-install"))
+    try:
+        if BUNDLE.parent.name == "releases" and HEX.fullmatch(BUNDLE.name):
+            return installer["verify_installed_release"](
+                BUNDLE.parent.parent, BUNDLE.name, expected
+            )
+        return installer["verify_source"](BUNDLE, expected)[0]
+    except installer["InstallError"]:
+        raise NativeError("BUNDLE_UNTRUSTED") from None
+
+
+def create_profile(args):
+    metadata = trusted_bundle(args.release_sha256)
+    project = clean_project(args.project)
+    home = Path(args.home).absolute()
+    if (
+        home.exists()
+        or home.is_symlink()
+        or not home.parent.is_dir()
+        or home.parent.resolve() != home.parent
+    ):
+        raise NativeError("NEW_PROFILE_REQUIRED")
+    parts = Path(args.folder).parts
+    if (
+        not parts
+        or Path(args.folder).is_absolute()
+        or ".." in parts
+        or any(ord(c) < 32 for c in args.folder)
+        or args.folder.endswith("/")
+    ):
+        raise NativeError("FOLDER_INVALID")
+    forwarded = list(ENVIRONMENT)
+    for profile in ("READ", "WRITE"):
+        name = os.environ.get(f"OBSIDIAN_MCP_{profile}_TOKEN_ENV")
+        if name:
+            if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name):
+                raise NativeError("TOKEN_ENV_INVALID")
+            forwarded.append(name)
+    native = str(BUNDLE / "bin/obsidian-mcp-native")
+    python = str(Path(sys.executable).resolve())
+    hooks = {"hooks": {}}
+    for event, matcher in (
+        ("UserPromptSubmit", None),
+        (
+            "PreToolUse",
+            "^(Bash|mcp__obsidian_write__obsidian_keeper_save|mcp__obsidian_write__obsidian_daily_append)$",
+        ),
+        (
+            "PostToolUse",
+            "^(Bash|mcp__obsidian_write__obsidian_keeper_save|mcp__obsidian_write__obsidian_daily_append)$",
+        ),
+        ("Stop", None),
+    ):
+        entry = {
+            "hooks": [
+                {
+                    "type": "command",
+                    "command": shlex.join(
+                        [python, native, "hook", "--home", str(home)]
+                    ),
+                    "timeout": 15,
+                }
+            ]
+        }
+        if matcher:
+            entry["matcher"] = matcher
+        hooks["hooks"][event] = [entry]
+    config = (
+        'sandbox_mode = "workspace-write"\n'
+        "[sandbox_workspace_write]\nwritable_roots = "
+        + json.dumps([str(home / "capture-state")])
+        + "\n[features]\nhooks = true\n"
+    )
+    for name, launcher in (
+        ("obsidian", "obsidian-mcp-read"),
+        ("obsidian-write", "obsidian-mcp-write"),
+    ):
+        config += (
+            f"\n[mcp_servers.{name}]\ncommand = {json.dumps(str(BUNDLE / 'bin' / launcher))}\n"
+            'startup_timeout_sec = 30\ntool_timeout_sec = 120\ndefault_tools_approval_mode = "auto"\n'
+            f"env_vars = {json.dumps(forwarded)}\n"
+        )
+    policy = (BUNDLE / "hosts/codex-capture.md").read_bytes()
+    files = {
+        "config.toml": config.encode(),
+        "hooks.json": encode(hooks),
+        "AGENTS.md": policy,
+    }
+    descriptor = dict(
+        schemaVersion=1,
+        host="codex",
+        python=python,
+        bundle=str(BUNDLE),
+        releaseSha256=args.release_sha256,
+        releaseId=metadata["releaseId"],
+        project=str(project),
+        folder=args.folder,
+        files={name: digest(body) for name, body in files.items()},
+        config=tomllib.loads(config),
+        active=True,
+    )
+    home.mkdir(mode=0o700)
+    for name, body in files.items():
+        atomic_write(home / name, body)
+    (home / "capture-state").mkdir(mode=0o700)
+    (home / "runtime-home").mkdir(mode=0o700)
+    atomic_write(home / "capture-profile.json", encode(descriptor))
+    return dict(
+        status="created",
+        home=str(home),
+        writer="mcp",
+        scope="isolated-profile",
+        launch_command=shlex.join([python, native, "run", "--home", str(home)]),
+        release_id=metadata["releaseId"],
+    )
+
+
+def load_profile(home):
+    home = Path(home).absolute()
+    item = home.lstat()
+    if (
+        not stat.S_ISDIR(item.st_mode)
+        or home.is_symlink()
+        or item.st_uid != os.getuid()
+        or stat.S_IMODE(item.st_mode) != 0o700
+        or home.resolve() != home
+    ):
+        raise NativeError("PROFILE_INVALID")
+    profile = json.loads(private_read(home / "capture-profile.json"))
+    if (
+        profile.get("schemaVersion") != 1
+        or profile.get("active") is not True
+        or profile.get("host") != "codex"
+        or profile.get("bundle") != str(BUNDLE)
+        or set(profile.get("files", {})) != set(OWNED)
+    ):
+        raise NativeError("PROFILE_INACTIVE_OR_INVALID")
+    python = Path(profile.get("python", ""))
+    if (
+        not python.is_absolute()
+        or not python.is_file()
+        or not os.access(python, os.X_OK)
+    ):
+        raise NativeError(
+            "PROFILE_PYTHON_UNAVAILABLE; recreate profile with Python 3.11 or newer"
+        )
+    for name in OWNED:
+        body = private_read(home / name)
+        if name == "config.toml":
+            config = tomllib.loads(body.decode())
+            for host_key in ("tui", "projects"):
+                config.pop(host_key, None)
+            host_hooks = config.pop("hooks", {})
+            if not isinstance(host_hooks, dict) or set(host_hooks) - {"state"}:
+                raise NativeError("PROFILE_DRIFT")
+            if config != profile.get("config"):
+                raise NativeError("PROFILE_DRIFT")
+        elif digest(body) != profile["files"][name]:
+            raise NativeError("PROFILE_DRIFT")
+    trusted_bundle(profile["releaseSha256"])
+    clean_project(profile["project"])
+    return home, profile
+
+
+def checked_state_directory(home):
+    directory = home / "capture-state"
+    item = directory.lstat()
+    if (
+        not stat.S_ISDIR(item.st_mode)
+        or directory.is_symlink()
+        or item.st_uid != os.getuid()
+        or stat.S_IMODE(item.st_mode) != 0o700
+    ):
+        raise NativeError("STATE_DIRECTORY_INVALID")
+    return directory
+
+
+@contextmanager
+def state_lock(home, key):
+    if not isinstance(key, str) or HEX.fullmatch(key) is None:
+        raise NativeError("SESSION_KEY_INVALID")
+    directory = checked_state_directory(home)
+    fd = os.open(
+        directory / (key + ".lock"), os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600
+    )
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        path = directory / (key + ".json")
+        state = json.loads(private_read(path)) if path.exists() else None
+        if state is not None and (
+            state.get("schemaVersion") != 1 or state.get("session") != key
+        ):
+            raise NativeError("STATE_INVALID")
+        yield state, path
+    finally:
+        os.close(fd)
+
+
+@contextmanager
+def gate_lock(home):
+    directory = checked_state_directory(home)
+    fd = os.open(
+        directory / "active.lock", os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600
+    )
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield directory
+    finally:
+        os.close(fd)
+
+
+def active_request(home):
+    try:
+        value = json.loads(private_read(home / "capture-state" / ACTIVE))
+    except FileNotFoundError:
+        return None
+    except ValueError:
+        raise NativeError("ACTIVE_STATE_INVALID")
+    if (
+        not isinstance(value, dict)
+        or value.get("schemaVersion") != 1
+        or value.get("reason") != "commit_capture"
+        or type(value.get("session")) is not str
+        or HEX.fullmatch(value["session"]) is None
+        or type(value.get("since")) is not int
+        or value["since"] < 0
+    ):
+        raise NativeError("ACTIVE_STATE_INVALID")
+    return value
+
+
+def has_pending_capture(state):
+    return bool(state["snapshots"]) or any(
+        p["status"] == "pending" for p in state["commits"].values()
+    )
+
+
+def release_gate(directory):
+    (directory / ACTIVE).unlink(missing_ok=True)
+    descriptor = os.open(directory, os.O_RDONLY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def claim_gate(home, session, state):
+    with gate_lock(home) as directory:
+        owner = active_request(home)
+        if has_pending_capture(state):
+            if owner is None:
+                atomic_write(
+                    directory / ACTIVE,
+                    encode(
+                        dict(
+                            schemaVersion=1,
+                            session=session,
+                            reason="commit_capture",
+                            since=int(
+                                datetime.datetime.now(datetime.timezone.utc).timestamp()
+                            ),
+                        )
+                    ),
+                )
+                return None
+            return None if owner["session"] == session else owner
+        if owner is not None and owner["session"] == session:
+            release_gate(directory)
+        return None
+
+
+def settle_gate(home, session, state):
+    try:
+        owner = claim_gate(home, session, state)
+    except NativeError as error:
+        if str(error) != "ACTIVE_STATE_INVALID":
+            raise
+        return (
+            "\nThe capture gate file is invalid (ACTIVE_STATE_INVALID), so commits"
+            " from other sessions fail until it is cleared. Clear it with takeover --home "
+            + str(home)
+            + " --session "
+            + session
+            + " --verification command-stopped-and-history-inspected."
+        )
+    if owner is None:
+        return ""
+    return (
+        "\nUnexpected capture-gate owner "
+        + owner["session"]
+        + ": commits from other sessions fail until it is cleared. Clear it with takeover --home "
+        + str(home)
+        + " --session "
+        + session
+        + " --verification command-stopped-and-history-inspected."
+    )
+
+
+def persist_with_gate(home, session, state, path):
+    if has_pending_capture(state):
+        warning = settle_gate(home, session, state)
+        atomic_write(path, encode(state))
+    else:
+        atomic_write(path, encode(state))
+        warning = settle_gate(home, session, state)
+    return warning
+
+
+def serialize_denial(name, home, session, owner):
+    return {
+        "hookSpecificOutput": {
+            "hookEventName": name,
+            "permissionDecision": "deny",
+            "permissionDecisionReason": "Session "
+            + owner
+            + " owns serialized commit capture for this project. Inspect it with"
+            " status --home "
+            + str(home)
+            + " --session "
+            + owner
+            + ", then rescue interrupted ownership with takeover --home "
+            + str(home)
+            + " --session "
+            + session
+            + " --verification command-stopped-and-history-inspected.",
+        }
+    }
+
+
+def input_json():
+    def expired(_sig, _frame):
+        raise NativeError("INPUT_TIMEOUT")
+
+    signal.signal(signal.SIGALRM, expired)
+    signal.alarm(5)
+    try:
+        raw = sys.stdin.buffer.read(LIMIT + 1)
+    finally:
+        signal.alarm(0)
+    if len(raw) > LIMIT:
+        raise NativeError("INPUT_TOO_LARGE")
+    value = json.loads(raw)
+    if not isinstance(value, dict):
+        raise NativeError("INPUT_INVALID")
+    return value
+
+
+def context(event, message):
+    return {
+        "hookSpecificOutput": {"hookEventName": event, "additionalContext": message}
+    }
+
+
+def shell_commit(command, cwd, project):
+    if not isinstance(command, str):
+        return None
+    words = shlex.split(command)
+    if not words:
+        return None
+    if Path(words[0]).name == "rtk":
+        words.pop(0)
+        if words and words[0] == "proxy":
+            words.pop(0)
+    if not words or words[0] not in ("git", "/usr/bin/git"):
+        if any(w in ("git", "/usr/bin/git") for w in words) and "commit" in words:
+            raise NativeError(
+                "unsupported commit command; use one git -C <root> commit invocation"
+            )
+        return None
+    words.pop(0)
+    root = Path(cwd).resolve()
+    if words[:1] == ["-C"] and len(words) >= 3:
+        root = (root / words[1]).resolve()
+        words = words[2:]
+    if not words or words[0] != "commit":
+        if "commit" in words:
+            raise NativeError("unsupported git options before commit")
+        return None
+    if (
+        any(c in command for c in "\n\r;$`|&<>")
+        or root != Path(project)
+        or any(w in ("-c", "--config-env") for w in words)
+    ):
+        raise NativeError(
+            "unsupported commit command; use one git -C <root> commit invocation"
+        )
+    return root
+
+
+def reflog(root):
+    path = Path(git(root, "rev-parse", "--git-path", "logs/HEAD").strip())
+    if not path.is_absolute():
+        path = root / path
+    if not path.exists():
+        return dict(size=0, tail="")
+    with path.open("rb") as stream:
+        stream.seek(0, 2)
+        size = stream.tell()
+        stream.seek(max(0, size - 8192))
+        tail = stream.read()
+    return dict(size=size, tail=digest(tail))
+
+
+def producer_event(root, before):
+    head = git(root, "rev-parse", "--verify", "HEAD", allow_failure=True).strip()
+    if head == before["head"]:
+        return None
+    if HASH.fullmatch(head) is None:
+        raise NativeError("COMMIT_UNPROVEN")
+    path = Path(git(root, "rev-parse", "--git-path", "logs/HEAD").strip())
+    if not path.is_absolute():
+        path = root / path
+    with path.open("rb") as stream:
+        stream.seek(max(0, before["log"]["size"] - 8192))
+        prefix = stream.read(min(8192, before["log"]["size"]))
+        if digest(prefix) != before["log"]["tail"] and before["log"]["size"]:
+            raise NativeError("COMMIT_AMBIGUOUS")
+        data = stream.read(8193)
+    lines = data.splitlines()
+    if len(data) > 8192 or len(lines) != 1 or b"\t" not in lines[0]:
+        raise NativeError("COMMIT_AMBIGUOUS")
+    record, reason = lines[0].split(b"\t", 1)
+    hashes = record.split(b" ", 2)
+    old = before["head"] or "0" * len(head)
+    if hashes[:2] != [old.encode(), head.encode()] or not reason.startswith(
+        (b"commit: ", b"commit (initial): ", b"commit (amend): ")
+    ):
+        raise NativeError("COMMIT_UNPROVEN")
+    event = dict(
+        schemaVersion=1,
+        event="git.commit",
+        outcome="success",
+        repository=str(root),
+        commit=head,
+    )
+    consumer = runpy.run_path(str(BUNDLE / "bin/obsidian-mcp-capture-commit"))
+    return event, consumer["run_producer"](BUNDLE, event, sys.executable)
+
+
+def session_plan(profile, session, turn):
+    date = datetime.date.today().isoformat()
+    title = "Session " + digest((session + turn).encode())[:20]
+    folder = profile["folder"]
+    return dict(
+        title=title,
+        folder=folder,
+        date=date,
+        path=f"{folder}/{title}.md",
+        index=f"{folder}/INDEX.md",
+        daily=f"Daily/{date}.md",
+        idempotency_key="native-session:" + digest((session + "\0" + turn).encode()),
+    )
+
+
+def session_receipt(event, plan):
+    if event.get("tool_name") != "mcp__obsidian_write__obsidian_keeper_save":
+        return False
+    args = event.get("tool_input", {})
+    if any(
+        args.get(k) != v
+        for k, v in dict(
+            title=plan["title"],
+            folder_hint=plan["folder"],
+            session_link_date=plan["date"],
+            idempotency_key=plan["idempotency_key"],
+            resolved=True,
+        ).items()
+    ):
+        return False
+    result = event.get("tool_response")
+    if isinstance(result, str):
+        result = json.loads(result)
+    if not isinstance(result, dict) or result.get("isError", False) is not False:
+        return False
+    receipt = result.get("structuredContent")
+    if receipt is None and isinstance(result.get("content"), list):
+        texts = [x.get("text") for x in result["content"] if x.get("type") == "text"]
+        if len(texts) == 1:
+            receipt = json.loads(texts[0])
+    if (
+        not isinstance(receipt, dict)
+        or not isinstance(receipt.get("recovery"), dict)
+        or not isinstance(receipt.get("affected_paths"), list)
+    ):
+        return False
+    required = {
+        "status",
+        "request_id",
+        "idempotency_key",
+        "path",
+        "affected_paths",
+        "warnings",
+        "recovery",
+        "error_code",
+        "retryable",
+    }
+    if (
+        set(receipt) != required
+        or not isinstance(receipt.get("request_id"), str)
+        or not 1 <= len(receipt["request_id"]) <= 240
+        or not isinstance(receipt.get("warnings"), list)
+        or len(receipt["warnings"]) > 32
+        or not all(isinstance(x, str) and len(x) <= 240 for x in receipt["warnings"])
+    ):
+        return False
+    return (
+        receipt.get("status") in ("committed", "skipped")
+        and receipt.get("path") == plan["path"]
+        and receipt.get("idempotency_key") == plan["idempotency_key"]
+        and receipt.get("recovery", {}).get("required") is False
+        and receipt.get("recovery", {}).get("action") == ""
+        and receipt.get("error_code") is None
+        and receipt.get("retryable") is False
+        and len(receipt["affected_paths"]) == 3
+        and {plan["path"], plan["index"], plan["daily"]}
+        == set(receipt["affected_paths"])
+    )
+
+
+def observe_session(state, event):
+    plan = state["session_save"]
+    arguments = event.get("tool_input", {})
+    if arguments.get("idempotency_key") != plan["idempotency_key"]:
+        return None
+    name = event["hook_event_name"]
+    call = identifier(event.get("tool_use_id"))
+    reason = None
+    expected = dict(
+        title=plan["title"],
+        folder_hint=plan["folder"],
+        session_link_date=plan["date"],
+        idempotency_key=plan["idempotency_key"],
+        resolved=True,
+    )
+    if (
+        any(arguments.get(k) != v for k, v in expected.items())
+        or not isinstance(arguments.get("body"), str)
+        or not arguments["body"]
+    ):
+        reason = "SESSION_REQUEST_INVALID"
+    elif state.get("session_request", arguments) != arguments:
+        reason = "SESSION_PAYLOAD_CHANGED"
+    elif name == "PreToolUse" and state.get("session_recovery"):
+        reason = "SESSION_RECOVERY_REVIEW_REQUIRED"
+    if name == "PreToolUse":
+        if state.get("session_in_flight") not in (None, False, call):
+            reason = "SESSION_CALL_IN_FLIGHT"
+        if reason:
+            return {
+                "hookSpecificOutput": {
+                    "hookEventName": name,
+                    "permissionDecision": "deny",
+                    "permissionDecisionReason": reason,
+                }
+            }
+        state["disposition"] = "pending"
+        state.pop("skip_reason", None)
+        state["session_request"] = arguments
+        state["session_payload_digest"] = digest(encode(arguments))
+        state["session_call"] = call
+        state["session_in_flight"] = call
+        return {}
+    if name != "PostToolUse":
+        return None
+    if state.get("session_call") != call:
+        return context(
+            name,
+            "Session receipt did not match the prepared native call; capture remains unresolved.",
+        )
+    state.setdefault("session_request", arguments)
+    state.setdefault("session_payload_digest", digest(encode(arguments)))
+    try:
+        success = not reason and session_receipt(event, plan)
+    except (ValueError, TypeError, KeyError, AttributeError):
+        success = False
+    state["session_recovery"] = not success
+    state["session_in_flight"] = False
+    state["session_outcome"] = {
+        "status": "saved" if success else "unresolved",
+        "path": plan["path"],
+        "idempotency_key": plan["idempotency_key"],
+        "recovery": {"required": not success},
+    }
+    result = event.get("tool_response")
+    if isinstance(result, dict) and isinstance(result.get("structuredContent"), dict):
+        receipt = result["structuredContent"]
+        if receipt.get("status") in ("partial", "conflict", "failed"):
+            state["session_outcome"]["status"] = receipt["status"]
+            code = receipt.get("error_code")
+            if isinstance(code, str) and re.fullmatch(r"[A-Z_]{1,64}", code):
+                state["session_outcome"]["error_code"] = code
+    if success:
+        state["disposition"] = "saved"
+    return {}
+
+
+def capture_guidance(home, state):
+    key = state["session"]
+    plan = state["session_save"]
+    commands = []
+    for event_id, pending in state["commits"].items():
+        if pending["status"] == "pending":
+            command = shlex.join(
+                [
+                    state["python"],
+                    str(BUNDLE / "bin/obsidian-mcp-native"),
+                    "prepare",
+                    "--home",
+                    str(home),
+                    "--session",
+                    key,
+                    "--commit",
+                    event_id,
+                ]
+            )
+            commands.append(
+                f'Prepare the pending commit before another commit: pipe JSON {{"context":[3-8 concise factual context bullets]}} to {command}, then call mcp__obsidian_write__obsidian_daily_append with the returned exact arguments. Inspect its result; do not claim capture on failure.'
+            )
+    if state["disposition"] == "pending":
+        commands.append(
+            "Save meaningful session work through mcp__obsidian_write__obsidian_keeper_save using "
+            + json.dumps(
+                {
+                    k: plan[v]
+                    for k, v in (
+                        ("title", "title"),
+                        ("folder_hint", "folder"),
+                        ("session_link_date", "date"),
+                        ("idempotency_key", "idempotency_key"),
+                    )
+                }
+            )
+            + ", resolved=true, and a factual Markdown body. Preserve this payload on retry; inspect partial/recovery/conflict outcomes."
+        )
+        command = shlex.join(
+            [
+                state["python"],
+                str(BUNDLE / "bin/obsidian-mcp-native"),
+                "skip",
+                "--home",
+                str(home),
+                "--session",
+                key,
+                "--turn",
+                state["turn"],
+            ]
+        )
+        commands.append(
+            f"Only for no meaningful work or user-requested no capture, acknowledge explicitly with {command} --reason no_meaningful_work (or user_requested_no_capture). Planning/review can be meaningful without edits."
+        )
+    if state.get("snapshots"):
+        commands.append(
+            "An unfinished commit tool event remains unresolved. After confirming the tool stopped and inspecting local history, use resolve-snapshot with the exact snapshot ID from status; this records an uncaptured event, never a successful capture."
+        )
+    return "\n".join(commands)
+
+
+def hook(home, profile, event):
+    name = event.get("hook_event_name")
+    session = digest(identifier(event.get("session_id")).encode())
+    turn = identifier(event.get("turn_id"))
+    if Path(event.get("cwd", "")).resolve() != Path(profile["project"]):
+        raise NativeError("PROJECT_MISMATCH")
+    with state_lock(home, session) as (state, path):
+        if name == "UserPromptSubmit":
+            prompt = event.get("prompt", "")
+            continuation = state and prompt.startswith(
+                "OBSIDIAN_MCP_CONTINUE:" + state["turn"] + "\n"
+            )
+            if not continuation and (state is None or state["turn"] != turn):
+                if state and (
+                    state["disposition"] == "pending"
+                    or state.get("session_recovery")
+                    or state.get("snapshots")
+                    or any(p["status"] == "pending" for p in state["commits"].values())
+                ):
+                    raise NativeError("PREVIOUS_CAPTURE_UNRESOLVED")
+                state = dict(
+                    schemaVersion=1,
+                    python=profile["python"],
+                    session=session,
+                    turn=turn,
+                    disposition="pending",
+                    session_save=session_plan(profile, session, turn),
+                    snapshots={},
+                    commits={},
+                )
+            atomic_write(path, encode(state))
+            return context(
+                name,
+                "This isolated profile owns capture through MCP only.\n"
+                + capture_guidance(home, state),
+            )
+        if state is None:
+            raise NativeError("PROMPT_EVENT_REQUIRED")
+        if name == "Stop":
+            guidance = capture_guidance(home, state)
+            if not guidance:
+                return {}
+            if event.get("stop_hook_active") is not False or state.get(
+                "continuation_requested"
+            ):
+                return {
+                    "systemMessage": "Obsidian capture unresolved; no successful receipt or policy skip. "
+                    + guidance
+                }
+            state["continuation_requested"] = True
+            atomic_write(path, encode(state))
+            return {
+                "decision": "block",
+                "reason": "OBSIDIAN_MCP_CONTINUE:" + state["turn"] + "\n" + guidance,
+            }
+        if event.get("tool_name") == "mcp__obsidian_write__obsidian_keeper_save":
+            result = observe_session(state, event)
+            if result is not None:
+                atomic_write(path, encode(state))
+                return result
+        if event.get("tool_name") == "mcp__obsidian_write__obsidian_daily_append":
+            result = observe_commit(state, event)
+            if result is not None:
+                atomic_write(path, encode(state))
+                note = settle_gate(home, session, state)
+                if not note:
+                    return result
+                note = note.lstrip("\n")
+                if result == {}:
+                    return context(name, note)
+                output = result.get("hookSpecificOutput", {})
+                if "additionalContext" in output:
+                    output["additionalContext"] += "\n" + note
+                return result
+        if (
+            name not in ("PreToolUse", "PostToolUse")
+            or event.get("tool_name") != "Bash"
+        ):
+            return {}
+        command = event.get("tool_input", {}).get("command")
+        call = identifier(event.get("tool_use_id"))
+        wrapped_snapshot = next(
+            (
+                (key, value)
+                for key, value in state["snapshots"].items()
+                if value.get("call") == call
+                and command in (value.get("wrapped"), value.get("command"))
+            ),
+            None,
+        )
+        if name == "PostToolUse" and wrapped_snapshot:
+            fingerprint, before = wrapped_snapshot
+            if not before.get("execution_started"):
+                state["snapshots"].pop(fingerprint)
+                return context(
+                    name,
+                    "Commit executor did not run; no event captured."
+                    + persist_with_gate(home, session, state, path),
+                )
+            if "exit_code" not in before or before.get("capture_error"):
+                return context(
+                    name,
+                    "Commit execution outcome unavailable; inspect the outstanding snapshot before resolving it.",
+                )
+            state["snapshots"].pop(fingerprint)
+            if before["exit_code"] == 0 and before.get("captured"):
+                event_data, metadata = before["captured"]
+                state["commits"][digest(encode(event_data))] = dict(
+                    event=event_data, metadata=metadata, status="pending"
+                )
+            return context(
+                name,
+                capture_guidance(home, state)
+                + persist_with_gate(home, session, state, path),
+            )
+        try:
+            root = shell_commit(command, event["cwd"], profile["project"])
+        except NativeError as error:
+            if name == "PreToolUse" and (
+                state["snapshots"]
+                or any(p["status"] == "pending" for p in state["commits"].values())
+            ):
+                return {
+                    "hookSpecificOutput": {
+                        "hookEventName": name,
+                        "permissionDecision": "deny",
+                        "permissionDecisionReason": "Resolve the outstanding commit event before another commit.",
+                    }
+                }
+            return context(name, "Obsidian commit not captured: " + str(error))
+        if root is None:
+            return {}
+        fingerprint = digest(encode([call, command]))
+        if name == "PreToolUse":
+            if fingerprint in state["snapshots"]:
+                return {
+                    "hookSpecificOutput": {
+                        "hookEventName": name,
+                        "permissionDecision": "allow",
+                        "updatedInput": dict(
+                            event["tool_input"],
+                            command=state["snapshots"][fingerprint]["wrapped"],
+                        ),
+                    }
+                }
+            if state["snapshots"]:
+                return {
+                    "hookSpecificOutput": {
+                        "hookEventName": name,
+                        "permissionDecision": "deny",
+                        "permissionDecisionReason": "A previous commit tool call has not completed; wait or inspect its outcome.",
+                    }
+                }
+            if any(p["status"] == "pending" for p in state["commits"].values()):
+                return {
+                    "hookSpecificOutput": {
+                        "hookEventName": name,
+                        "permissionDecision": "deny",
+                        "permissionDecisionReason": "Capture or resolve the pending commit before creating another commit.\n"
+                        + capture_guidance(home, state),
+                    }
+                }
+            other = active_request(home)
+            if other is not None and other["session"] != session:
+                return serialize_denial(name, home, session, other["session"])
+            if len(state["snapshots"]) >= MAX_PENDING:
+                raise NativeError("PENDING_LIMIT")
+            wrapped = shlex.join(
+                [
+                    profile["python"],
+                    str(BUNDLE / "bin/obsidian-mcp-native"),
+                    "execute-commit",
+                    "--home",
+                    str(home),
+                    "--session",
+                    session,
+                    "--snapshot",
+                    fingerprint,
+                ]
+            )
+            state["snapshots"][fingerprint] = dict(
+                call=call,
+                command=command,
+                wrapped=wrapped,
+                head=git(
+                    root, "rev-parse", "--verify", "HEAD", allow_failure=True
+                ).strip(),
+                log=reflog(root),
+            )
+            other = claim_gate(home, session, state)
+            if other is not None:
+                state["snapshots"].pop(fingerprint, None)
+                atomic_write(path, encode(state))
+                return serialize_denial(name, home, session, other["session"])
+            atomic_write(path, encode(state))
+            return {
+                "hookSpecificOutput": {
+                    "hookEventName": name,
+                    "permissionDecision": "allow",
+                    "updatedInput": dict(event["tool_input"], command=wrapped),
+                }
+            }
+        return context(
+            name, "Obsidian commit not captured: matching executor record unavailable"
+        )
+
+
+def prepare_commit(home, args):
+    consumer = runpy.run_path(str(BUNDLE / "bin/obsidian-mcp-capture-commit"))
+    payload = input_json()
+    items = payload.get("context")
+    if (
+        set(payload) != {"context"}
+        or not isinstance(items, list)
+        or not 1 <= len(items) <= consumer["CONTEXT_ITEMS"]
+        or not all(
+            consumer["bounded_utf8"](
+                item, consumer["CONTEXT_ITEM_LIMIT"], allow_empty=False
+            )
+            and not any(ord(c) < 32 or ord(c) == 127 for c in item)
+            for item in items
+        )
+        or sum(len(item.encode()) for item in items) > consumer["CONTEXT_LIMIT"]
+    ):
+        raise NativeError("CONTEXT_INVALID")
+    with state_lock(home, args.session) as (state, path):
+        if state is None or args.commit not in state["commits"]:
+            raise NativeError("COMMIT_EVENT_UNAVAILABLE")
+        pending = state["commits"][args.commit]
+        payload_digest = digest(encode(payload))
+        if pending.get("payload_digest", payload_digest) != payload_digest:
+            raise NativeError("COMMIT_PAYLOAD_CHANGED")
+        if pending["status"] != "pending":
+            return {"status": "skipped", "path": pending.get("path")}
+        if pending.get("in_flight") or pending.get("recovery"):
+            raise NativeError("COMMIT_RECOVERY_REQUIRED")
+        try:
+            consumer["run_producer"](BUNDLE, pending["event"], sys.executable)
+        except consumer["CaptureError"]:
+            raise NativeError(
+                "COMMIT_EVENT_REJECTED; commit must still be HEAD"
+            ) from None
+        if "native_arguments" in pending:
+            return {
+                "tool": "obsidian_daily_append",
+                "arguments": pending["native_arguments"],
+            }
+        target, arguments = consumer["capture_arguments"](pending["metadata"], items)
+        pending.update(
+            request=payload,
+            payload_digest=payload_digest,
+            native_arguments=arguments,
+            path=target,
+        )
+        atomic_write(path, encode(state))
+    return {"tool": "obsidian_daily_append", "arguments": arguments}
+
+
+def execute_commit(home, profile, args):
+    with state_lock(home, args.session) as (state, path):
+        if state is None or args.snapshot not in state["snapshots"]:
+            raise NativeError("SNAPSHOT_UNAVAILABLE")
+        before = state["snapshots"][args.snapshot]
+        if "exit_code" in before:
+            return before["exit_code"]
+        if before.get("execution_started"):
+            raise NativeError("COMMIT_EXECUTION_UNRESOLVED")
+        root = shell_commit(before["command"], profile["project"], profile["project"])
+        if root is None:
+            raise NativeError("COMMIT_COMMAND_INVALID")
+        words = shlex.split(before["command"])
+        if Path(words[0]).name == "rtk":
+            words.pop(0)
+            if words[0] == "proxy":
+                words.pop(0)
+        before["execution_started"] = True
+        atomic_write(path, encode(state))
+        producer = runpy.run_path(str(BUNDLE / "bin/obsidian-mcp-commit-event"))
+        environment = producer["isolated_environment"]()
+        for role in ("AUTHOR", "COMMITTER"):
+            for field in ("NAME", "EMAIL", "DATE"):
+                key = f"GIT_{role}_{field}"
+                if key in os.environ:
+                    environment[key] = os.environ[key]
+        try:
+            result = subprocess.run(
+                words, cwd=root, env=environment, timeout=300, check=False
+            )
+        except (OSError, subprocess.SubprocessError):
+            raise NativeError("COMMIT_EXECUTION_UNRESOLVED") from None
+        before["exit_code"] = result.returncode
+        if result.returncode == 0:
+            try:
+                before["captured"] = producer_event(root, before)
+            except Exception as error:
+                before["capture_error"] = type(error).__name__
+                atomic_write(path, encode(state))
+                raise NativeError("COMMIT_EVENT_UNPROVEN; inspect snapshot") from None
+        atomic_write(path, encode(state))
+        return result.returncode
+
+
+def normalized_result(event):
+    result = event.get("tool_response")
+    if isinstance(result, str):
+        result = json.loads(result)
+    if not isinstance(result, dict):
+        raise NativeError("RECEIPT_INVALID")
+    texts = [
+        x.get("text")
+        for x in result.get("content", [])
+        if isinstance(x, dict) and x.get("type") == "text"
+    ]
+    envelope = result.get("structuredContent")
+    if envelope is None and len(texts) == 1:
+        envelope = json.loads(texts[0])
+    if not isinstance(envelope, dict):
+        raise NativeError("RECEIPT_INVALID")
+    return dict(
+        result, structuredContent=envelope, isError=result.get("isError", False)
+    )
+
+
+def observe_commit(state, event):
+    arguments = event.get("tool_input", {})
+    matches = [
+        p
+        for p in state["commits"].values()
+        if p.get("native_arguments", {}).get("idempotency_key")
+        == arguments.get("idempotency_key")
+        and arguments.get("idempotency_key")
+    ]
+    if len(matches) != 1:
+        return None
+    pending = matches[0]
+    name = event["hook_event_name"]
+    call = identifier(event.get("tool_use_id"))
+    if name == "PreToolUse":
+        reason = None
+        if arguments != pending["native_arguments"]:
+            reason = "COMMIT_PAYLOAD_CHANGED"
+        elif pending.get("recovery") or pending.get("in_flight") not in (
+            None,
+            False,
+            call,
+        ):
+            reason = "COMMIT_RECOVERY_REVIEW_REQUIRED"
+        if reason:
+            return {
+                "hookSpecificOutput": {
+                    "hookEventName": name,
+                    "permissionDecision": "deny",
+                    "permissionDecisionReason": reason,
+                }
+            }
+        pending["in_flight"] = call
+        return {}
+    if name != "PostToolUse":
+        return None
+    if pending.get("in_flight") != call or arguments != pending["native_arguments"]:
+        return context(
+            name,
+            "Commit receipt did not match the prepared native call; capture remains unresolved.",
+        )
+    consumer = runpy.run_path(str(BUNDLE / "bin/obsidian-mcp-capture-commit"))
+    contract = json.loads((BUNDLE / "contract.json").read_bytes())
+    errors = frozenset(contract["tools"]["obsidian_daily_append"]["errors"])
+    try:
+        result = normalized_result(event)
+        status = consumer["validate_outcome"](
+            result, pending["path"], arguments, errors
+        )
+    except consumer["CaptureError"] as error:
+        pending["recovery"] = error.envelope or consumer["unknown_outcome"](
+            "RECEIPT_INVALID", pending["path"], arguments
+        )
+    except (NativeError, ValueError, TypeError, KeyError):
+        pending["recovery"] = consumer["unknown_outcome"](
+            "RECEIPT_INVALID", pending["path"], arguments
+        )
+    else:
+        pending.update(status=status, recovery=None)
+    pending["in_flight"] = False
+    return {}
+
+
+def review_retry(home, args):
+    if args.verification != "authoritative-path-inspected":
+        raise NativeError("AUTHORITATIVE_VERIFICATION_REQUIRED")
+    with state_lock(home, args.session) as (state, path):
+        if state is None:
+            raise NativeError("SESSION_UNAVAILABLE")
+        if args.commit:
+            pending = state["commits"].get(args.commit)
+            if not pending or pending.get("payload_digest") != args.payload_sha256:
+                raise NativeError("PAYLOAD_DIGEST_MISMATCH")
+            payload = pending["request"]
+            pending.update(recovery=None, in_flight=False)
+        else:
+            if state.get("session_payload_digest") != args.payload_sha256:
+                raise NativeError("PAYLOAD_DIGEST_MISMATCH")
+            state["session_recovery"] = False
+            state["session_in_flight"] = False
+            payload = state["session_request"]
+        reviews = state.setdefault("recovery_reviews", [])
+        if len(reviews) >= MAX_PENDING:
+            raise NativeError("RECOVERY_REVIEW_LIMIT")
+        reviews.append(
+            dict(
+                payload_sha256=args.payload_sha256,
+                commit=args.commit,
+                verification=args.verification,
+            )
+        )
+        atomic_write(path, encode(state))
+    if args.commit:
+        return {
+            "tool": "obsidian_daily_append",
+            "arguments": pending["native_arguments"],
+        }
+    return payload
+
+
+def takeover(home, profile, args):
+    if args.verification != "command-stopped-and-history-inspected":
+        raise NativeError("INTERRUPTED_VERIFICATION_REQUIRED")
+    if args.session is not None and HEX.fullmatch(args.session) is None:
+        raise NativeError("SESSION_KEY_INVALID")
+    with gate_lock(home) as directory:
+        try:
+            owner = active_request(home)
+        except NativeError as error:
+            if str(error) != "ACTIVE_STATE_INVALID":
+                raise
+            release_gate(directory)
+            return dict(status="cleared_invalid_gate")
+        if owner is None or owner["session"] == args.session:
+            raise NativeError("INTERRUPTED_OWNERSHIP_REQUIRED")
+    owner_session = owner["session"]
+    result = dict(status="recovered_no_pending", owner=owner_session, commits=[])
+    with state_lock(home, owner_session) as (state, path):
+        with gate_lock(home):
+            current = active_request(home)
+            if current is None or current["session"] != owner_session:
+                raise NativeError("INTERRUPTED_OWNERSHIP_CHANGED")
+        if state is None:
+            result["status"] = "recovered_owner_state_missing"
+        elif has_pending_capture(state):
+            history = state.setdefault("snapshot_resolutions", [])
+            if len(history) >= MAX_PENDING:
+                raise NativeError("SNAPSHOT_RESOLUTION_LIMIT")
+            observed_head = git(
+                Path(profile["project"]),
+                "rev-parse",
+                "--verify",
+                "HEAD",
+                allow_failure=True,
+            ).strip()
+            record = dict(
+                owner=owner_session,
+                taken_over_by=args.session,
+                observed_head=observed_head or None,
+                verification=args.verification,
+                status="not_captured",
+                snapshots=dict(state["snapshots"]),
+                commits=[
+                    key
+                    for key, pending in state["commits"].items()
+                    if pending["status"] == "pending"
+                ],
+            )
+            state["snapshots"] = {}
+            for key in record["commits"]:
+                state["commits"][key].update(status="not_captured", in_flight=False)
+            history.append(record)
+            atomic_write(path, encode(state))
+            result["status"] = "recovered"
+            result.update(
+                commits=record["commits"],
+                snapshots=list(record["snapshots"]),
+                observed_head=record["observed_head"],
+                head_unavailable=observed_head == "",
+            )
+        with gate_lock(home) as directory:
+            release_gate(directory)
+    return result
+
+
+def main():
+    parser = ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "operation",
+        choices=(
+            "create",
+            "execute-commit",
+            "hook",
+            "prepare",
+            "retry",
+            "request",
+            "resolve-snapshot",
+            "skip",
+            "takeover",
+            "status",
+            "disable",
+            "run",
+        ),
+    )
+    parser.add_argument("--home", required=True)
+    parser.add_argument("--project")
+    parser.add_argument("--folder")
+    parser.add_argument("--release-sha256")
+    parser.add_argument("--session")
+    parser.add_argument("--turn")
+    parser.add_argument("--commit")
+    parser.add_argument("--snapshot")
+    parser.add_argument("--payload-sha256")
+    parser.add_argument(
+        "--verification",
+        choices=(
+            "authoritative-path-inspected",
+            "command-stopped-and-history-inspected",
+        ),
+    )
+    parser.add_argument(
+        "--reason", choices=("no_meaningful_work", "user_requested_no_capture")
+    )
+    args, extra = parser.parse_known_args()
+    if args.operation == "create":
+        if extra or not all((args.project, args.folder, args.release_sha256)):
+            raise NativeError("CREATE_ARGUMENTS_REQUIRED")
+        result = create_profile(args)
+    else:
+        home, profile = load_profile(args.home)
+        if extra and args.operation != "run":
+            raise NativeError("ARGUMENTS_INVALID")
+        if args.operation == "execute-commit":
+            return execute_commit(home, profile, args)
+        if args.operation == "hook":
+            result = hook(home, profile, input_json())
+        elif args.operation in ("prepare", "retry"):
+            result = (
+                prepare_commit(home, args)
+                if args.operation == "prepare"
+                else review_retry(home, args)
+            )
+        elif args.operation == "skip":
+            with state_lock(home, args.session) as (state, path):
+                if state is None or state["turn"] != args.turn or args.reason is None:
+                    raise NativeError("TURN_OR_REASON_INVALID")
+                if state["disposition"] == "saved":
+                    raise NativeError("SESSION_ALREADY_SAVED")
+                if state.get("session_request") or state.get("session_recovery"):
+                    raise NativeError("ATTEMPTED_WRITE_CANNOT_BE_POLICY_SKIPPED")
+                state.update(disposition="skipped_by_policy", skip_reason=args.reason)
+                atomic_write(path, encode(state))
+                result = {"status": "skipped_by_policy"}
+        elif args.operation == "takeover":
+            result = takeover(home, profile, args)
+        elif args.operation == "resolve-snapshot":
+            if args.verification != "command-stopped-and-history-inspected":
+                raise NativeError("TOOL_COMPLETION_VERIFICATION_REQUIRED")
+            note = ""
+            with state_lock(home, args.session) as (state, path):
+                if not state or args.snapshot not in state["snapshots"]:
+                    raise NativeError("SNAPSHOT_UNAVAILABLE")
+                history = state.setdefault("snapshot_resolutions", [])
+                if len(history) >= MAX_PENDING:
+                    raise NativeError("SNAPSHOT_RESOLUTION_LIMIT")
+                snapshot = state["snapshots"].pop(args.snapshot)
+                history.append(
+                    dict(
+                        snapshot=args.snapshot,
+                        before=snapshot,
+                        observed_head=git(
+                            Path(profile["project"]),
+                            "rev-parse",
+                            "--verify",
+                            "HEAD",
+                            allow_failure=True,
+                        ).strip()
+                        or None,
+                        verification=args.verification,
+                        status="not_captured",
+                    )
+                )
+                atomic_write(path, encode(state))
+                note = settle_gate(home, args.session, state)
+            result = {"status": "not_captured", "snapshot": args.snapshot}
+            if note:
+                result["note"] = note.lstrip("\n")
+        elif args.operation in ("status", "request"):
+            with state_lock(home, args.session) as (state, _path):
+                if args.operation == "request":
+                    result = (state or {}).get(
+                        "session_request", {"status": "request_unavailable"}
+                    )
+                else:
+                    result = (
+                        json.loads(encode(state))
+                        if state
+                        else {"status": "session_unavailable"}
+                    )
+                    result.pop("session_request", None)
+                    for pending in result.get("commits", {}).values():
+                        pending.pop("request", None)
+                        pending.pop("native_arguments", None)
+                    result["gate"] = active_request(home)
+        elif args.operation == "disable":
+            with gate_lock(home):
+                profile["active"] = False
+                atomic_write(home / "capture-profile.json", encode(profile))
+                release_gate(home / "capture-state")
+            for name in OWNED:
+                (home / name).unlink()
+            result = {"status": "disabled", "scope": "isolated-profile"}
+        else:
+            if any(
+                x
+                in (
+                    "-C",
+                    "--cd",
+                    "-c",
+                    "--config",
+                    "-p",
+                    "--profile",
+                    "--enable",
+                    "--disable",
+                )
+                or x.startswith(
+                    (
+                        "-C",
+                        "-c",
+                        "-p",
+                        "--cd=",
+                        "--config=",
+                        "--profile=",
+                        "--enable=",
+                        "--disable=",
+                    )
+                )
+                for x in extra
+            ):
+                raise NativeError("PROFILE_OVERRIDE_REFUSED")
+            os.chdir(profile["project"])
+            runtime_home = home / "runtime-home"
+            if runtime_home.is_symlink() or not runtime_home.is_dir():
+                raise NativeError("RUNTIME_HOME_INVALID")
+            environment = dict(os.environ, CODEX_HOME=str(home), HOME=str(runtime_home))
+            environment.update(
+                {
+                    "XDG_" + kind + "_HOME": str(runtime_home / relative)
+                    for kind, relative in (
+                        ("CONFIG", ".config"),
+                        ("DATA", ".local/share"),
+                        ("STATE", ".local/state"),
+                        ("CACHE", ".cache"),
+                    )
+                }
+            )
+            os.execvpe("codex", ["codex", *extra], environment)
+    print(json.dumps(result))
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        raise SystemExit(main())
+    except NativeError as error:
+        print("obsidian-mcp-native: " + str(error), file=sys.stderr)
+        raise SystemExit(64)
+    except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError):
+        print(
+            "obsidian-mcp-native: operation refused or capture unresolved; inspect profile, event and recovery state",
+            file=sys.stderr,
+        )
+        raise SystemExit(64)
