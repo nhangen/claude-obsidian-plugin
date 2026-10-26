@@ -189,41 +189,20 @@ launch_profile() {
     unset "$CLIENT_RAW_TOKEN_VARIABLE"
   fi
   unset CLIENT_RAW_TOKEN_VARIABLE
-  if [ "$profile" = "read" ]; then
-    local client_root runtime node_bin
-    client_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)" || client_error
-    runtime="$(python3 "$client_root/lib/verify-read-bridge.py" --client-root "$client_root")" || client_error
-    node_bin="$(command -v node)" || client_error
-    case "$endpoint" in
-      http://*)
-        exec "$node_bin" "$runtime" "$endpoint" --allow-http \
-          --preauthenticated-http \
-          --header "Authorization:\${$authorization_var}" \
-          --header "Origin:\${OBSIDIAN_MCP_${upper}_ORIGIN}" --silent
-        ;;
-    esac
-    exec "$node_bin" "$runtime" "$endpoint" \
-      --preauthenticated-http \
-      --header "Authorization:\${$authorization_var}" \
-      --header "Origin:\${OBSIDIAN_MCP_${upper}_ORIGIN}" --silent
-  fi
-  local npx_bin="${OBSIDIAN_MCP_NPX-npx}"
-  [ -n "$npx_bin" ] || client_error
-  if [ "$npx_bin" = "npx" ]; then
-    npx_bin="$(command -v npx)" || client_error
-  else
-    [ -x "$npx_bin" ] || client_error
-  fi
+  local client_root runtime node_bin
+  client_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)" || client_error
+  runtime="$(python3 "$client_root/lib/verify-read-bridge.py" --client-root "$client_root")" || client_error
+  node_bin="$(command -v node)" || client_error
   case "$endpoint" in
     http://*)
-      exec "$npx_bin" -y mcp-remote@0.14.3 "$endpoint" --allow-http \
+      exec "$node_bin" "$runtime" "$endpoint" --allow-http \
+        --preauthenticated-http \
         --header "Authorization:\${$authorization_var}" \
-        --header "Origin:\${OBSIDIAN_MCP_${upper}_ORIGIN}" \
-        --silent
+        --header "Origin:\${OBSIDIAN_MCP_${upper}_ORIGIN}" --silent
       ;;
   esac
-  exec "$npx_bin" -y mcp-remote@0.14.3 "$endpoint" \
+  exec "$node_bin" "$runtime" "$endpoint" \
+    --preauthenticated-http \
     --header "Authorization:\${$authorization_var}" \
-    --header "Origin:\${OBSIDIAN_MCP_${upper}_ORIGIN}" \
-    --silent
+    --header "Origin:\${OBSIDIAN_MCP_${upper}_ORIGIN}" --silent
 }

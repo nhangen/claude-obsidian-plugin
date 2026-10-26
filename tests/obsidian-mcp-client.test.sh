@@ -278,11 +278,12 @@ run_profile write TEST_WRITE_TOKEN write-secret "$write_output"
 read_entry="$(python3 -c 'import pathlib,sys; print(pathlib.Path(sys.argv[1]).resolve())' "$bundle/vendor/mcp-remote-read/mcp-remote-read.mjs")"
 grep -qx "$read_entry" "$read_output/argv" || fail "read launcher bypassed the verified local bridge"
 ! grep -qx 'mcp-remote@0.14.3' "$read_output/argv" || fail "read launcher fell back to npx"
-grep -qx 'mcp-remote@0.14.3' "$write_output/argv" || fail "write launcher changed its upstream bridge"
+! grep -qx 'mcp-remote@0.14.3' "$write_output/argv" || fail "write launcher fell back to npx"
+grep -qx "$read_entry" "$write_output/argv" || fail "write launcher bypassed the verified local bridge"
 grep -qx 'http://127.0.0.1:3010/mcp' "$read_output/argv" || fail "read endpoint missing"
 grep -qx -- '--allow-http' "$read_output/argv" || fail "explicit local HTTP was not passed through"
 grep -qx -- '--preauthenticated-http' "$read_output/argv" || fail "read launcher did not select preauthenticated HTTP mode"
-! grep -qx -- '--preauthenticated-http' "$write_output/argv" || fail "write launcher selected read-only preauthenticated mode"
+grep -qx -- '--preauthenticated-http' "$write_output/argv" || fail "write launcher did not select preauthenticated HTTP mode"
 grep -qx 'https://mcp.example.invalid/mcp' "$write_output/argv" || fail "write endpoint missing"
 ! grep -qx -- '--allow-http' "$write_output/argv" || fail "HTTPS launcher enabled HTTP bridge"
 grep -qx 'OBSIDIAN_MCP_READ_AUTHORIZATION=Bearer read-secret' "$read_output/env" || fail "read authorization was not profile-scoped"
@@ -409,6 +410,14 @@ for scenario in missing_bridge changed_bridge changed_provenance nonexecutable_h
   fi
   test ! -e "$output/argv" || fail "$scenario reached a bridge process"
   ! grep -Fq 'read-secret' "$output/stdout" "$output/stderr" || fail "$scenario printed a credential"
+
+  write_fail_output="$tmp/$scenario-write-launch"
+  mkdir -p "$write_fail_output"
+  if HOME="$fake_home" PATH="$fake_bin:/usr/bin:/bin" OBSIDIAN_MCP_TEST_DIR="$write_fail_output" OBSIDIAN_MCP_NPX="$fake_bin/npx" OBSIDIAN_MCP_WRITE_ENDPOINT='https://mcp.example.invalid/mcp' OBSIDIAN_MCP_WRITE_CREDENTIAL_PROVIDER=env OBSIDIAN_MCP_WRITE_TOKEN_ENV=TEST_WRITE_TOKEN TEST_WRITE_TOKEN=write-secret "$broken/bin/obsidian-mcp-write" >"$write_fail_output/stdout" 2>"$write_fail_output/stderr"; then
+    fail "$scenario executed an unverified bridge on write"
+  fi
+  test ! -e "$write_fail_output/argv" || fail "$scenario reached a bridge process on write"
+  ! grep -Fq 'write-secret' "$write_fail_output/stdout" "$write_fail_output/stderr" || fail "$scenario printed a write credential"
 done
 
 extra_bundle="$tmp/unexpected-output-symlink"
@@ -536,5 +545,152 @@ for mutation in captured-session read-allowlist clear-session preauthenticated-h
   fi
   grep -Eq "$expected" "$tmp/$mutation.out" || fail "$mutation failed outside its regression assertion"
 done
+
+python3 - "$ROOT" "$bundle" "$fake_bin" "$fake_home" <<'PY'
+import json
+import os
+import re
+import subprocess
+import sys
+import tempfile
+import tomllib
+from pathlib import Path
+
+root = Path(sys.argv[1]).resolve()
+bundle = Path(sys.argv[2]).resolve()
+fake_bin = Path(sys.argv[3]).resolve()
+fake_home = Path(sys.argv[4]).resolve()
+
+# 1. Extract configs from documentation
+configs = {}
+
+# Codex TOML
+codex_md = (root / "integrations/codex/README.md").read_text()
+toml_match = re.search(r"```toml\n(.*?)\n```", codex_md, re.DOTALL)
+assert toml_match, "codex toml not found"
+codex_cfg = tomllib.loads(toml_match.group(1))
+configs["codex"] = {
+    "read": codex_cfg["mcp_servers"]["obsidian"]["env"],
+    "write": codex_cfg["mcp_servers"]["obsidian-write"]["env"],
+}
+
+# Claude JSON
+claude_md = (root / "integrations/claude/README.md").read_text()
+json_matches = re.findall(r"```json\n(.*?)\n```", claude_md, re.DOTALL)
+claude_http_cfg = None
+for m in json_matches:
+    try:
+        data = json.loads(m)
+        servers = data.get("mcpServers", {})
+        if "obsidian" in servers and "OBSIDIAN_MCP_READ_ENDPOINT" in servers["obsidian"].get("env", {}):
+            claude_http_cfg = data
+            break
+    except Exception:
+        pass
+assert claude_http_cfg, "claude streamable http json config not found"
+configs["claude"] = {
+    "read": claude_http_cfg["mcpServers"]["obsidian"]["env"],
+    "write": claude_http_cfg["mcpServers"]["obsidian-write"]["env"],
+}
+
+# OpenCode JSONC
+opencode_md = (root / "integrations/opencode/README.md").read_text()
+jsonc_match = re.search(r"```jsonc\n(.*?)\n```", opencode_md, re.DOTALL)
+assert jsonc_match, "opencode jsonc not found"
+cleaned = re.sub(r"(?<!:)//.*$", "", jsonc_match.group(1), flags=re.MULTILINE)
+opencode_cfg = json.loads(cleaned)
+configs["opencode"] = {
+    "read": opencode_cfg["mcp"]["obsidian"]["env"],
+    "write": opencode_cfg["mcp"]["obsidian-write"]["env"],
+}
+
+# 2. Execute each extracted config with the launcher
+base_env = dict(os.environ)
+base_env["PATH"] = f"{fake_bin}:/usr/bin:/bin"
+base_env["HOME"] = str(fake_home)
+
+with tempfile.TemporaryDirectory() as td:
+    tpath = Path(td)
+    for host, env_pair in configs.items():
+        for profile in ("read", "write"):
+            host_env = dict(base_env)
+            host_env.update(env_pair[profile])
+            test_dir = tpath / f"{host}-{profile}"
+            test_dir.mkdir()
+            host_env["OBSIDIAN_MCP_TEST_DIR"] = str(test_dir)
+            
+            launcher = bundle / f"bin/obsidian-mcp-{profile}"
+            proc = subprocess.run([str(launcher)], env=host_env, capture_output=True, text=True)
+            if proc.returncode != 0:
+                print(f"FAILED {host} {profile} with returncode {proc.returncode}")
+                print("stdout:", proc.stdout)
+                print("stderr:", proc.stderr)
+                sys.exit(1)
+            
+            # Verify child process received Bearer auth header
+            env_file = test_dir / "env"
+            assert env_file.is_file(), f"missing env file for {host} {profile}"
+            upper = profile.upper()
+            assert f"OBSIDIAN_MCP_{upper}_AUTHORIZATION=Bearer " in env_file.read_text(), f"missing authorization in {host} {profile}"
+
+# 3. Native create and run walkthrough
+with tempfile.TemporaryDirectory() as td:
+    tpath = Path(td).resolve()
+    repo = tpath / "walkthrough-repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", str(repo)], check=True, capture_output=True)
+    git_env = {
+        **os.environ,
+        "GIT_AUTHOR_NAME": "Nathan Hangen",
+        "GIT_AUTHOR_EMAIL": "nhangen@gmail.com",
+        "GIT_COMMITTER_NAME": "Nathan Hangen",
+        "GIT_COMMITTER_EMAIL": "nhangen@gmail.com",
+    }
+    (repo / "README.md").write_text("# Test Walkthrough\n")
+    subprocess.run(["git", "-C", str(repo), "add", "."], check=True)
+    subprocess.run(["git", "-C", str(repo), "commit", "-m", "init"], env=git_env, check=True, capture_output=True)
+
+    release_json = bundle / "release.json"
+    import hashlib
+    release_sha = hashlib.sha256(release_json.read_bytes()).hexdigest()
+
+    profile_home = tpath / "walkthrough-profile"
+    native_bin = bundle / "bin/obsidian-mcp-native"
+    create_proc = subprocess.run([
+        sys.executable, str(native_bin), "create",
+        "--home", str(profile_home),
+        "--project", str(repo),
+        "--folder", "Sessions/Projects",
+        "--release-sha256", release_sha
+    ], capture_output=True, text=True)
+    assert create_proc.returncode == 0, f"create failed: {create_proc.stderr}"
+    created = json.loads(create_proc.stdout)
+    assert created.get("status") == "created"
+    launch_command = created.get("launch_command")
+    assert launch_command, "missing launch_command in create output"
+
+    mock_codex = fake_bin / "codex"
+    mock_codex.write_text("#!/bin/sh\nprintf '%s\\n' \"$PWD\" >\"$CODEX_HOME/codex-pwd\"\nenv | LC_ALL=C sort >\"$CODEX_HOME/codex-env\"\nexit 0\n")
+    mock_codex.chmod(0o755)
+
+    import shlex
+    cmd_args = shlex.split(launch_command)
+    run_proc = subprocess.run(cmd_args, env=base_env, capture_output=True, text=True)
+    assert run_proc.returncode == 0, f"run failed: {run_proc.stderr}"
+    assert (profile_home / "codex-pwd").read_text().strip() == str(repo), "codex did not run in project repo"
+    codex_env = (profile_home / "codex-env").read_text()
+    assert f"CODEX_HOME={profile_home}" in codex_env, "CODEX_HOME not set to profile"
+    assert f"HOME={profile_home}/runtime-home" in codex_env, "HOME not isolated to runtime-home"
+
+    test_session = hashlib.sha256(b"walkthrough-session").hexdigest()
+    diag_proc = subprocess.run([
+        sys.executable, str(native_bin), "request",
+        "--home", str(profile_home),
+        "--session", test_session
+    ], capture_output=True, text=True)
+    assert diag_proc.returncode == 0, f"diag request failed: {diag_proc.stderr}"
+    diag_data = json.loads(diag_proc.stdout)
+    assert diag_data.get("status") == "request_unavailable"
+PY
 
 printf 'PASS obsidian MCP client bundle\n'

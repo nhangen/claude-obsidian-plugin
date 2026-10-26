@@ -19,17 +19,19 @@ Add the `obsidian` and `obsidian-write` MCP servers to your OpenCode configurati
     "obsidian": {
       "command": "/prefix/current/bin/obsidian-mcp-read",
       "env": {
-        "OBSIDIAN_MCP_READ_URL": "https://mcp.internal.example/mcp",
+        "OBSIDIAN_MCP_READ_ENDPOINT": "https://mcp.internal.example/mcp",
         "OBSIDIAN_MCP_READ_CREDENTIAL_PROVIDER": "env",
-        "OBSIDIAN_MCP_READ_TOKEN": "JWT_TOKEN_WITH_VAULT_READ"
+        "OBSIDIAN_MCP_READ_TOKEN_ENV": "MY_OBSIDIAN_READ_TOKEN",
+        "MY_OBSIDIAN_READ_TOKEN": "JWT_TOKEN_WITH_VAULT_READ"
       }
     },
     "obsidian-write": {
       "command": "/prefix/current/bin/obsidian-mcp-write",
       "env": {
-        "OBSIDIAN_MCP_WRITE_URL": "https://mcp.internal.example/mcp",
+        "OBSIDIAN_MCP_WRITE_ENDPOINT": "https://mcp.internal.example/mcp",
         "OBSIDIAN_MCP_WRITE_CREDENTIAL_PROVIDER": "env",
-        "OBSIDIAN_MCP_WRITE_TOKEN": "JWT_TOKEN_WITH_VAULT_WRITE"
+        "OBSIDIAN_MCP_WRITE_TOKEN_ENV": "MY_OBSIDIAN_WRITE_TOKEN",
+        "MY_OBSIDIAN_WRITE_TOKEN": "JWT_TOKEN_WITH_VAULT_WRITE"
       }
     }
   }

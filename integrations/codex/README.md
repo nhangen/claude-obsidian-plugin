@@ -6,7 +6,7 @@ Connect OpenAI Codex CLI to Obsidian MCP for vault search, resource browsing, me
 
 - **Codex CLI**: 0.163.0 or newer for native hook-based capture; 0.135.0 or newer for skill-driven capture.
 - **Node.js**: 22 or newer for Streamable HTTP read bridge / launchers; Node 20+ for stdio.
-- **Python**: 3.10 or newer for native capture execution and metadata parsing.
+- **Python**: 3.11 or newer for native capture execution and metadata parsing.
 
 ## Connection Setup (`config.toml`)
 
@@ -18,18 +18,20 @@ command = "/prefix/current/bin/obsidian-mcp-read"
 default_tools_approval_mode = "auto"
 
 [mcp_servers.obsidian.env]
-OBSIDIAN_MCP_READ_URL = "https://mcp.internal.example/mcp"
+OBSIDIAN_MCP_READ_ENDPOINT = "https://mcp.internal.example/mcp"
 OBSIDIAN_MCP_READ_CREDENTIAL_PROVIDER = "env"
-OBSIDIAN_MCP_READ_TOKEN = "JWT_TOKEN_WITH_VAULT_READ"
+OBSIDIAN_MCP_READ_TOKEN_ENV = "MY_OBSIDIAN_READ_TOKEN"
+MY_OBSIDIAN_READ_TOKEN = "JWT_TOKEN_WITH_VAULT_READ"
 
 [mcp_servers."obsidian-write"]
 command = "/prefix/current/bin/obsidian-mcp-write"
 default_tools_approval_mode = "auto"
 
-[mcp_servers."obsidian-write.env"]
-OBSIDIAN_MCP_WRITE_URL = "https://mcp.internal.example/mcp"
+[mcp_servers."obsidian-write".env]
+OBSIDIAN_MCP_WRITE_ENDPOINT = "https://mcp.internal.example/mcp"
 OBSIDIAN_MCP_WRITE_CREDENTIAL_PROVIDER = "env"
-OBSIDIAN_MCP_WRITE_TOKEN = "JWT_TOKEN_WITH_VAULT_WRITE"
+OBSIDIAN_MCP_WRITE_TOKEN_ENV = "MY_OBSIDIAN_WRITE_TOKEN"
+MY_OBSIDIAN_WRITE_TOKEN = "JWT_TOKEN_WITH_VAULT_WRITE"
 ```
 
 ## Scoped Host Authorization
@@ -49,9 +51,24 @@ For automated session and commit capture without relying on the Claude plugin:
    python3 /prefix/current/bin/obsidian-mcp-native create \
      --home ~/.codex/profiles/obsidian-capture \
      --project /path/to/clean/project \
-     --client-dir /prefix/current
+     --folder "Vault/Folder/Hint" \
+     --release-sha256 <bundle-release-sha256>
    ```
-2. Launch Codex using the profile launcher emitted in that directory.
+   Creation outputs a JSON result with `status: "created"` and `launch_command`:
+   ```json
+   {
+     "status": "created",
+     "home": "/path/to/.codex/profiles/obsidian-capture",
+     "writer": "mcp",
+     "scope": "isolated-profile",
+     "launch_command": "python3 /prefix/current/bin/obsidian-mcp-native run --home /path/to/.codex/profiles/obsidian-capture",
+     "release_id": "..."
+   }
+   ```
+2. Launch Codex using the `launch_command` returned above (any additional options are forwarded directly to `codex`):
+   ```bash
+   python3 /prefix/current/bin/obsidian-mcp-native run --home ~/.codex/profiles/obsidian-capture
+   ```
 3. **Execution Flow**:
    - `UserPromptSubmit` supplies a turn-specific session save identity.
    - `PreToolUse` intercepts single `git commit` commands and rewrites them through a local bundled executor.
@@ -76,13 +93,13 @@ If running Codex in an existing profile without native hooks:
 ## Diagnostics & Troubleshooting
 
 - Inspect status and pending events without vault access:
-  ```bash
-  /prefix/current/bin/obsidian-mcp-native status --home <profile> --session <key>
-  ```
+   ```bash
+   /prefix/current/bin/obsidian-mcp-native status --home <profile> --session <key>
+   ```
 - Inspect original request payload for retry:
-  ```bash
-  /prefix/current/bin/obsidian-mcp-native request --session <key>
-  ```
+   ```bash
+   /prefix/current/bin/obsidian-mcp-native request --home <profile> --session <key>
+   ```
 - Cleanly disable native capture:
   ```bash
   /prefix/current/bin/obsidian-mcp-native disable --home <profile>
