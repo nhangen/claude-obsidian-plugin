@@ -14,11 +14,12 @@ Add the `obsidian` and `obsidian-write` MCP servers to your OpenCode configurati
 
 ```jsonc
 {
-  "$schema": "https://opencode.ai/schema/opencode.json",
+  "$schema": "https://opencode.ai/config.json",
   "mcp": {
     "obsidian": {
-      "command": "/prefix/current/bin/obsidian-mcp-read",
-      "env": {
+      "type": "local",
+      "command": ["/prefix/current/bin/obsidian-mcp-read"],
+      "environment": {
         "OBSIDIAN_MCP_READ_ENDPOINT": "https://mcp.internal.example/mcp",
         "OBSIDIAN_MCP_READ_CREDENTIAL_PROVIDER": "env",
         "OBSIDIAN_MCP_READ_TOKEN_ENV": "MY_OBSIDIAN_READ_TOKEN",
@@ -26,8 +27,9 @@ Add the `obsidian` and `obsidian-write` MCP servers to your OpenCode configurati
       }
     },
     "obsidian-write": {
-      "command": "/prefix/current/bin/obsidian-mcp-write",
-      "env": {
+      "type": "local",
+      "command": ["/prefix/current/bin/obsidian-mcp-write"],
+      "environment": {
         "OBSIDIAN_MCP_WRITE_ENDPOINT": "https://mcp.internal.example/mcp",
         "OBSIDIAN_MCP_WRITE_CREDENTIAL_PROVIDER": "env",
         "OBSIDIAN_MCP_WRITE_TOKEN_ENV": "MY_OBSIDIAN_WRITE_TOKEN",

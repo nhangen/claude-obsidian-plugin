@@ -599,9 +599,17 @@ jsonc_match = re.search(r"```jsonc\n(.*?)\n```", opencode_md, re.DOTALL)
 assert jsonc_match, "opencode jsonc not found"
 cleaned = re.sub(r"(?<!:)//.*$", "", jsonc_match.group(1), flags=re.MULTILINE)
 opencode_cfg = json.loads(cleaned)
+assert opencode_cfg["$schema"] == "https://opencode.ai/config.json"
+for profile, name in (("read", "obsidian"), ("write", "obsidian-write")):
+    server = opencode_cfg["mcp"][name]
+    assert server["type"] == "local", f"OpenCode {name} must declare a local server"
+    assert server["command"] == [f"/prefix/current/bin/obsidian-mcp-{profile}"], f"invalid OpenCode {name} command"
+    assert set(server) == {"type", "command", "environment"}, f"unsupported OpenCode {name} fields"
+    assert isinstance(server["environment"], dict)
+    assert all(isinstance(key, str) and isinstance(value, str) for key, value in server["environment"].items())
 configs["opencode"] = {
-    "read": opencode_cfg["mcp"]["obsidian"]["env"],
-    "write": opencode_cfg["mcp"]["obsidian-write"]["env"],
+    "read": opencode_cfg["mcp"]["obsidian"]["environment"],
+    "write": opencode_cfg["mcp"]["obsidian-write"]["environment"],
 }
 
 # 2. Execute each extracted config with the launcher
@@ -620,7 +628,11 @@ with tempfile.TemporaryDirectory() as td:
             host_env["OBSIDIAN_MCP_TEST_DIR"] = str(test_dir)
             
             launcher = bundle / f"bin/obsidian-mcp-{profile}"
-            proc = subprocess.run([str(launcher)], env=host_env, capture_output=True, text=True)
+            command = [str(launcher)]
+            if host == "opencode":
+                name = "obsidian" if profile == "read" else "obsidian-write"
+                command = [part.replace("/prefix/current/", f"{bundle}/", 1) for part in opencode_cfg["mcp"][name]["command"]]
+            proc = subprocess.run(command, env=host_env, capture_output=True, text=True)
             if proc.returncode != 0:
                 print(f"FAILED {host} {profile} with returncode {proc.returncode}")
                 print("stdout:", proc.stdout)
