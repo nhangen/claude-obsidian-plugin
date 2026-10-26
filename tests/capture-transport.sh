@@ -107,6 +107,26 @@ test_unknown() {
     || fail "unknown: capture state touched for a typo"
 }
 
+# A configured empty value must be rejected like a typo, not silently treated
+# as the legacy default (#255 review): the reader's absent/present status is
+# the only distinction, and present-but-empty is operator error.
+test_empty_configured() {
+  for fixture in 'capture_transport:' 'capture_transport: ""'; do
+    write_config "$fixture"
+    ERR="$(run_hook "${CASE_DIR}/state-empty")"
+    [ ! -f "${CASE_DIR}/nohup-args.txt" ] \
+      || fail "empty [$fixture]: summarizer launched"
+    grep -q 'unknown capture_transport <empty>' "$ERR" \
+      || fail "empty [$fixture]: not named on stderr (stderr: $ERR)"
+    [ ! -d "${CASE_DIR}/state-empty/claude-obsidian/session-capture" ] \
+      || fail "empty [$fixture]: capture state touched"
+    # Explicit invocation is refused too: a bad enum never becomes a writer.
+    run_hook "${CASE_DIR}/state-empty-xcap" --capture >/dev/null
+    [ ! -f "${CASE_DIR}/nohup-args.txt" ] \
+      || fail "empty [$fixture]: explicit capture ran on a rejected value"
+  done
+}
+
 test_disabled_capture_honored() {
   write_config 'capture_transport: disabled'
   run_hook "${CASE_DIR}/state-xcap" --capture >/dev/null
@@ -120,6 +140,7 @@ test_bootstrap_pin() {
 
 test_disabled_stop
 test_unknown
+test_empty_configured
 test_disabled_capture_honored
 test_bootstrap_pin
 

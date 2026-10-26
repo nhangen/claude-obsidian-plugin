@@ -58,14 +58,21 @@ esac
 #               lost, because no capture was started. Explicit --capture/--retry
 #               invocations are still honored, so the handoff stays reversible.
 #
-# Anything else fails loud per write-side policy: an unknown value skips
-# capture with a diagnostic naming it, and never falls back to writing. The
-# diagnostic is stderr-only and the exit stays 0 — a hook must never error the
-# session for a config choice (#1442 session semantics), but it must not be
-# silent, either.
-TRANSPORT=$(OBSIDIAN_LOCAL_MD="$CONFIG_FILE" obsidian_config_value capture_transport || true)
+# Anything else fails loud per write-side policy: an unknown or configured-
+# empty value skips capture with a diagnostic naming it, and never falls back
+# to writing — an explicitly empty capture_transport is operator error, not the
+# default. Only a genuinely absent key defaults to legacy. The diagnostic is
+# stderr-only and the exit stays 0 — a hook must never error the session for a
+# config choice (#1442 session semantics), but it must not be silent, either.
+# The reader's exit status is the absent/present distinction, so it is kept:
+# a found-but-empty key returns success with an empty value (#255 review) and
+# must land in the reject arm below, not in legacy.
+TRANSPORT=legacy
+if TRANSPORT_READ=$(OBSIDIAN_LOCAL_MD="$CONFIG_FILE" obsidian_config_value capture_transport); then
+  TRANSPORT="$TRANSPORT_READ"
+fi
 case "$TRANSPORT" in
-  ''|legacy) ;;
+  legacy) ;;
   disabled)
     if [ "$CAPTURE_REQUESTED" = false ]; then
       printf 'session-save: automatic session capture is OFF (capture_transport: disabled)\n' >&2
@@ -73,7 +80,7 @@ case "$TRANSPORT" in
     fi
     ;;
   *)
-    printf 'session-save: unknown capture_transport %s (use legacy or disabled); skipping capture\n' "$TRANSPORT" >&2
+    printf 'session-save: unknown capture_transport %s (use legacy or disabled); skipping capture\n' "${TRANSPORT:-<empty>}" >&2
     exit 0
     ;;
 esac
