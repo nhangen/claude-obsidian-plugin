@@ -6,3 +6,7 @@ obsidian.local.md
 
 # subagent-driven-development scratch reports
 .sdd-*.md
+
+# Python bytecode
+__pycache__/
+*.pyc

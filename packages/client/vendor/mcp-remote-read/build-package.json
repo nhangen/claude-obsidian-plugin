@@ -1,0 +1,12 @@
+{
+  "name": "obsidian-mcp-read-bridge-build",
+  "private": true,
+  "version": "1.0.0",
+  "dependencies": {
+    "esbuild": "0.25.1",
+    "express": "4.21.2",
+    "open": "10.1.0",
+    "strict-url-sanitise": "0.0.1",
+    "undici": "7.12.0"
+  }
+}

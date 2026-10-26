@@ -1,0 +1,553 @@
+diff --git package/dist/chunk-CGVEK4Z7.js package/dist/chunk-CGVEK4Z7.js
+index 84ab6fc..e70479e 100644
+--- package/dist/chunk-CGVEK4Z7.js
++++ package/dist/chunk-CGVEK4Z7.js
+@@ -15654,6 +15654,7 @@ var SdkError = class extends Error {
+     stampErrorBrands(this, new.target);
+   }
+ };
++var requestSessionIdForError = Symbol("requestSessionIdForError");
+ var SdkHttpError = class extends SdkError {
+   static {
+     Object.defineProperty(this, "mcpBrand", { value: "mcp.SdkHttpError" });
+@@ -31387,6 +31388,7 @@ var StreamableHTTPClientTransport = class {
+       this._applyBodyDerivedHeaders(headers, message);
+       const isHandshake = Array.isArray(message) ? message.some((m) => isInitializeRequest(m)) : isInitializeRequest(message);
+       if (isHandshake) headers.delete("mcp-session-id");
++      const requestSessionId = headers.get("mcp-session-id") || void 0;
+       if (options?.headers !== void 0) for (const [name, value] of Object.entries(options.headers)) {
+         if (RESERVED_REQUEST_HEADER_NAMES.has(name.toLowerCase())) continue;
+         headers.set(name, value);
+@@ -31461,11 +31463,13 @@ var StreamableHTTPClientTransport = class {
+           }
+         } catch {
+         }
+-        throw new SdkHttpError(SdkErrorCode.ClientHttpNotImplemented, `Error POSTing to endpoint: ${text}`, {
++        const httpError = new SdkHttpError(SdkErrorCode.ClientHttpNotImplemented, `Error POSTing to endpoint: ${text}`, {
+           status: response.status,
+           statusText: response.statusText,
+           text
+         });
++        if (requestSessionId !== void 0) Object.defineProperty(httpError, requestSessionIdForError, { value: requestSessionId });
++        throw httpError;
+       }
+       if (response.status === 202) {
+         await response.text?.().catch(() => {
+@@ -32607,8 +32611,11 @@ function mcpProxy({
+     log("Error from remote server:", error51);
+     debugLog("Error from remote server", { stack: error51.stack });
+   }
+-  function isSessionExpired(error51) {
+-    return error51 instanceof SdkHttpError && error51.status === 404 && transportToServer.sessionId !== void 0;
++  function expiredSessionId(error51) {
++    return error51 instanceof SdkHttpError && error51.status === 404 ? error51[requestSessionIdForError] : void 0;
++  }
++  function isReplayableRead(message) {
++    return message.method === "tools/call" && message.params?.name === "obsidian_find_notes";
+   }
+   function postEndpoint() {
+     return transportToServer._endpoint?.href;
+@@ -32864,20 +32871,25 @@ function mcpProxy({
+     throw new Error(`the remote server asked for more input ${MAX_INPUT_REQUIRED_ROUNDS} times without answering`);
+   }
+   let reinitInFlight = null;
+-  function reinitializeSession() {
+-    if (!reinitInFlight) {
+-      reinitInFlight = doReinitializeSession().finally(() => {
+-        reinitInFlight = null;
+-      });
+-    }
+-    return reinitInFlight;
++  function reinitializeSession(expiredId = transportToServer.sessionId) {
++    const currentId = transportToServer.sessionId;
++    if (currentId !== void 0 && currentId !== expiredId) return Promise.resolve();
++    if (reinitInFlight) {
++      if (reinitInFlight.expiredId === expiredId) return reinitInFlight.promise;
++      return reinitInFlight.promise.then(() => reinitializeSession(expiredId));
++    }
++    const promise = doReinitializeSession(expiredId).finally(() => {
++      if (reinitInFlight?.promise === promise) reinitInFlight = null;
++    });
++    reinitInFlight = { expiredId, promise };
++    return promise;
+   }
+-  async function doReinitializeSession() {
++  async function doReinitializeSession(expiredId) {
+     if (!lastInitialize) {
+       throw new Error("no initialize request was seen, cannot re-establish the session");
+     }
+-    ;
+-    transportToServer._sessionId = void 0;
++    const currentId = transportToServer.sessionId;
++    if (currentId !== void 0 && currentId !== expiredId) return;
+     const id = `mcp-remote-reinit-${++reinitSeq}`;
+     const response = await new Promise((resolve, reject) => {
+       const timer = setTimeout(() => {
+@@ -32899,7 +32911,7 @@ function mcpProxy({
+     }
+     applyNegotiatedProtocolVersion(response);
+     await transportToServer.send({ jsonrpc: "2.0", method: "notifications/initialized" });
+-    log(`Re-established session ${transportToServer.sessionId ?? "(none)"} after server expiry`);
++    log("Re-established session after server expiry");
+   }
+   function startKeepAlive(intervalMs) {
+     const timer = setInterval(() => {
+@@ -32996,10 +33008,19 @@ function mcpProxy({
+     }
+     return reauthorizeInFlight;
+   }
+-  async function sendToServer(message, alreadyReauthorized = false, alreadyDiscardedToken = false) {
++  async function sendToServer(message, alreadyReauthorized = false, alreadyDiscardedToken = false, alreadyRetriedExpiredSession = false) {
+     if (sessionResumption) {
+       await sessionResumption;
+     }
++    if (reinitInFlight && isReplayableRead(message) && !alreadyRetriedExpiredSession) {
++      try {
++        await reinitInFlight.promise;
++      } catch (recoveryError) {
++        onServerError(recoveryError);
++        replyWithError(message, recoveryError);
++        return;
++      }
++    }
+     const awaitsAnswer = message.method !== void 0 && message.id !== void 0 && message.id !== null;
+     if (awaitsAnswer) pendingRequests.add(message.id);
+     const outgoing = era?.era === "modern" && awaitsAnswer ? stampLogLevel(stampModernMeta(message, clientIdentity, era.version), requestedLogLevel) : message;
+@@ -33022,7 +33043,7 @@ function mcpProxy({
+         debugLog("Rejected token mid-session", { id: message.id, method: message.method });
+         try {
+           await forgetRejectedTokens();
+-          await sendToServer(message, alreadyReauthorized, true);
++          await sendToServer(message, alreadyReauthorized, true, alreadyRetriedExpiredSession);
+         } catch (discardError) {
+           onServerError(discardError);
+           replyWithError(message, discardError);
+@@ -33034,14 +33055,15 @@ function mcpProxy({
+         debugLog("Unauthorized send, re-authorizing", { id: message.id, method: message.method });
+         try {
+           await reauthorizeOnce();
+-          await sendToServer(message, true, alreadyDiscardedToken);
++          await sendToServer(message, true, alreadyDiscardedToken, alreadyRetriedExpiredSession);
+         } catch (authError) {
+           onServerError(authError);
+           replyWithError(message, authError);
+         }
+         return;
+       }
+-      if (!isSessionExpired(error51) || message.method === "initialize") {
++      const expiredId = expiredSessionId(error51);
++      if (expiredId === void 0 || message.method === "initialize" || alreadyRetriedExpiredSession || !isReplayableRead(message)) {
+         onServerError(error51);
+         replyWithError(message, error51);
+         return;
+@@ -33049,8 +33071,8 @@ function mcpProxy({
+       log("Remote session expired, re-initializing");
+       debugLog("Remote session expired", { id: message.id, method: message.method });
+       try {
+-        await reinitializeSession();
+-        await transportToServer.send(message);
++        await reinitializeSession(expiredId);
++        await sendToServer(message, alreadyReauthorized, alreadyDiscardedToken, true);
+       } catch (retryError) {
+         onServerError(retryError);
+         replyWithError(message, retryError);
+@@ -33175,18 +33197,53 @@ async function discoverOAuthServerInfo2(serverUrl, headers = {}, tokenEndpoint)
+     wwwAuthenticateScope
+   };
+ }
+-function substituteEnvVars(value, context) {
++function formatEnvError(target, tracker) {
++  const unset = tracker?.unset ?? [];
++  const offending = tracker?.offending ?? [];
++  const literalClause = tracker?.literal ? "; it also has an unresolved ${...} placeholder" : "";
++  if (unset.length > 0 && offending.length > 0) {
++    const uNames = unset.map((n) => `'${n}'`).join(", ");
++    const oNames = offending.map((n) => `'${n}'`).join(", ");
++    return `${target} has an unresolved \${...} placeholder for ${uNames} and environment variable${offending.length > 1 ? "s" : ""} ${oNames} contain${offending.length > 1 ? "" : "s"} '\${'${literalClause}`;
++  }
++  if (offending.length > 0) {
++    const names = offending.map((n) => `'${n}'`).join(", ");
++    return `${target} environment variable${offending.length > 1 ? "s" : ""} ${names} contain${offending.length > 1 ? "" : "s"} '\${'${literalClause}`;
++  }
++  if (unset.length > 0) {
++    const names = unset.map((n) => `'${n}'`).join(", ");
++    return `${target} has an unresolved \${...} placeholder for ${names}${literalClause}`;
++  }
++  return `${target} has an unresolved \${...} placeholder`;
++}
++function substituteEnvVars(value, context, tracker) {
++  if (tracker && value.replace(/\$\{([^}]+)}/g, " ").includes("${")) {
++    tracker.literal = true;
++  }
+   return value.replace(/\$\{([^}]+)}/g, (match, envVarName) => {
+     if (!Object.hasOwn(process.env, envVarName)) {
++      if (tracker && !tracker.unset.includes(envVarName)) {
++        tracker.unset.push(envVarName);
++      }
+       log(`Warning: Environment variable '${envVarName}' not found for ${context}; leaving ${match} as it is.`);
+       return match;
+     }
+     log(`Replacing ${match} with environment value in ${context}`);
+-    return process.env[envVarName];
++    const resolved = process.env[envVarName];
++    if (typeof resolved === "string" && resolved.includes("${")) {
++      if (tracker && !tracker.offending.includes(envVarName)) {
++        tracker.offending.push(envVarName);
++      }
++    }
++    return resolved;
+   });
+ }
+ function parseJsonWithEnvVars(raw, context) {
+-  const expanded = raw.includes("${") ? substituteEnvVars(raw, context) : raw;
++  const tracker = { unset: [], offending: [] };
++  const expanded = raw.includes("${") ? substituteEnvVars(raw, context, tracker) : raw;
++  if (expanded.includes("${")) {
++    throw new Error(formatEnvError(context, tracker));
++  }
+   try {
+     return JSON.parse(expanded);
+   } catch {
+@@ -33209,7 +33266,7 @@ function mergeHeaders(...sources) {
+   }
+   return Object.fromEntries(merged.values());
+ }
+-async function connectToRemoteServer(client, serverUrl, authProvider, headers, authInitializer, transportStrategy = "http-first", protocolMode = "legacy", recursionReasons = /* @__PURE__ */ new Set()) {
++async function connectToRemoteServer(client, serverUrl, authProvider, headers, authInitializer, transportStrategy = "http-first", protocolMode = "legacy", preauthenticatedHttp = false, recursionReasons = /* @__PURE__ */ new Set()) {
+   log(`[${pid}] Connecting to remote server: ${serverUrl}`);
+   const url2 = new URL(serverUrl);
+   let sseStreamOpened = 0;
+@@ -33261,7 +33318,7 @@ async function connectToRemoteServer(client, serverUrl, authProvider, headers, a
+     } else {
+       debugLog("Starting transport directly");
+       await transport.start();
+-      if (!sseTransport) {
++      if (!sseTransport && !preauthenticatedHttp) {
+         debugLog("Creating test transport for HTTP-only connection test");
+         const testTransport = new StreamableHTTPClientTransport(url2, {
+           authProvider,
+@@ -33279,6 +33336,7 @@ async function connectToRemoteServer(client, serverUrl, authProvider, headers, a
+     log(`Connected to remote server using ${transport.constructor.name}`);
+     return transport;
+   } catch (error51) {
++    if (preauthenticatedHttp) throw error51;
+     const httpStatusCode = error51 instanceof SdkHttpError ? error51.status : null;
+     const shouldFallbackOnError = shouldAttemptFallback2 && error51 instanceof Error && (httpStatusCode === 404 || httpStatusCode === 405 || error51.message.includes("405") || error51.message.includes("Method Not Allowed") || error51.message.includes("404") || error51.message.includes("Not Found"));
+     if (shouldFallbackOnError) {
+@@ -33298,6 +33356,7 @@ async function connectToRemoteServer(client, serverUrl, authProvider, headers, a
+         authInitializer,
+         sseTransport ? "http-only" : "sse-only",
+         protocolMode,
++        preauthenticatedHttp,
+         recursionReasons
+       );
+     } else if (isRejectedAfterAuthorizing(error51)) {
+@@ -33317,6 +33376,7 @@ async function connectToRemoteServer(client, serverUrl, authProvider, headers, a
+         authInitializer,
+         transportStrategy,
+         protocolMode,
++        preauthenticatedHttp,
+         recursionReasons
+       );
+     } else if (error51 instanceof UnauthorizedError || error51 instanceof Error && error51.message.includes("Unauthorized")) {
+@@ -33347,6 +33407,7 @@ async function connectToRemoteServer(client, serverUrl, authProvider, headers, a
+           authInitializer,
+           transportStrategy,
+           protocolMode,
++          preauthenticatedHttp,
+           recursionReasons
+         );
+       }
+@@ -33371,6 +33432,7 @@ async function connectToRemoteServer(client, serverUrl, authProvider, headers, a
+           authInitializer,
+           transportStrategy,
+           protocolMode,
++          preauthenticatedHttp,
+           recursionReasons
+         );
+       }
+@@ -33397,6 +33459,7 @@ async function connectToRemoteServer(client, serverUrl, authProvider, headers, a
+           authInitializer,
+           transportStrategy,
+           protocolMode,
++          preauthenticatedHttp,
+           recursionReasons
+         );
+       } catch (authError) {
+@@ -33643,6 +33706,29 @@ async function parseCommandLineArgs(args, usage) {
+ `);
+     process.exit(0);
+   }
++  const invalidPreauthenticatedHttp = args.find((arg) => arg.startsWith("--preauthenticated-http="));
++  if (invalidPreauthenticatedHttp) {
++    throw new Error("--preauthenticated-http does not accept a value");
++  }
++  const preauthenticatedHttp = args.includes("--preauthenticated-http");
++  if (preauthenticatedHttp) {
++    const conflicting = [
++      "--auth-timeout",
++      "--authorize-param",
++      "--callback-path",
++      "--client-credentials",
++      "--client-metadata-url",
++      "--device-code",
++      "--disable-resource-parameter",
++      "--host",
++      "--resource",
++      "--static-oauth-client-info",
++      "--static-oauth-client-metadata",
++      "--token-endpoint",
++      "--use-id-token"
++    ].find((flag) => args.includes(flag));
++    if (conflicting) throw new Error(`${conflicting} cannot be used with --preauthenticated-http`);
++  }
+   const headers = {};
+   let i = 0;
+   while (i < args.length) {
+@@ -33719,6 +33805,10 @@ async function parseCommandLineArgs(args, usage) {
+       log(`Warning: Ignoring invalid transport strategy: ${strategy}. Valid values are: sse-only, http-only, sse-first, http-first`);
+     }
+   }
++  if (preauthenticatedHttp && transportIndex !== -1 && args[transportIndex + 1] !== "http-only") {
++    throw new Error("--preauthenticated-http requires --transport http-only when --transport is specified");
++  }
++  if (preauthenticatedHttp) transportStrategy = "http-only";
+   let protocolMode = "legacy";
+   const protocolIndex = args.indexOf("--protocol");
+   if (protocolIndex !== -1 && protocolIndex < args.length - 1) {
+@@ -33730,6 +33820,9 @@ async function parseCommandLineArgs(args, usage) {
+       log(`Warning: Ignoring invalid protocol mode: ${mode}. Valid values are: legacy, auto`);
+     }
+   }
++  if (preauthenticatedHttp && protocolMode !== "legacy") {
++    throw new Error("--preauthenticated-http requires the legacy protocol mode");
++  }
+   let host = process.platform === "win32" ? "127.0.0.1" : "localhost";
+   const hostIndex = args.indexOf("--host");
+   if (hostIndex !== -1 && hostIndex < args.length - 1) {
+@@ -33904,14 +33997,39 @@ async function parseCommandLineArgs(args, usage) {
+     log(`Using callback port derived from the server URL: ${defaultPort}`);
+     callbackPort = defaultPort;
+   }
+-  if (!staticOAuthClientInfo) {
+-    await invalidateMismatchedClientRegistration(serverUrlHash, buildRedirectUrl(host, callbackPort, callbackPath));
++  if (preauthenticatedHttp && specifiedPort) {
++    throw new Error("a callback port cannot be used with --preauthenticated-http");
+   }
+   if (Object.keys(headers).length > 0) {
+     log(`Using custom headers: ${Object.keys(headers).join(", ")}`);
+   }
++  const headerTrackers = /* @__PURE__ */ new Map();
+   for (const [key, value] of Object.entries(headers)) {
+-    headers[key] = substituteEnvVars(value, `header '${key}'`);
++    const tracker = { unset: [], offending: [] };
++    headers[key] = substituteEnvVars(value, `header '${key}'`, tracker);
++    headerTrackers.set(key, tracker);
++  }
++  if (preauthenticatedHttp) {
++    const authHeaders = Object.entries(headers).filter(([name]) => name.toLowerCase() === "authorization");
++    if (authHeaders.length === 0) {
++      throw new Error("--preauthenticated-http requires a non-empty Authorization: Bearer header");
++    }
++    for (const [name, authorization] of authHeaders) {
++      if (typeof authorization !== "string" || !/^Bearer [^\s]+$/.test(authorization) || authorization.includes("${")) {
++        const tracker = headerTrackers.get(name);
++        throw new Error(typeof authorization === "string" && authorization.includes("${") ? formatEnvError("--preauthenticated-http Authorization header", tracker) : "--preauthenticated-http requires a non-empty Authorization: Bearer header");
++      }
++    }
++  }
++  for (const [key, value] of Object.entries(headers)) {
++    if (preauthenticatedHttp && key.toLowerCase() === "authorization") continue;
++    if (typeof value === "string" && value.includes("${")) {
++      const tracker = headerTrackers.get(key);
++      throw new Error(formatEnvError(`header '${key}'`, tracker));
++    }
++  }
++  if (!preauthenticatedHttp && !staticOAuthClientInfo) {
++    await invalidateMismatchedClientRegistration(serverUrlHash, buildRedirectUrl(host, callbackPort, callbackPath));
+   }
+   return {
+     serverUrl,
+@@ -33936,7 +34054,8 @@ async function parseCommandLineArgs(args, usage) {
+     authTimeoutMs,
+     serverUrlHash,
+     keepAlive,
+-    protocolMode
++    protocolMode,
++    preauthenticatedHttp
+   };
+ }
+ function setupSignalHandlers(cleanup) {
+diff --git package/dist/proxy.js package/dist/proxy.js
+index b436fa9..031024a 100755
+--- package/dist/proxy.js
++++ package/dist/proxy.js
+@@ -12546,63 +12546,67 @@ var StdioServerTransport = class {
+ 
+ // src/proxy.ts
+ var canFinishAuth = (transport) => typeof transport.finishAuth === "function";
+-async function runProxy(serverUrl, callbackPath, callbackPort, specifiedPort, headers, transportStrategy = "http-first", host, staticOAuthClientMetadata, staticOAuthClientInfo, clientMetadataUrl, useIdToken, useDeviceCode, useClientCredentials, tokenEndpoint, authorizeResource, skipResourceParameter, authorizeParams, ignoredTools, authTimeoutMs, serverUrlHash, keepAlive, protocolMode) {
++async function runProxy(serverUrl, callbackPath, callbackPort, specifiedPort, headers, transportStrategy = "http-first", host, staticOAuthClientMetadata, staticOAuthClientInfo, clientMetadataUrl, useIdToken, useDeviceCode, useClientCredentials, tokenEndpoint, authorizeResource, skipResourceParameter, authorizeParams, ignoredTools, authTimeoutMs, serverUrlHash, keepAlive, protocolMode, preauthenticatedHttp) {
+   const events = new EventEmitter();
+-  const strictPort = !!specifiedPort || !!staticOAuthClientInfo || !!clientMetadataUrl;
+-  const authCoordinator = createLazyAuthCoordinator(serverUrlHash, callbackPath, callbackPort, events, authTimeoutMs, strictPort);
+-  log("Discovering OAuth server configuration...");
+-  const discoveryResult = await discoverOAuthServerInfo(serverUrl, headers, tokenEndpoint);
+-  if (discoveryResult.protectedResourceMetadata) {
+-    log(`Discovered authorization server: ${discoveryResult.authorizationServerUrl}`);
+-    if (discoveryResult.protectedResourceMetadata.scopes_supported) {
+-      debugLog("Protected Resource Metadata scopes", {
+-        scopes_supported: discoveryResult.protectedResourceMetadata.scopes_supported
+-      });
+-    }
+-  } else {
+-    debugLog("No Protected Resource Metadata found, using server URL as authorization server");
+-  }
+-  const authProvider = new NodeOAuthClientProvider({
+-    serverUrl: discoveryResult.authorizationServerUrl,
+-    resourceServerUrl: serverUrl,
+-    callbackPath,
+-    callbackPort,
+-    host,
+-    clientName: "MCP CLI Proxy",
+-    staticOAuthClientMetadata,
+-    staticOAuthClientInfo,
+-    clientMetadataUrl,
+-    useIdToken,
+-    useDeviceCode,
+-    useClientCredentials,
+-    tokenEndpoint,
+-    fetchFn: createFetchWithInit(fetchWithMcpHeaders, { headers }),
+-    authorizeResource,
+-    skipResourceParameter,
+-    authorizeParams,
+-    serverUrlHash,
+-    authorizationServerMetadata: discoveryResult.authorizationServerMetadata,
+-    protectedResourceMetadata: discoveryResult.protectedResourceMetadata,
+-    wwwAuthenticateScope: discoveryResult.wwwAuthenticateScope
+-  });
+-  const localTransport = new StdioServerTransport();
++  let authProvider;
++  let authInitializer;
+   let server = null;
+-  const authInitializer = async (options) => {
+-    const authState = await authCoordinator.initializeAuth(options);
+-    server = authState.server;
+-    if (authState.actualPort !== callbackPort) {
+-      log(`Using callback port ${authState.actualPort}`);
+-      authProvider.setCallbackPort(authState.actualPort);
++  const signsInWithoutACallbackPort = useDeviceCode || useClientCredentials;
++  if (!preauthenticatedHttp) {
++    const strictPort = !!specifiedPort || !!staticOAuthClientInfo || !!clientMetadataUrl;
++    const authCoordinator = createLazyAuthCoordinator(serverUrlHash, callbackPath, callbackPort, events, authTimeoutMs, strictPort);
++    log("Discovering OAuth server configuration...");
++    const discoveryResult = await discoverOAuthServerInfo(serverUrl, headers, tokenEndpoint);
++    if (discoveryResult.protectedResourceMetadata) {
++      log(`Discovered authorization server: ${discoveryResult.authorizationServerUrl}`);
++      if (discoveryResult.protectedResourceMetadata.scopes_supported) {
++        debugLog("Protected Resource Metadata scopes", {
++          scopes_supported: discoveryResult.protectedResourceMetadata.scopes_supported
++        });
++      }
++    } else {
++      debugLog("No Protected Resource Metadata found, using server URL as authorization server");
+     }
+-    return {
+-      waitForAuthCode: authState.waitForAuthCode,
+-      skipBrowserAuth: authState.skipBrowserAuth
++    authProvider = new NodeOAuthClientProvider({
++      serverUrl: discoveryResult.authorizationServerUrl,
++      resourceServerUrl: serverUrl,
++      callbackPath,
++      callbackPort,
++      host,
++      clientName: "MCP CLI Proxy",
++      staticOAuthClientMetadata,
++      staticOAuthClientInfo,
++      clientMetadataUrl,
++      useIdToken,
++      useDeviceCode,
++      useClientCredentials,
++      tokenEndpoint,
++      fetchFn: createFetchWithInit(fetchWithMcpHeaders, { headers }),
++      authorizeResource,
++      skipResourceParameter,
++      authorizeParams,
++      serverUrlHash,
++      authorizationServerMetadata: discoveryResult.authorizationServerMetadata,
++      protectedResourceMetadata: discoveryResult.protectedResourceMetadata,
++      wwwAuthenticateScope: discoveryResult.wwwAuthenticateScope
++    });
++    authInitializer = async (options) => {
++      const authState = await authCoordinator.initializeAuth(options);
++      server = authState.server;
++      if (authState.actualPort !== callbackPort) {
++        log(`Using callback port ${authState.actualPort}`);
++        authProvider.setCallbackPort(authState.actualPort);
++      }
++      return {
++        waitForAuthCode: authState.waitForAuthCode,
++        skipBrowserAuth: authState.skipBrowserAuth
++      };
+     };
+-  };
+-  const signsInWithoutACallbackPort = useDeviceCode || useClientCredentials;
+-  if (!signsInWithoutACallbackPort && !await hasUsableTokens(serverUrlHash) && await serverIssuesAuthChallenge(serverUrl, headers)) {
+-    await authInitializer();
++    if (!signsInWithoutACallbackPort && !await hasUsableTokens(serverUrlHash) && await serverIssuesAuthChallenge(serverUrl, headers)) {
++      await authInitializer();
++    }
+   }
++  const localTransport = new StdioServerTransport();
+   try {
+     const remoteTransport = await connectToRemoteServer(
+       null,
+@@ -12611,14 +12615,17 @@ async function runProxy(serverUrl, callbackPath, callbackPort, specifiedPort, he
+       headers,
+       authInitializer,
+       transportStrategy,
+-      protocolMode
++      protocolMode,
++      preauthenticatedHttp
+     );
+-    mcpProxy({
++    const proxyOptions = {
+       transportToClient: localTransport,
+       transportToServer: remoteTransport,
+       ignoredTools,
+       keepAlive,
+-      protocolMode,
++      protocolMode
++    };
++    if (!preauthenticatedHttp) Object.assign(proxyOptions, {
+       /**
+        * Discards a token the server refused straight after issuing it.
+        *
+@@ -12654,6 +12661,7 @@ async function runProxy(serverUrl, callbackPath, callbackPort, specifiedPort, he
+         log("Re-authorized with the remote server");
+       }
+     });
++    mcpProxy(proxyOptions);
+     await localTransport.start();
+     log("Local STDIO server running");
+     log(`Proxy established successfully between local STDIO and remote ${remoteTransport.constructor.name}`);
+@@ -12719,7 +12727,8 @@ parseCommandLineArgs(process.argv.slice(2), "Usage: mcp-remote <https://server-u
+     authTimeoutMs,
+     serverUrlHash,
+     keepAlive,
+-    protocolMode
++    protocolMode,
++    preauthenticatedHttp
+   }) => {
+     return runProxy(
+       serverUrl,
+@@ -12743,7 +12752,8 @@ parseCommandLineArgs(process.argv.slice(2), "Usage: mcp-remote <https://server-u
+       authTimeoutMs,
+       serverUrlHash,
+       keepAlive,
+-      protocolMode
++      protocolMode,
++      preauthenticatedHttp
+     );
+   }
+ ).catch((error) => {

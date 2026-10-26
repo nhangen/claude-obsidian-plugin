@@ -325,6 +325,45 @@ obsidian.local.md.example     Config template (real config lives at the stable p
 
 Claude Code supplies `${CLAUDE_PLUGIN_ROOT}`. The Codex skill resolves its bundled helpers relative to its installed `SKILL.md`; neither integration searches versioned cache paths. User config is resolved separately by `scripts/lib/resolve-config.sh` (stable path first, plugin root as legacy fallback), so updating the plugin never strands the config.
 
+## Standalone Obsidian MCP Client & Native Integrations
+
+Obsidian MCP can be used completely independently of the Claude plugin, local vault mounts, or private harnesses. Any compatible Model Context Protocol (MCP) host can connect directly.
+
+### Packages & Distribution
+
+- **`packages/mcp-server`**: Stdio and Streamable HTTP MCP server exposing notes discovery (`obsidian_find_notes`), published resources (`obsidian://*`), repository commit metadata (`obsidian_commit_meta`), and guarded writes (`obsidian_keeper_save`, `obsidian_daily_append`).
+- **`packages/client`**: Standalone client bundle containing:
+  - Separate read (`bin/obsidian-mcp-read`) and write (`bin/obsidian-mcp-write`) Streamable HTTP launchers with preauthenticated sessions and credential provider isolation (`env`, `file`, or `keychain`).
+  - Safe, local git commit metadata producer (`bin/obsidian-mcp-commit-event`) that sanitizes repository identity and strips remote credentials before emission.
+  - Native capture orchestration (`bin/obsidian-mcp-native`) for host profiles.
+  - Managed client installer (`bin/obsidian-mcp-client-install`) with cryptographic release verification, atomic transitions, disable/enable, and rollback.
+
+### Client Packaging & Installation
+
+To pack and install the standalone client from public source:
+
+```bash
+# 1. Pack the client bundle
+python3 scripts/pack-obsidian-mcp-client.py --output /path/to/client-bundle
+
+# 2. Install the bundle with verified release digest
+python3 /path/to/client-bundle/bin/obsidian-mcp-client-install \
+  --bundle /path/to/client-bundle \
+  --release-sha256 <digest-printed-by-packer> \
+  --prefix ~/.local/share/obsidian-mcp-client
+```
+
+Managed releases are immutable and tracked under `<prefix>/releases/<release-id>`. Use `--disable`, `--enable`, or `--rollback` to manage lifecycle safely.
+
+### Supported Host Projections
+
+Detailed integration guides and copyable skill projections are provided under `integrations/`:
+
+- **Claude Code** (`integrations/claude/`): Connect via stdio or remote Streamable HTTP launchers. Scoped host authorization is configured via `permissions.allow = ["mcp__obsidian-write__*"]`. See [`integrations/claude/README.md`](integrations/claude/README.md).
+- **OpenAI Codex** (`integrations/codex/`): Supports native automated session and commit capture via `obsidian-mcp-native create` in an isolated profile, rewriting git commits through an isolated executor that verifies actual reflog transitions and delivers pending commit events to MCP. Alternatively, supports manual skill capture via the packaged `commit-capture` skill. Scoped host authorization uses `default_tools_approval_mode = "auto" for obsidian-write`. See [`integrations/codex/README.md`](integrations/codex/README.md).
+- **OpenCode** (`integrations/opencode/`): Configured in `opencode.json` / `opencode.jsonc` with `permission: { "obsidian-write_*": "allow" }`. OpenCode supports discovery, read, and guarded write tools. Automatic hook-based commit capture is explicitly not supported due to lack of lifecycle observers. See [`integrations/opencode/README.md`](integrations/opencode/README.md).
+- **Cursor** (`integrations/cursor/`): Rules-based instruction flow for manual post-commit capture. See [`integrations/cursor/rules/obsidian-commit-capture.mdc`](integrations/cursor/rules/obsidian-commit-capture.mdc).
+
 ## Known Limitations
 
 - The Stop hook requires `claude` on `PATH` for background summarization. If absent, the session save no-ops with a logged warning.

@@ -1,0 +1,44 @@
+{
+  "bundleVersion": 1,
+  "nativeCapture": {
+    "launcher": "bin/obsidian-mcp-native",
+    "policy": "hosts/codex-capture.md",
+    "host": "codex",
+    "activation": "new-isolated-profile-only",
+    "defaultActivated": false
+  },
+  "mcpRemotePackage": "mcp-remote@0.14.3",
+  "readBridge": {
+    "package": "mcp-remote@0.14.3",
+    "path": "vendor/mcp-remote-read",
+    "provenanceSha256": "de5c5cd467b1a78408c25e3579086f86bec1482a8d84844545ef571d9006a77c",
+    "retryableTools": ["obsidian_find_notes"]
+  },
+  "commitEvent": {
+    "producer": "bin/obsidian-mcp-commit-event",
+    "schemaVersion": 1,
+    "requiresSuccessfulEvent": true,
+    "writesVault": false
+  },
+  "commitCapture": {
+    "consumer": "bin/obsidian-mcp-capture-commit",
+    "eventProducer": "bin/obsidian-mcp-commit-event",
+    "writeLauncher": "bin/obsidian-mcp-write",
+    "contract": "contract.json",
+    "inputSchemaVersion": 1,
+    "writesVault": true,
+    "defaultActivated": false,
+    "legacyHashInteroperability": "unproven",
+    "automaticHistoricalBackfill": false
+  },
+  "profiles": {
+    "read": {
+      "launcher": "bin/obsidian-mcp-read",
+      "requiredScopes": ["vault:read", "repo:read"]
+    },
+    "write": {
+      "launcher": "bin/obsidian-mcp-write",
+      "requiredScopes": ["vault:write"]
+    }
+  }
+}

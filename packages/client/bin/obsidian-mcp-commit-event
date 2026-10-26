@@ -1,0 +1,363 @@
+#!/usr/bin/env python3
+import datetime
+import json
+import os
+import re
+import selectors
+import signal
+import subprocess
+import sys
+import time
+from pathlib import Path
+from urllib.parse import urlsplit
+
+
+INPUT_LIMIT = 65536
+INPUT_TIMEOUT = 5.0
+GIT_OUTPUT_LIMIT = 524288
+GIT_RECORD_LIMIT = 4096
+GIT_RECORD_BYTES = 4096
+GIT_TIMEOUT = 5.0
+HASH_PATTERN = re.compile(r"(?:[0-9a-f]{40}|[0-9a-f]{64})\Z")
+REMOTE_PART_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,99}\Z")
+TICKET_PATTERN = re.compile(r"(\d+)(?:-|\Z)")
+
+
+class ProducerError(Exception):
+    def __init__(self, code):
+        self.code = code
+
+
+def isolated_environment():
+    environment = {
+        key: value for key, value in os.environ.items() if not key.startswith("GIT_")
+    }
+    environment.update(
+        {
+            "GIT_CONFIG_NOSYSTEM": "1",
+            "GIT_TERMINAL_PROMPT": "0",
+            "LC_ALL": "C.UTF-8",
+        }
+    )
+    return environment
+
+
+def terminate(process):
+    try:
+        os.killpg(process.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    process.wait()
+
+
+def git(repository, arguments, allowed=(0,), limit=GIT_OUTPUT_LIMIT):
+    try:
+        process = subprocess.Popen(
+            ["git", "-C", str(repository), *arguments],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            env=isolated_environment(),
+            start_new_session=True,
+        )
+    except (OSError, ValueError):
+        raise ProducerError("GIT_FAILED") from None
+
+    output = bytearray()
+    selector = selectors.DefaultSelector()
+    selector.register(process.stdout, selectors.EVENT_READ)
+    deadline = time.monotonic() + GIT_TIMEOUT
+    try:
+        while selector.get_map():
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                terminate(process)
+                raise ProducerError("GIT_TIMEOUT")
+            events = selector.select(remaining)
+            if not events:
+                terminate(process)
+                raise ProducerError("GIT_TIMEOUT")
+            for key, _ in events:
+                chunk = os.read(key.fd, min(8192, limit + 1 - len(output)))
+                if not chunk:
+                    selector.unregister(key.fileobj)
+                    continue
+                output.extend(chunk)
+                if len(output) > limit:
+                    terminate(process)
+                    raise ProducerError("GIT_OUTPUT_LIMIT")
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            terminate(process)
+            raise ProducerError("GIT_TIMEOUT")
+        returncode = process.wait(timeout=remaining)
+    except subprocess.TimeoutExpired:
+        terminate(process)
+        raise ProducerError("GIT_TIMEOUT") from None
+    finally:
+        selector.close()
+
+    if returncode not in allowed:
+        raise ProducerError("GIT_FAILED")
+    try:
+        return returncode, bytes(output).decode("utf-8")
+    except UnicodeDecodeError:
+        raise ProducerError("GIT_DATA_INVALID") from None
+
+
+def read_event():
+    def expire_input(_signum, _frame):
+        raise ProducerError("INPUT_TIMEOUT")
+
+    previous_handler = signal.signal(signal.SIGALRM, expire_input)
+    signal.setitimer(signal.ITIMER_REAL, INPUT_TIMEOUT)
+    try:
+        raw = sys.stdin.buffer.read(INPUT_LIMIT + 1)
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, previous_handler)
+    if len(raw) > INPUT_LIMIT:
+        raise ProducerError("INPUT_TOO_LARGE")
+    if not raw.strip():
+        raise ProducerError("INPUT_EMPTY")
+    try:
+        event = json.loads(raw)
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        raise ProducerError("INPUT_INVALID") from None
+    required = {"schemaVersion", "event", "outcome", "repository", "commit"}
+    if not isinstance(event, dict) or set(event) != required:
+        raise ProducerError("EVENT_INVALID")
+    if type(event["schemaVersion"]) is not int or event["schemaVersion"] != 1:
+        raise ProducerError("EVENT_INVALID")
+    if event["event"] != "git.commit" or event["outcome"] != "success":
+        raise ProducerError("EVENT_INVALID")
+    repository = event["repository"]
+    commit = event["commit"]
+    if (
+        not isinstance(repository, str)
+        or len(repository.encode("utf-8")) > GIT_RECORD_BYTES
+        or not os.path.isabs(repository)
+        or not isinstance(commit, str)
+        or HASH_PATTERN.fullmatch(commit) is None
+    ):
+        raise ProducerError("EVENT_INVALID")
+    return repository, commit
+
+
+def resolve_repository(repository):
+    try:
+        requested = Path(repository).resolve(strict=True)
+    except (OSError, RuntimeError):
+        raise ProducerError("REPOSITORY_INVALID") from None
+    if not requested.is_dir():
+        raise ProducerError("REPOSITORY_INVALID")
+    try:
+        _, root_text = git(
+            requested, ["rev-parse", "--show-toplevel"], limit=GIT_RECORD_BYTES
+        )
+        root = Path(root_text.strip()).resolve(strict=True)
+    except ProducerError as error:
+        if error.code == "GIT_FAILED":
+            raise ProducerError("REPOSITORY_INVALID") from None
+        raise
+    except (OSError, RuntimeError):
+        raise ProducerError("REPOSITORY_INVALID") from None
+    if requested != root:
+        raise ProducerError("REPOSITORY_INVALID")
+    return root
+
+
+def validate_commit(repository, commit):
+    try:
+        _, object_type = git(repository, ["cat-file", "-t", commit], limit=64)
+    except ProducerError as error:
+        if error.code == "GIT_FAILED":
+            raise ProducerError("COMMIT_INVALID") from None
+        raise
+    if object_type != "commit\n":
+        raise ProducerError("COMMIT_INVALID")
+
+
+def validate_head(repository, commit):
+    _, head = git(repository, ["rev-parse", "--verify", "HEAD"], limit=128)
+    if head.strip() != commit:
+        raise ProducerError("COMMIT_STALE")
+
+
+def commit_files(repository, commit):
+    _, parent_line = git(
+        repository, ["rev-list", "--parents", "-n", "1", commit], limit=512
+    )
+    parts = parent_line.strip().split()
+    if not parts or parts[0] != commit:
+        raise ProducerError("GIT_DATA_INVALID")
+    if len(parts) == 1:
+        arguments = [
+            "diff-tree",
+            "--root",
+            "--no-commit-id",
+            "--name-only",
+            "-r",
+            "-z",
+            commit,
+        ]
+    else:
+        arguments = [
+            "diff-tree",
+            "--no-commit-id",
+            "--name-only",
+            "-r",
+            "-z",
+            parts[1],
+            commit,
+        ]
+    _, records = git(repository, arguments)
+    if not records:
+        return []
+    if not records.endswith("\0"):
+        raise ProducerError("GIT_DATA_INVALID")
+    files = records[:-1].split("\0")
+    if len(files) > GIT_RECORD_LIMIT:
+        raise ProducerError("GIT_OUTPUT_LIMIT")
+    if any(not name or len(name.encode("utf-8")) > GIT_RECORD_BYTES for name in files):
+        raise ProducerError("GIT_OUTPUT_LIMIT")
+    return files
+
+
+def branch_name(repository):
+    returncode, branch = git(
+        repository,
+        ["symbolic-ref", "--quiet", "--short", "HEAD"],
+        allowed=(0, 1),
+        limit=GIT_RECORD_BYTES,
+    )
+    if returncode == 1:
+        return ""
+    value = branch.rstrip("\n")
+    if not value or "\n" in value or "\0" in value:
+        raise ProducerError("GIT_DATA_INVALID")
+    return value
+
+
+def safe_local_name(repository):
+    _, common_text = git(
+        repository, ["rev-parse", "--git-common-dir"], limit=GIT_RECORD_BYTES
+    )
+    common = Path(common_text.strip())
+    if not common.is_absolute():
+        common = repository / common
+    try:
+        name = common.resolve(strict=True).parent.name
+    except (OSError, RuntimeError):
+        raise ProducerError("GIT_DATA_INVALID") from None
+    name = re.sub(r"[^A-Za-z0-9._-]+", "-", name).strip(".-")[:100]
+    if not name or REMOTE_PART_PATTERN.fullmatch(name) is None:
+        name = "repository"
+    return name
+
+
+def parse_remote(remote):
+    if not remote or "\0" in remote or "\n" in remote or "%" in remote:
+        raise ProducerError("REMOTE_INVALID")
+    path = None
+    if "://" in remote:
+        parsed = urlsplit(remote)
+        if parsed.scheme not in {"http", "https", "ssh", "git"} or not parsed.hostname:
+            raise ProducerError("REMOTE_INVALID")
+        path = parsed.path
+    else:
+        cleaned = re.split(r"[?#]", remote, maxsplit=1)[0]
+        match = re.fullmatch(r"(?:[^/@:]+@)?[^/:?#]+:(.+)", cleaned)
+        if match:
+            path = match.group(1)
+    if path is None:
+        raise ProducerError("REMOTE_INVALID")
+    parts = [part for part in path.strip("/").split("/") if part]
+    if len(parts) != 2:
+        raise ProducerError("REMOTE_INVALID")
+    owner, name = parts
+    if name.endswith(".git"):
+        name = name[:-4]
+    if (
+        REMOTE_PART_PATTERN.fullmatch(owner) is None
+        or REMOTE_PART_PATTERN.fullmatch(name) is None
+    ):
+        raise ProducerError("REMOTE_INVALID")
+    return owner, name
+
+
+def repository_identity(repository):
+    returncode, remote = git(
+        repository,
+        ["config", "--get", "remote.origin.url"],
+        allowed=(0, 1),
+        limit=GIT_RECORD_BYTES,
+    )
+    if returncode == 1:
+        name = safe_local_name(repository)
+        return f"local/{name}", name
+    owner, name = parse_remote(remote.rstrip("\n"))
+    return f"{owner}/{name}", name
+
+
+def commit_timestamp(repository, commit):
+    _, metadata = git(
+        repository, ["show", "-s", "--format=%H%x00%cI", commit], limit=256
+    )
+    value = metadata.rstrip("\n").split("\0")
+    if len(value) != 2 or value[0] != commit:
+        raise ProducerError("GIT_DATA_INVALID")
+    try:
+        timestamp = datetime.datetime.fromisoformat(value[1])
+    except ValueError:
+        raise ProducerError("GIT_DATA_INVALID") from None
+    if timestamp.tzinfo is None:
+        raise ProducerError("GIT_DATA_INVALID")
+    return timestamp.strftime("%Y-%m-%d"), timestamp.strftime("%H:%M")
+
+
+def produce():
+    repository_text, commit = read_event()
+    repository = resolve_repository(repository_text)
+    validate_commit(repository, commit)
+    validate_head(repository, commit)
+    branch = branch_name(repository)
+    files = commit_files(repository, commit)
+    org_repo, repo_name = repository_identity(repository)
+    date, commit_time = commit_timestamp(repository, commit)
+    validate_head(repository, commit)
+    segment = branch.rsplit("/", 1)[-1] if branch else ""
+    ticket_match = TICKET_PATTERN.match(segment)
+    return {
+        "schemaVersion": 1,
+        "hash": commit,
+        "branch": branch,
+        "files": files,
+        "org_repo": org_repo,
+        "repo_name": repo_name,
+        "ticket": ticket_match.group(1) if ticket_match else "",
+        "date": date,
+        "time": commit_time,
+    }
+
+
+def main():
+    if len(sys.argv) != 1:
+        sys.stderr.write("error:CLI_INVALID\n")
+        return 64
+    try:
+        payload = produce()
+    except ProducerError as error:
+        sys.stderr.write(f"error:{error.code}\n")
+        return 64
+    except Exception:
+        sys.stderr.write("error:INTERNAL\n")
+        return 64
+    sys.stdout.write(
+        json.dumps(payload, ensure_ascii=False, separators=(",", ":")) + "\n"
+    )
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
