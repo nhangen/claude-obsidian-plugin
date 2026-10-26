@@ -91,7 +91,11 @@ PM="$TMP/pm"; mkdir -p "$PM"
 
 # A symlinked target (file, dangling, directory) is refused before any mode read or mv; the
 # link and its referent are left untouched and the staged temp is discarded (#194).
-for LIB in "$ROOT_DIR/scripts/lib/note-hash.sh" "$ROOT_DIR/packages/codex/skills/commit-capture/scripts/lib/note-hash.sh"; do
+# A symlinked parent directory component is likewise refused (#249).
+for LIB in \
+  "$ROOT_DIR/scripts/lib/note-hash.sh" \
+  "$ROOT_DIR/packages/mcp-server/helpers/lib/note-hash.sh" \
+  "$ROOT_DIR/packages/codex/skills/commit-capture/scripts/lib/note-hash.sh"; do
   (
     # shellcheck source=scripts/lib/note-hash.sh
     . "$LIB"
@@ -114,6 +118,42 @@ for LIB in "$ROOT_DIR/scripts/lib/note-hash.sh" "$ROOT_DIR/packages/codex/skills
       [ -z "$(find "$PM/real-dir" -mindepth 1 -print -quit)" ] || fail "swap leaked a temp into the referent directory"
       rm "$PM/link.md"
     done
+
+    # Parent directory symlink rejection (#249): direct, nested, and relative targets.
+    mkdir -p "$PM/outside-dir/sub"
+    ln -s "$PM/outside-dir" "$PM/sym-parent"
+
+    PT_PARENT="$(mktemp "$PM/.t-XXXXXX")"
+    printf 'parent-test\n' > "$PT_PARENT"
+    if PARENT_ERR="$(keeper_swap_or_clean "$PT_PARENT" "$PM/sym-parent/target.md" 2>&1)"; then
+      fail "swap accepted target under symlinked parent ($LIB)"
+    fi
+    grep -qF "parent directory is a symlink" <<<"$PARENT_ERR" || fail "parent symlink rejection message missing; got: $PARENT_ERR"
+    [ ! -e "$PT_PARENT" ] || fail "staged temp was not discarded on parent symlink rejection"
+    [ ! -e "$PM/outside-dir/target.md" ] || fail "swap wrote through symlinked parent directory"
+
+    PT_NESTED="$(mktemp "$PM/.t-XXXXXX")"
+    printf 'nested-test\n' > "$PT_NESTED"
+    if NESTED_ERR="$(keeper_swap_or_clean "$PT_NESTED" "$PM/sym-parent/sub/nested.md" 2>&1)"; then
+      fail "swap accepted target under nested symlinked parent ($LIB)"
+    fi
+    grep -qF "parent directory is a symlink" <<<"$NESTED_ERR" || fail "nested parent symlink rejection message missing; got: $NESTED_ERR"
+    [ ! -e "$PT_NESTED" ] || fail "staged temp was not discarded on nested parent symlink rejection"
+    [ ! -e "$PM/outside-dir/sub/nested.md" ] || fail "swap wrote through nested symlinked parent directory"
+
+    (
+      cd "$PM"
+      PT_REL="$(mktemp ".t-XXXXXX")"
+      printf 'rel-test\n' > "$PT_REL"
+      if REL_ERR="$(keeper_swap_or_clean "$PT_REL" "sym-parent/rel.md" 2>&1)"; then
+        fail "swap accepted target under relative symlinked parent ($LIB)"
+      fi
+      grep -qF "parent directory is a symlink" <<<"$REL_ERR" || fail "relative parent symlink rejection message missing; got: $REL_ERR"
+      [ ! -e "$PT_REL" ] || fail "staged temp was not discarded on relative parent symlink rejection"
+      [ ! -e "$PM/outside-dir/rel.md" ] || fail "swap wrote through relative symlinked parent directory"
+    )
+
+    rm -rf "$PM/sym-parent" "$PM/outside-dir"
   )
 done
 

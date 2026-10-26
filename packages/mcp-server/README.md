@@ -227,16 +227,100 @@ not resolve to the checked-out commit. It also requires a clean worktree so the
 recorded commit identifies every packed file. It runs `npm ci`, the package tests,
 and the same pack and metadata path used by CI.
 
-ML-1 installation is planned as a separate, explicit operation. The deployment
-contract will require downloading only the pinned tarball and matching metadata
-from the selected GitHub Release, verifying the tarball SHA-256, extracting the
-tarball to verify the packaged `contract.json` SHA-256, and installing that local
-tarball. The planned systemd unit will run the installed
-`claude-obsidian-mcp` or `claude-obsidian-mcp-http` executable with explicit
-configuration. This repository's release workflow does not connect to ML-1,
-install the package, or restart services.
+## Self-Host Deployment and Service Management
 
-The planned llm-tools pin will record the GitHub Release asset, source commit,
-tarball SHA-256, and contract SHA-256. Updating that pin and deploying it remain
-separate future reviewed changes. A release asset alone is not evidence that
-ML-1 or llm-tools has been updated.
+Deployments can manage the Streamable HTTP server via `systemd` on Linux or `launchd` on macOS. Services run against the locally installed package artifact with explicit environment configuration and restricted file permissions.
+
+### systemd service example (`/etc/systemd/system/obsidian-mcp.service`)
+
+```ini
+[Unit]
+Description=Obsidian MCP Streamable HTTP Service
+After=network.target
+
+[Service]
+Type=simple
+User=obsidian
+Group=obsidian
+WorkingDirectory=/opt/obsidian-mcp/current
+EnvironmentFile=/etc/obsidian-mcp/server.env
+ExecStart=/usr/bin/node dist/http.mjs
+Restart=always
+RestartSec=5
+LimitNOFILE=65536
+
+# Security sandbox
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/var/log/obsidian-mcp /srv/obsidian-vault
+PrivateTmp=true
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target
+```
+
+### Environment configuration (`/etc/obsidian-mcp/server.env`)
+
+Generate a cryptographically secure 256-bit secret (64 hex characters / 32 bytes):
+```bash
+openssl rand -hex 32
+```
+
+Configure `/etc/obsidian-mcp/server.env` with your deployment values:
+
+```ini
+OBSIDIAN_LOCAL_MD=/etc/obsidian-mcp/obsidian.local.md
+MCP_HTTP_BIND=127.0.0.1
+MCP_HTTP_PORT=3000
+# Generate a real secret with: openssl rand -hex 32
+# Placeholder and example values will fail closed on startup.
+MCP_HTTP_JWT_SECRET=<generate-secret-using-openssl-rand-hex-32>
+MCP_HTTP_JWT_ISSUER=https://issuer.example
+MCP_HTTP_JWT_AUDIENCE=claude-obsidian
+MCP_HTTP_ALLOWED_HOSTS=127.0.0.1,localhost,mcp.example.com
+MCP_HTTP_ALLOWED_ORIGINS=https://client.example
+MCP_STDIO_PROFILE=write
+```
+
+File permissions must protect credentials (`chmod 0600 /etc/obsidian-mcp/server.env`).
+
+### Reverse proxy TLS termination
+
+Expose the HTTP service exclusively through a reverse proxy terminating TLS. For example, using Nginx:
+
+```nginx
+location /mcp {
+    proxy_pass http://127.0.0.1:3000/mcp;
+    proxy_http_version 1.1;
+    proxy_set_header Connection "";
+    proxy_set_header Host $host;
+    proxy_set_header X-Forwarded-For $remote_addr;
+    proxy_set_header X-Forwarded-Proto https;
+    proxy_read_timeout 300s;
+    proxy_buffering off;
+}
+```
+
+**Host header validation:** `MCP_HTTP_ALLOWED_HOSTS` validates the HTTP `Host` header received by the server. When Nginx forwards the incoming host via `proxy_set_header Host $host;`, ensure your public domain (e.g. `mcp.example.com`) is present in `MCP_HTTP_ALLOWED_HOSTS`. Alternatively, rewrite the upstream Host header to loopback (`proxy_set_header Host 127.0.0.1;`) if public hostname forwarding is not needed.
+
+### Upgrades, Compatibility, and Safe Rollback
+
+1. **Verification before cutover:**
+   - Download the target release tarball and `<version>.release.json` metadata asset.
+   - Verify the tarball checksum against the release metadata `artifact.sha256`.
+   - Extract into a versioned release directory: `/opt/obsidian-mcp/releases/<version>`.
+   - Verify the extracted `contract.json` matches `contract_sha256`.
+   - Verify health check and version handshake using `node monitor.mjs`.
+2. **Atomic switchover:**
+   - Update the active symlink: `ln -sfn /opt/obsidian-mcp/releases/<version> /opt/obsidian-mcp/current`.
+   - Restart the service: `systemctl restart obsidian-mcp`.
+   - Run `node monitor.mjs` to confirm initialize handshake and version report.
+3. **Operational rollback:**
+   - Retain the prior versioned release directory (e.g. `/opt/obsidian-mcp/releases/<prior-version>`).
+   - If regressions or health check failures occur, point the `current` symlink back to the prior directory and restart:
+     ```bash
+     ln -sfn /opt/obsidian-mcp/releases/<prior-version> /opt/obsidian-mcp/current
+     systemctl restart obsidian-mcp
+     ```
+   - Rollback is atomic and does not modify vault data, commit capture contracts, or existing historical notes.

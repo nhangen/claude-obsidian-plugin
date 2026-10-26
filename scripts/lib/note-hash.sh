@@ -252,8 +252,9 @@ keeper_fault() {
 #
 # A symlinked target is refused rather than replaced or followed (#194): the swap would
 # otherwise either clobber the link or write through it to a file the caller never named.
+# A symlinked parent directory component is likewise refused (#249).
 keeper_swap_or_clean() {
-  local tmp="$1" target="$2" mode u
+  local tmp="$1" target="$2" mode u p prev
 
   if [ -L "$target" ]; then
     rm -f "$tmp" 2>/dev/null || true
@@ -266,6 +267,23 @@ keeper_swap_or_clean() {
     printf 'keeper: could not replace %s; target is a directory\n' "$target" >&2
     return 1
   fi
+
+  p="$(dirname "$target")"
+  prev=""
+  while [ -n "$p" ] && [ "$p" != "." ] && [ "$p" != "/" ] && [ "$p" != "$prev" ]; do
+    prev="$p"
+    case "$p" in
+      /var|/tmp|/etc|/home|/private/var|/private/tmp|/private/etc|/bin|/sbin|/lib|/lib64) ;;
+      *)
+        if [ -L "$p" ]; then
+          rm -f "$tmp" 2>/dev/null || true
+          printf 'keeper: could not replace %s; parent directory is a symlink\n' "$target" >&2
+          return 1
+        fi
+        ;;
+    esac
+    p="$(dirname "$p")"
+  done
 
   if [ -f "$target" ]; then
     mode="$(stat -L -c %a "$target" 2>/dev/null)" || mode=""

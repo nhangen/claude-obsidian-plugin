@@ -31,9 +31,11 @@ function detectSourceCheckout() {
 }
 
 const isSourceCheckout = detectSourceCheckout();
+const localHelperRoot = join(packageRoot, "helpers");
 const packagedHelperRoot = join(packageRoot, "dist", "helpers");
 
 function helperPath(...segments) {
+  if (existsSync(join(localHelperRoot, "keeper"))) return join(localHelperRoot, ...segments);
   if (isSourceCheckout) return join(sourceRepositoryRoot, "scripts", ...segments);
   return join(packagedHelperRoot, ...segments);
 }
@@ -165,7 +167,11 @@ function loadConfiguration() {
     if (!dailyPath) dailyPathError = "daily_path must identify a directory within the configured vault";
   }
   const configuredRoots = process.env.MCP_REPOSITORY_ROOTS?.split(delimiter).filter(Boolean);
-  const defaultRoots = isSourceCheckout ? [sourceRepositoryRoot] : [];
+  const defaultRoots = isSourceCheckout
+    ? [sourceRepositoryRoot]
+    : existsSync(join(packageRoot, ".git"))
+      ? [packageRoot]
+      : [];
   const repositoryRoots = (configuredRoots?.length ? configuredRoots : defaultRoots).map((root) => {
     try {
       const canonical = realpathSync(resolve(root));

@@ -3,14 +3,17 @@ import { chmod, mkdtemp, mkdir, readFile, writeFile, rm } from "node:fs/promises
 import { readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
-import { spawn } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { once } from "node:events";
 import { test } from "node:test";
 import { createServer } from "../src/stdio.mjs";
 
 const packageRoot = resolve(dirname(new URL(import.meta.url).pathname), "..");
 const entrypoint = join(packageRoot, "src", "stdio.mjs");
-const repositoryRoot = resolve(packageRoot, "../..");
+let repositoryRoot = packageRoot;
+try {
+  repositoryRoot = execFileSync("git", ["rev-parse", "--show-toplevel"], { cwd: packageRoot, encoding: "utf8" }).trim();
+} catch {}
 const packageManifest = JSON.parse(readFileSync(join(packageRoot, "package.json"), "utf8"));
 const contract = JSON.parse(await readFile(join(packageRoot, "contract.json"), "utf8"));
 
@@ -249,7 +252,11 @@ test("stdio server exposes read-only tools with clean MCP framing", async (t) =>
     8,
   );
   assert.equal(metadata.result?.isError, false);
-  assert.equal(metadata.result?.structuredContent?.repository, "nhangen/claude-obsidian-plugin");
+  if (repositoryRoot !== packageRoot) {
+    assert.equal(metadata.result?.structuredContent?.repository, "nhangen/claude-obsidian-plugin");
+  } else {
+    assert.equal(typeof metadata.result?.structuredContent?.repository, "string");
+  }
   assert.equal(typeof metadata.result?.structuredContent?.commit, "string");
   assert.equal(typeof metadata.result?.structuredContent?.subject, "string");
   assert.doesNotMatch(metadata.result?.content?.[0]?.text ?? "", /vault_path=/);

@@ -64,9 +64,33 @@ for relative in (
     if packaged_bytes != canonical.read_bytes():
         print(f"vendor parity mismatch: {relative}", file=sys.stderr)
         sys.exit(1)
+
+mcp_helpers = root / "packages/mcp-server/helpers"
+mcp_drift = os.environ.get("MCP_SERVER_TEST_VENDOR_DRIFT")
+for relative in (
+    "commit-meta.sh",
+    "keeper",
+    "lib/allowlist-validate.sh",
+    "lib/commit-capture-parse.sh",
+    "lib/dedup-scan.sh",
+    "lib/note-hash.sh",
+    "lib/resolve-config.sh",
+    "lib/vault-index.sh",
+):
+    mcp_helper = mcp_helpers / relative
+    canonical = root / "scripts" / relative
+    if not mcp_helper.is_file():
+        print(f"missing mcp helper: {relative}", file=sys.stderr)
+        sys.exit(1)
+    helper_bytes = mcp_helper.read_bytes()
+    if relative == mcp_drift:
+        helper_bytes += b"\n"
+    if helper_bytes != canonical.read_bytes():
+        print(f"mcp vendor parity mismatch: {relative}", file=sys.stderr)
+        sys.exit(1)
 PY
 
-if [ -z "${CODEX_PLUGIN_TEST_VENDOR_DRIFT:-}" ]; then
+if [ -z "${CODEX_PLUGIN_TEST_VENDOR_DRIFT:-}" ] && [ -z "${MCP_SERVER_TEST_VENDOR_DRIFT:-}" ]; then
   OPTIMIZED_DRIFT_ERR="$TMP/optimized-vendor-drift.err"
   if CODEX_PLUGIN_TEST_VENDOR_DRIFT="lib/note-hash.sh" PYTHONOPTIMIZE=1 \
     bash "$0" >"$TMP/optimized-vendor-drift.out" 2>"$OPTIMIZED_DRIFT_ERR"; then
@@ -74,6 +98,14 @@ if [ -z "${CODEX_PLUGIN_TEST_VENDOR_DRIFT:-}" ]; then
   fi
   grep -q '^vendor parity mismatch: lib/note-hash.sh$' "$OPTIMIZED_DRIFT_ERR" \
     || fail "optimized Python did not report vendor drift"
+
+  MCP_DRIFT_ERR="$TMP/mcp-vendor-drift.err"
+  if MCP_SERVER_TEST_VENDOR_DRIFT="lib/note-hash.sh" PYTHONOPTIMIZE=1 \
+    bash "$0" >"$TMP/mcp-vendor-drift.out" 2>"$MCP_DRIFT_ERR"; then
+    fail "MCP vendor drift accepted"
+  fi
+  grep -q '^mcp vendor parity mismatch: lib/note-hash.sh$' "$MCP_DRIFT_ERR" \
+    || fail "MCP vendor drift did not report parity mismatch"
 fi
 
 command -v codex >/dev/null 2>&1 || fail "codex CLI is required for the installation smoke test"

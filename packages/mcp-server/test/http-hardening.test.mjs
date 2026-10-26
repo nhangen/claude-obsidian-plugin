@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { createHmac } from "node:crypto";
+import { createHmac, randomBytes } from "node:crypto";
 import { access, chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { request as httpRequest } from "node:http";
 import { once } from "node:events";
@@ -18,10 +18,10 @@ function base64url(value) {
   return Buffer.from(value).toString("base64url");
 }
 
-function token({ exp = Math.floor(Date.now() / 1000) + 300 } = {}) {
+function token({ exp = Math.floor(Date.now() / 1000) + 300, signingSecret = secret } = {}) {
   const header = base64url(JSON.stringify({ alg: "HS256", typ: "JWT" }));
   const payload = base64url(JSON.stringify({ aud: audience, exp, iss: issuer, scope: "vault:read repo:read" }));
-  const signature = createHmac("sha256", secret).update(`${header}.${payload}`).digest("base64url");
+  const signature = createHmac("sha256", signingSecret).update(`${header}.${payload}`).digest("base64url");
   return `${header}.${payload}.${signature}`;
 }
 
@@ -894,4 +894,117 @@ test("rejected POST in flight across session TTL boundary does not revive sessio
     body: JSON.stringify({ jsonrpc: "2.0", id: 30, method: "tools/list", params: {} }),
   });
   assert.equal(afterClose.status, 404);
+});
+
+test("HTTP server startup fails closed on insecure example or placeholder secrets", async () => {
+  const { directory, config } = await fixture();
+  try {
+    for (const badSecret of [
+      "<generate-secret-using-openssl-rand-hex-32>",
+      "your-32-byte-secret-here-0123456789",
+      "change-me-please-secret-0123456789",
+      "example-secret-key-32-bytes-long",
+      "placeholder-secret-key-value-here",
+    ]) {
+      const child = spawn(process.execPath, [entrypoint], {
+        cwd: tmpdir(),
+        env: {
+          ...process.env,
+          OBSIDIAN_LOCAL_MD: config,
+          MCP_HTTP_BIND: "127.0.0.1",
+          MCP_HTTP_PORT: "0",
+          MCP_HTTP_JWT_SECRET: badSecret,
+          MCP_HTTP_JWT_ISSUER: issuer,
+          MCP_HTTP_JWT_AUDIENCE: audience,
+        },
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+      let stderr = "";
+      child.stderr.on("data", (chunk) => { stderr += chunk; });
+      const [code] = await once(child, "close");
+      assert.equal(code, 1);
+      assert.match(stderr, /MCP_HTTP_JWT_SECRET must not use an example or placeholder secret/);
+    }
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("HTTP authentication preserves high-entropy keys containing placeholder-like text", async (t) => {
+  const { directory, config } = await fixture();
+  const signingSecret = `your-${randomBytes(32).toString("hex")}-Placeholder-Change-Me-Changeme-Example-Generate-Secret`;
+  const server = startServer(config, { MCP_HTTP_JWT_SECRET: signingSecret });
+  t.after(async () => {
+    await server.stop();
+    await rm(directory, { recursive: true, force: true });
+  });
+  const url = await server.ready;
+  const accepted = await fetch(`${url}/mcp`, {
+    method: "POST",
+    headers: headers(url, token({ signingSecret })),
+    body: JSON.stringify(initialize()),
+  });
+  assert.equal(accepted.status, 200);
+  const wrongKey = await fetch(`${url}/mcp`, {
+    method: "POST",
+    headers: headers(url, token()),
+    body: JSON.stringify(initialize(2)),
+  });
+  assert.equal(wrongKey.status, 401);
+});
+
+test("reverse proxy Host header validation allows configured public domain and blocks unlisted hosts", async (t) => {
+  const { directory, config } = await fixture();
+  const server = startServer(config, {
+    MCP_HTTP_ALLOWED_HOSTS: "127.0.0.1,localhost,mcp.example.com",
+    MCP_HTTP_ALLOWED_ORIGINS: "https://client.example",
+  });
+  t.after(async () => {
+    await server.stop();
+    await rm(directory, { recursive: true, force: true });
+  });
+  const url = await server.ready;
+  const bearer = token();
+
+  // Forwarded public Host matching allowlist succeeds
+  const allowedHostRes = await rawRequest(`${url}/mcp`, {
+    method: "POST",
+    headers: {
+      Host: "mcp.example.com",
+      Origin: "https://client.example",
+      Authorization: `Bearer ${bearer}`,
+      "Content-Type": "application/json",
+      Accept: "application/json, text/event-stream",
+    },
+    body: JSON.stringify(initialize()),
+  });
+  assert.equal(allowedHostRes.status, 200);
+
+  // Rewritten loopback Host (reverse proxy Host 127.0.0.1) succeeds
+  const loopbackHostRes = await rawRequest(`${url}/mcp`, {
+    method: "POST",
+    headers: {
+      Host: "127.0.0.1",
+      Origin: "https://client.example",
+      Authorization: `Bearer ${bearer}`,
+      "Content-Type": "application/json",
+      Accept: "application/json, text/event-stream",
+    },
+    body: JSON.stringify(initialize()),
+  });
+  assert.equal(loopbackHostRes.status, 200);
+
+  // Unlisted public Host is rejected with 403 Forbidden
+  const blockedHostRes = await rawRequest(`${url}/mcp`, {
+    method: "POST",
+    headers: {
+      Host: "evil.example.com",
+      Origin: "https://client.example",
+      Authorization: `Bearer ${bearer}`,
+      "Content-Type": "application/json",
+      Accept: "application/json, text/event-stream",
+    },
+    body: JSON.stringify(initialize()),
+  });
+  assert.equal(blockedHostRes.status, 403);
 });
