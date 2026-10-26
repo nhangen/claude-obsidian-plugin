@@ -1,0 +1,326 @@
+#!/usr/bin/env bash
+# note-hash.sh — content hashing + portable stat helpers for the librarian.
+
+# The digest field of a shasum/sha256sum line. A path holding a backslash (or
+# newline) makes them escape the name and prefix the line with "\"; strip that
+# flag so the digest is the same for every path.
+sha256_digest_field() {
+  awk '{h = $1; sub(/^\\/, "", h); print h}'
+}
+
+sha256_of() {
+  local out
+  if command -v shasum >/dev/null 2>&1; then
+    out="$(shasum -a 256 "$1" 2>/dev/null | sha256_digest_field)"
+  fi
+  if [ -z "${out:-}" ] && command -v sha256sum >/dev/null 2>&1; then
+    out="$(sha256sum "$1" 2>/dev/null | sha256_digest_field)"
+  fi
+  if [ -z "${out:-}" ]; then
+    printf 'sha256_of: no sha256 tool (shasum/sha256sum) available\n' >&2
+    return 1
+  fi
+  printf '%s' "$out"
+}
+
+note_hash() {
+  local f="$1" size sha
+  size="$(wc -c < "$f" | tr -d ' ')"
+  sha="$(sha256_of "$f")"
+  printf '%s:%s\n' "$size" "$sha"
+}
+
+note_hash_valid() {
+  [[ "$1" =~ ^[0-9]+:[0-9a-f]{64}$ ]]
+}
+
+# BSD stat spells mtime `-f %m`, GNU stat `-c %Y`. Probing by failure does not
+# separate them: GNU stat reads `-f` as "report the FILESYSTEM", so on Linux the
+# BSD probe SUCCEEDS and returns a block of filesystem stats. Every caller then
+# had a non-numeric mtime — vault_index_plan compared it with `-gt` and errored
+# per file, silently falling back to hashing every note it walked. So validate
+# the answer rather than trusting the exit status, and take whichever spelling
+# actually yields an epoch.
+file_mtime() {
+  local mt
+  for mt in "$(stat -f %m "$1" 2>/dev/null)" "$(stat -c %Y "$1" 2>/dev/null)"; do
+    case "$mt" in
+      ''|*[!0-9]*) continue ;;
+      *) printf '%s\n' "$mt"; return 0 ;;
+    esac
+  done
+  printf 'file_mtime: cannot stat %s\n' "$1" >&2
+  return 1
+}
+
+now_epoch() {
+  date +%s
+}
+
+keeper_sha256_text() {
+  local out
+  if command -v shasum >/dev/null 2>&1; then
+    out="$(printf '%s' "$1" | shasum -a 256 2>/dev/null | sha256_digest_field)"
+  fi
+  if [ -z "${out:-}" ] && command -v sha256sum >/dev/null 2>&1; then
+    out="$(printf '%s' "$1" | sha256sum 2>/dev/null | sha256_digest_field)"
+  fi
+  [ -n "${out:-}" ] || { printf 'keeper: no sha256 tool available for lock key\n' >&2; return 1; }
+  printf '%s\n' "$out"
+}
+
+keeper_test_pause() {
+  local point="$1" dir="${KEEPER_TEST_PAUSE_DIR:-}"
+  [ "${KEEPER_TEST_PAUSE_POINT:-}" = "$point" ] || return 0
+  [ -n "$dir" ] || return 0
+  mkdir -p "$dir" || return 1
+  : > "$dir/ready" || return 1
+  while [ ! -e "$dir/continue" ]; do sleep 0.01; done
+}
+
+keeper_lock_acquire() {
+  local key="$1" root lock candidate start now owner owner_token age stale reap token published reaped_owner reaped_token lock_kind
+  local timeout="${KEEPER_LOCK_TIMEOUT_SECONDS:-30}"
+  local stale_after="${KEEPER_LOCK_STALE_SECONDS:-2}"
+  case "$timeout" in ''|*[!0-9]*) timeout=30 ;; esac
+  case "$stale_after" in ''|*[!0-9]*) stale_after=2 ;; esac
+  root="/tmp/claude-obsidian-keeper-$(id -u)"
+  mkdir -p "$root" || return 1
+  chmod 700 "$root" 2>/dev/null || true
+  lock="$root/$(keeper_sha256_text "$key").lock"
+  token="$$.$(now_epoch).${RANDOM:-0}"
+  candidate="$root/.keeper-candidate-$$-${RANDOM:-0}"
+  if ! printf '%s\n%s\n' "$$" "$token" > "$candidate"; then
+    rm -f "$candidate" 2>/dev/null || true
+    return 1
+  fi
+  if ! keeper_test_pause before_lock_owner; then
+    rm -f "$candidate" 2>/dev/null || true
+    return 1
+  fi
+  start="$(now_epoch)"
+  while :; do
+    owner=""
+    owner_token=""
+    lock_kind=""
+    if [ -d "$lock" ]; then
+      lock_kind=dir
+      owner="$(sed -n '1p' "$lock/owner" 2>/dev/null || true)"
+      owner_token="$(sed -n '2p' "$lock/owner" 2>/dev/null || true)"
+    elif [ -f "$lock" ]; then
+      lock_kind=file
+      owner="$(sed -n '1p' "$lock" 2>/dev/null || true)"
+      owner_token="$(sed -n '2p' "$lock" 2>/dev/null || true)"
+    else
+      if ln "$candidate" "$lock" 2>/dev/null; then
+        rm -f "$candidate" 2>/dev/null || true
+        if ! keeper_test_pause after_lock_owner; then
+          rm -f "$lock" 2>/dev/null || true
+          return 1
+        fi
+        printf '%s|%s\n' "$lock" "$token"
+        return 0
+      fi
+      if [ ! -e "$lock" ] && [ ! -L "$lock" ]; then
+        continue
+      fi
+      sleep 0.05
+      continue
+    fi
+    now="$(now_epoch)"
+    age=0
+    if [ "$lock_kind" = dir ] || [ "$lock_kind" = file ]; then
+      published="$(file_mtime "$lock" 2>/dev/null || printf '%s' "$now")"
+      age=$(( now - published ))
+    fi
+    stale=0
+    case "$owner" in
+      ''|*[!0-9]*) [ "$age" -ge "$stale_after" ] && stale=1 ;;
+      *)
+        if [ "$age" -ge "$stale_after" ] && ! kill -0 "$owner" 2>/dev/null; then
+          stale=1
+        fi
+        ;;
+    esac
+    if [ "$stale" = 1 ]; then
+      reap="$lock.reaping.$$.$now.${RANDOM:-0}"
+      if mv "$lock" "$reap" 2>/dev/null; then
+        keeper_test_pause after_lock_reap || {
+          rm -f "$candidate" 2>/dev/null || true
+          return 1
+        }
+        if [ "$lock_kind" = dir ]; then
+          reaped_owner="$(sed -n '1p' "$reap/owner" 2>/dev/null || true)"
+          reaped_token="$(sed -n '2p' "$reap/owner" 2>/dev/null || true)"
+        else
+          reaped_owner="$(sed -n '1p' "$reap" 2>/dev/null || true)"
+          reaped_token="$(sed -n '2p' "$reap" 2>/dev/null || true)"
+        fi
+        if [ "$reaped_owner" != "$owner" ] || [ "$reaped_token" != "$owner_token" ]; then
+          [ -e "$lock" ] || mv "$reap" "$lock" 2>/dev/null || true
+        else
+          if [ "$lock_kind" = dir ]; then
+            rm -f "$reap/owner" 2>/dev/null || true
+            rmdir "$reap" 2>/dev/null || true
+          else
+            rm -f "$reap" 2>/dev/null || true
+          fi
+        fi
+      fi
+    fi
+    if [ $(( now - start )) -ge "$timeout" ]; then
+      printf 'keeper: timed out waiting for local write lock\n' >&2
+      rm -f "$candidate" 2>/dev/null || true
+      return 1
+    fi
+    sleep 0.05
+  done
+}
+
+keeper_lock_release() {
+  local record="$1" lock token owner published
+  local force_failure="${KEEPER_TEST_LOCK_RELEASE_FAIL:-0}"
+  lock="${record%%|*}"
+  token="${record#*|}"
+  if [ -d "$lock" ]; then
+    owner="$(sed -n '1p' "$lock/owner" 2>/dev/null || true)"
+    published="$(sed -n '2p' "$lock/owner" 2>/dev/null || true)"
+  else
+    owner="$(sed -n '1p' "$lock" 2>/dev/null || true)"
+    published="$(sed -n '2p' "$lock" 2>/dev/null || true)"
+  fi
+  [ "$owner" = "$$" ] && [ "$published" = "$token" ] || return 1
+  if [ -d "$lock" ]; then
+    rm -f "$lock/owner" 2>/dev/null || return 1
+    rmdir "$lock" 2>/dev/null || return 1
+  else
+    rm -f "$lock" 2>/dev/null || return 1
+  fi
+  [ "$force_failure" != 1 ]
+}
+
+keeper_with_lock() {
+  local key="$1" lock rc
+  shift
+  lock="$(keeper_lock_acquire "$key")" || return 1
+  KEEPER_DEFER_OUTPUT=1
+  if "$@"; then rc=0; else rc=$?; fi
+  if ! keeper_lock_release "$lock"; then
+    printf 'keeper: warning — local write lock release failed; manual cleanup may be required\n' >&2
+    KEEPER_WARNINGS="${KEEPER_WARNINGS:-}${KEEPER_WARNINGS:+$'\n'}local write lock release failed; manual cleanup may be required"
+  fi
+  if [ "${KEEPER_CRASH_AFTER_LOCK:-0}" = 1 ]; then
+    kill -KILL "$$"
+  fi
+  KEEPER_DEFER_OUTPUT=0
+  if [ "${KEEPER_OUTCOME_EMITTED:-0}" = 1 ] && type keeper_print_outcome >/dev/null 2>&1; then
+    keeper_print_outcome "$KEEPER_PENDING_OUTCOME" "$KEEPER_PENDING_VALUE"
+  fi
+  return "$rc"
+}
+
+keeper_fault() {
+  [ "${KEEPER_FAULT_INJECT:-}" = "$1" ] || return 0
+  printf 'keeper: injected fault at %s\n' "$1" >&2
+  if [ "${KEEPER_FAULT_MODE:-}" = hang ]; then
+    # Stand-in for a step that outlives the caller's subprocess cap: block
+    # until the caller kills the process group.
+    while :; do sleep 1; done
+  fi
+  if [ "${KEEPER_FAULT_MODE:-}" = crash ]; then
+    KEEPER_CRASH_AFTER_LOCK=1
+  fi
+  return 91
+}
+
+# Atomic replace, or clean up after yourself. Every render-to-temp-then-swap site
+# used a bare `mv`, so a failed swap left the temp behind (#43) — and one of them
+# mktemps into the *vault root*, where the leak is visible in Obsidian and Syncthing
+# replicates it to every host. PR #41 fixed one site; a helper is here so a caller
+# cannot opt out by forgetting.
+#
+# Lives in note-hash.sh because it is the one lib every consumer of this pattern
+# already sources first (the tick, and each affected lib's own suite).
+#
+# mktemp stages 0600; swapping it over a 0644 user note silently tightens the
+# permission and Syncthing replicates that mode to every host (#190). Enforce the
+# target's mode when it exists and 0666 & ~umask when it does not (#192), failing
+# the swap and cleaning up the staged temp if the mode cannot be read or applied.
+#
+# mv's own stderr is left alone: it names the reason (permissions, full disk, cross
+# device), and this adds which file was being replaced rather than replacing that.
+#
+# A symlinked target is refused rather than replaced or followed (#194): the swap would
+# otherwise either clobber the link or write through it to a file the caller never named.
+# A symlinked parent directory component is likewise refused (#249).
+keeper_swap_or_clean() {
+  local tmp="$1" target="$2" mode u p prev
+
+  if [ -L "$target" ]; then
+    rm -f "$tmp" 2>/dev/null || true
+    printf 'keeper: could not replace %s; target is a symlink\n' "$target" >&2
+    return 1
+  fi
+
+  if [ -d "$target" ]; then
+    rm -f "$tmp" 2>/dev/null || true
+    printf 'keeper: could not replace %s; target is a directory\n' "$target" >&2
+    return 1
+  fi
+
+  p="$(dirname "$target")"
+  prev=""
+  while [ -n "$p" ] && [ "$p" != "." ] && [ "$p" != "/" ] && [ "$p" != "$prev" ]; do
+    prev="$p"
+    case "$p" in
+      /var|/tmp|/etc|/home|/private/var|/private/tmp|/private/etc|/bin|/sbin|/lib|/lib64) ;;
+      *)
+        if [ -L "$p" ]; then
+          rm -f "$tmp" 2>/dev/null || true
+          printf 'keeper: could not replace %s; parent directory is a symlink\n' "$target" >&2
+          return 1
+        fi
+        ;;
+    esac
+    p="$(dirname "$p")"
+  done
+
+  if [ -f "$target" ]; then
+    mode="$(stat -L -c %a "$target" 2>/dev/null)" || mode=""
+    case "$mode" in
+      ''|*[!0-7]*) mode="$(stat -L -f %Lp "$target" 2>/dev/null)" || mode="" ;;
+    esac
+    case "$mode" in
+      ''|*[!0-7]*)
+        printf 'keeper: could not read mode of %s\n' "$target" >&2
+        rm -f "$tmp" 2>/dev/null || true
+        return 1
+        ;;
+    esac
+  else
+    u="$(umask 2>/dev/null)" || u=""
+    case "$u" in
+      ''|*[!0-7]*)
+        printf 'keeper: could not read umask for %s\n' "$target" >&2
+        rm -f "$tmp" 2>/dev/null || true
+        return 1
+        ;;
+      *)
+        mode="$(printf '%o' "$(( 8#666 & ~ 8#$u ))")"
+        ;;
+    esac
+  fi
+
+  if ! chmod "$mode" "$tmp"; then
+    printf 'keeper: could not apply mode %s for %s\n' "$mode" "$target" >&2
+    rm -f "$tmp" 2>/dev/null || true
+    return 1
+  fi
+
+  if mv "$tmp" "$target"; then
+    return 0
+  fi
+  rm -f "$tmp" 2>/dev/null || true
+  printf 'keeper: could not replace %s; the staged temp file was discarded\n' "$target" >&2
+  return 1
+}

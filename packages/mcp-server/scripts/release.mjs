@@ -1,7 +1,7 @@
 import { execFileSync } from "node:child_process";
 import { mkdtemp, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import {
@@ -12,7 +12,12 @@ import {
 } from "./release-lib.mjs";
 
 const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
-const repositoryRoot = resolve(packageRoot, "../..");
+let repositoryRoot;
+try {
+  repositoryRoot = execFileSync("git", ["rev-parse", "--show-toplevel"], { cwd: packageRoot, encoding: "utf8", stdio: ["ignore", "pipe", "inherit"] }).trim();
+} catch {
+  repositoryRoot = resolve(packageRoot, "../..");
+}
 const outputRoot = join(packageRoot, "release");
 
 function run(command, args, options = {}) {
@@ -41,7 +46,13 @@ if (sourceCommit !== revisionCommit) {
   throw new Error(`checked out commit ${sourceCommit} does not match revision ${revision} (${revisionCommit})`);
 }
 function requireCleanWorktree() {
-  const worktreeStatus = run("git", ["status", "--porcelain", "--untracked-files=all"], {
+  const isMonorepo = repositoryRoot !== packageRoot;
+  const statusArgs = ["status", "--porcelain", "--untracked-files=all"];
+  if (isMonorepo) {
+    const relPackage = relative(repositoryRoot, packageRoot);
+    statusArgs.push("--", relPackage);
+  }
+  const worktreeStatus = run("git", statusArgs, {
     cwd: repositoryRoot,
     stdio: ["ignore", "pipe", "inherit"],
   }).trim();

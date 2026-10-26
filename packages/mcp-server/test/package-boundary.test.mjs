@@ -858,3 +858,81 @@ test("source entrypoint uses canonical helpers before a build exists", async (t)
   await close(child, output);
   assertMcpOutput(output);
 });
+
+test("extracted package builds, tests, and runs without sibling plugin or repo", async (t) => {
+  const fixture = await mkdtemp(join(tmpdir(), "mcp-standalone-extracted-"));
+  const extractedRoot = join(fixture, "obsidian-mcp");
+  const extractedSrc = join(extractedRoot, "src");
+  const extractedScripts = join(extractedRoot, "scripts");
+  const extractedHelpers = join(extractedRoot, "helpers");
+  const extractedHelpersLib = join(extractedHelpers, "lib");
+  const vault = join(fixture, "vault");
+  const config = join(fixture, "obsidian.local.md");
+
+  await mkdir(extractedSrc, { recursive: true });
+  await mkdir(extractedScripts, { recursive: true });
+  await mkdir(extractedHelpersLib, { recursive: true });
+  await mkdir(vault);
+
+  await copyFile(join(packageRoot, "src", "stdio.mjs"), join(extractedSrc, "stdio.mjs"));
+  await copyFile(join(packageRoot, "src", "version.mjs"), join(extractedSrc, "version.mjs"));
+  await copyFile(join(packageRoot, "src", "settings.mjs"), join(extractedSrc, "settings.mjs"));
+  await copyFile(join(packageRoot, "src", "http.mjs"), join(extractedSrc, "http.mjs"));
+  await copyFile(join(packageRoot, "scripts", "build.mjs"), join(extractedScripts, "build.mjs"));
+  await copyFile(join(packageRoot, "package.json"), join(extractedRoot, "package.json"));
+  await copyFile(join(packageRoot, "tsconfig.json"), join(extractedRoot, "tsconfig.json"));
+  await copyFile(join(packageRoot, "contract.json"), join(extractedRoot, "contract.json"));
+
+  const helperList = [
+    "lib/resolve-config.sh",
+    "lib/commit-capture-parse.sh",
+    "commit-meta.sh",
+    "keeper",
+    "lib/note-hash.sh",
+    "lib/vault-index.sh",
+    "lib/allowlist-validate.sh",
+    "lib/dedup-scan.sh",
+  ];
+  for (const rel of helperList) {
+    const src = join(packageRoot, "helpers", rel);
+    const dst = join(extractedHelpers, rel);
+    await copyFile(src, dst);
+    await chmod(dst, (rel.endsWith("keeper") || rel.endsWith("commit-meta.sh")) ? 0o755 : 0o644);
+  }
+
+  await symlink(join(packageRoot, "node_modules"), join(extractedRoot, "node_modules"), "dir");
+  await run(process.execPath, ["scripts/build.mjs"], { cwd: extractedRoot });
+
+  await stat(join(extractedRoot, "dist", "stdio.mjs"));
+  await stat(join(extractedRoot, "dist", "helpers", "keeper"));
+  await stat(join(extractedRoot, "dist", "helpers", "lib", "note-hash.sh"));
+
+  await writeFile(config, `---\nvault_path: ${vault}\n---\n`);
+  const child = spawn(process.execPath, [join(extractedRoot, "dist", "stdio.mjs")], {
+    cwd: fixture,
+    env: { ...process.env, OBSIDIAN_LOCAL_MD: config, MCP_STDIO_PROFILE: "write" },
+    stdio: ["pipe", "pipe", "pipe"],
+  });
+  const output = collectOutput(child);
+  t.after(async () => {
+    if (child.exitCode === null) await close(child, output);
+    await rm(fixture, { recursive: true, force: true });
+  });
+
+  await initialize(child, output);
+  child.stdin.write(`${JSON.stringify({
+    jsonrpc: "2.0",
+    id: 2,
+    method: "tools/call",
+    params: {
+      name: "obsidian_keeper_save",
+      arguments: { title: "Standalone Extracted", body: "standalone write success", resolved: true, folder_hint: "Inbox", idempotency_key: "standalone-1" },
+    },
+  })}\n`);
+  const writeRes = JSON.parse(await output.nextLine());
+  assert.equal(writeRes.id, 2);
+  assert.equal(writeRes.result?.isError, false);
+  assert.match(await readFile(join(vault, "Inbox", "Standalone Extracted.md"), "utf8"), /standalone write success/);
+  await close(child, output);
+  assertMcpOutput(output);
+});
