@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
 import { access, mkdtemp, readdir, readFile, rm, symlink, writeFile, mkdir } from "node:fs/promises";
+import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
-import { spawn } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { once } from "node:events";
 import { test } from "node:test";
 import { createHmac } from "node:crypto";
@@ -11,7 +12,10 @@ import { writeOutput } from "../src/stdio.mjs";
 const packageRoot = resolve(dirname(new URL(import.meta.url).pathname), "..");
 const stdioEntrypoint = join(packageRoot, "src", "stdio.mjs");
 const httpEntrypoint = join(packageRoot, "src", "http.mjs");
-const repositoryRoot = resolve(packageRoot, "../..");
+let repositoryRoot = packageRoot;
+try {
+  repositoryRoot = execFileSync("git", ["rev-parse", "--show-toplevel"], { cwd: packageRoot, encoding: "utf8" }).trim();
+} catch {}
 const secret = "0123456789abcdef0123456789abcdef";
 const issuer = "https://issuer.example";
 const audience = "claude-obsidian";
@@ -201,7 +205,10 @@ async function waitForPath(path) {
 async function holdKeeperLock(vaultPath, root, label) {
   const pauseDir = join(root, `pause-${label}`);
   await mkdir(pauseDir);
-  const child = spawn("bash", [join(repositoryRoot, "scripts", "keeper"), "append", "--vault", vaultPath, "--target", `Hold/${label}.md`], {
+  const keeperPath = existsSync(join(packageRoot, "helpers", "keeper"))
+    ? join(packageRoot, "helpers", "keeper")
+    : join(repositoryRoot, "scripts", "keeper");
+  const child = spawn("bash", [keeperPath, "append", "--vault", vaultPath, "--target", `Hold/${label}.md`], {
     env: { ...process.env, KEEPER_TEST_PAUSE_POINT: "after_lock_owner", KEEPER_TEST_PAUSE_DIR: pauseDir },
     stdio: ["pipe", "ignore", "pipe"],
   });

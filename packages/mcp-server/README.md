@@ -262,14 +262,23 @@ WantedBy=multi-user.target
 
 ### Environment configuration (`/etc/obsidian-mcp/server.env`)
 
+Generate a cryptographically secure 256-bit secret (64 hex characters / 32 bytes):
+```bash
+openssl rand -hex 32
+```
+
+Configure `/etc/obsidian-mcp/server.env` with your deployment values:
+
 ```ini
 OBSIDIAN_LOCAL_MD=/etc/obsidian-mcp/obsidian.local.md
 MCP_HTTP_BIND=127.0.0.1
 MCP_HTTP_PORT=3000
-MCP_HTTP_JWT_SECRET=your-32-byte-secret-here-0123456789
+# Generate a real secret with: openssl rand -hex 32
+# Placeholder and example values will fail closed on startup.
+MCP_HTTP_JWT_SECRET=<generate-secret-using-openssl-rand-hex-32>
 MCP_HTTP_JWT_ISSUER=https://issuer.example
 MCP_HTTP_JWT_AUDIENCE=claude-obsidian
-MCP_HTTP_ALLOWED_HOSTS=127.0.0.1,localhost
+MCP_HTTP_ALLOWED_HOSTS=127.0.0.1,localhost,mcp.example.com
 MCP_HTTP_ALLOWED_ORIGINS=https://client.example
 MCP_STDIO_PROFILE=write
 ```
@@ -292,6 +301,8 @@ location /mcp {
     proxy_buffering off;
 }
 ```
+
+**Host header validation:** `MCP_HTTP_ALLOWED_HOSTS` validates the HTTP `Host` header received by the server. When Nginx forwards the incoming host via `proxy_set_header Host $host;`, ensure your public domain (e.g. `mcp.example.com`) is present in `MCP_HTTP_ALLOWED_HOSTS`. Alternatively, rewrite the upstream Host header to loopback (`proxy_set_header Host 127.0.0.1;`) if public hostname forwarding is not needed.
 
 ### Upgrades, Compatibility, and Safe Rollback
 

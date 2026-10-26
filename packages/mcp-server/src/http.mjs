@@ -34,6 +34,26 @@ function requiredSetting(name) {
   return value;
 }
 
+function validateJwtSecret(secret) {
+  if (Buffer.byteLength(secret, "utf8") < 32) {
+    throw new Error("MCP_HTTP_JWT_SECRET must be at least 32 bytes");
+  }
+  const trimmed = secret.trim();
+  const lower = trimmed.toLowerCase();
+  if (
+    /^<.+>$/.test(trimmed) ||
+    lower.startsWith("your-") ||
+    lower.includes("placeholder") ||
+    lower.includes("change-me") ||
+    lower.includes("changeme") ||
+    lower.includes("example") ||
+    lower.includes("generate-secret")
+  ) {
+    throw new Error("MCP_HTTP_JWT_SECRET must not use an example or placeholder secret; generate a cryptographically secure secret (e.g. openssl rand -hex 32)");
+  }
+  return secret;
+}
+
 function loadHttpConfiguration() {
   const bind = process.env.MCP_HTTP_BIND?.trim() || "127.0.0.1";
   const port = integerSetting("MCP_HTTP_PORT", 3000, 0, 65_535);
@@ -46,8 +66,7 @@ function loadHttpConfiguration() {
     }
     return parsed.origin;
   });
-  const jwtSecret = requiredSetting("MCP_HTTP_JWT_SECRET");
-  if (Buffer.byteLength(jwtSecret, "utf8") < 32) throw new Error("MCP_HTTP_JWT_SECRET must be at least 32 bytes");
+  const jwtSecret = validateJwtSecret(requiredSetting("MCP_HTTP_JWT_SECRET"));
   return {
     bind,
     port,

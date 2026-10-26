@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
+import { existsSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -112,7 +113,10 @@ test("release metadata records an exact release tag", async (t) => {
 });
 
 test("release workflow builds immutable revisions and only publishes pushed tags", async () => {
-  const workflow = await readFile(join(repositoryRoot, ".github/workflows/mcp-release.yml"), "utf8");
+  const workflowPath = existsSync(join(packageRoot, ".github/workflows/mcp-release.yml"))
+    ? join(packageRoot, ".github/workflows/mcp-release.yml")
+    : join(repositoryRoot, ".github/workflows/mcp-release.yml");
+  const workflow = await readFile(workflowPath, "utf8");
   const publishJob = workflow.slice(workflow.indexOf("\n  publish:"));
 
   assert.match(workflow, /pull_request:/);

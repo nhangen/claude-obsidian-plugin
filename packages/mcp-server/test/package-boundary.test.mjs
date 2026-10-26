@@ -1,13 +1,17 @@
 import assert from "node:assert/strict";
-import { access, chmod, copyFile, mkdir, mkdtemp, readFile, readdir, rm, stat, symlink, writeFile } from "node:fs/promises";
+import { access, chmod, copyFile, cp, mkdir, mkdtemp, readFile, readdir, rm, stat, symlink, writeFile } from "node:fs/promises";
+import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
-import { spawn } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { createHmac } from "node:crypto";
 import { test } from "node:test";
 
 const packageRoot = resolve(dirname(new URL(import.meta.url).pathname), "..");
-const repositoryRoot = resolve(packageRoot, "../..");
+let repositoryRoot = packageRoot;
+try {
+  repositoryRoot = execFileSync("git", ["rev-parse", "--show-toplevel"], { cwd: packageRoot, encoding: "utf8" }).trim();
+} catch {}
 const httpSecret = "0123456789abcdef0123456789abcdef";
 const httpIssuer = "https://issuer.example";
 const httpAudience = "claude-obsidian";
@@ -226,7 +230,11 @@ test("packed package exposes a built stdio launcher that works outside the insta
   const metadata = JSON.parse(await explicitOutput.nextLine());
   assert.equal(metadata.id, 3);
   assert.equal(metadata.result?.isError, false);
-  assert.equal(metadata.result?.structuredContent?.repository, "nhangen/claude-obsidian-plugin");
+  if (repositoryRoot !== packageRoot) {
+    assert.equal(metadata.result?.structuredContent?.repository, "nhangen/claude-obsidian-plugin");
+  } else {
+    assert.equal(typeof metadata.result?.structuredContent?.repository, "string");
+  }
   explicitChild.stdin.write(`${JSON.stringify({
     jsonrpc: "2.0",
     id: 4,
@@ -643,7 +651,12 @@ test("packed stdio and HTTP entrypoints serialize contended keeper writes", asyn
     await new Promise((resolveClose) => httpChild.once("close", resolveClose));
   });
 
-  await t.test("stdio and packaged keeper writes wait for the watcher lock and commit once", async () => {
+  await t.test("stdio and packaged keeper writes wait for the watcher lock and commit once", async (subtest) => {
+    const watcherScript = join(repositoryRoot, "scripts", "vaultkeeper-tick.sh");
+    if (!existsSync(watcherScript)) {
+      subtest.skip("vaultkeeper-tick.sh not available in standalone package");
+      return;
+    }
     const server = await startStdio();
     const pause = join(fixture, "watcher-pause");
     const bodyFile = join(fixture, "hook-body.md");
@@ -772,6 +785,11 @@ test("packed stdio and HTTP entrypoints serialize contended keeper writes", asyn
 });
 
 test("source entrypoint uses canonical helpers before a build exists", async (t) => {
+  const pluginManifest = join(repositoryRoot, ".claude-plugin", "plugin.json");
+  if (!existsSync(pluginManifest)) {
+    t.skip("Monorepo source entrypoint test not applicable in standalone package");
+    return;
+  }
   const fixture = await mkdtemp(join(tmpdir(), "mcp-source-entrypoint-"));
   const sourceRoot = join(fixture, "checkout");
   const sourcePackage = join(sourceRoot, "packages", "mcp-server");
@@ -859,53 +877,93 @@ test("source entrypoint uses canonical helpers before a build exists", async (t)
   assertMcpOutput(output);
 });
 
-test("extracted package builds, tests, and runs without sibling plugin or repo", async (t) => {
+test("extracted package builds, tests, and runs without sibling plugin or repo", { timeout: 120_000 }, async (t) => {
+  if (process.env.OBSIDIAN_MCP_STANDALONE_FIXTURE) {
+    t.skip("Skipping recursive standalone package extraction test inside standalone fixture");
+    return;
+  }
+
   const fixture = await mkdtemp(join(tmpdir(), "mcp-standalone-extracted-"));
   const extractedRoot = join(fixture, "obsidian-mcp");
-  const extractedSrc = join(extractedRoot, "src");
-  const extractedScripts = join(extractedRoot, "scripts");
-  const extractedHelpers = join(extractedRoot, "helpers");
-  const extractedHelpersLib = join(extractedHelpers, "lib");
   const vault = join(fixture, "vault");
   const config = join(fixture, "obsidian.local.md");
 
-  await mkdir(extractedSrc, { recursive: true });
-  await mkdir(extractedScripts, { recursive: true });
-  await mkdir(extractedHelpersLib, { recursive: true });
+  await mkdir(extractedRoot, { recursive: true });
   await mkdir(vault);
 
-  await copyFile(join(packageRoot, "src", "stdio.mjs"), join(extractedSrc, "stdio.mjs"));
-  await copyFile(join(packageRoot, "src", "version.mjs"), join(extractedSrc, "version.mjs"));
-  await copyFile(join(packageRoot, "src", "settings.mjs"), join(extractedSrc, "settings.mjs"));
-  await copyFile(join(packageRoot, "src", "http.mjs"), join(extractedSrc, "http.mjs"));
-  await copyFile(join(packageRoot, "scripts", "build.mjs"), join(extractedScripts, "build.mjs"));
-  await copyFile(join(packageRoot, "package.json"), join(extractedRoot, "package.json"));
-  await copyFile(join(packageRoot, "tsconfig.json"), join(extractedRoot, "tsconfig.json"));
-  await copyFile(join(packageRoot, "contract.json"), join(extractedRoot, "contract.json"));
+  await cp(join(packageRoot, "src"), join(extractedRoot, "src"), { recursive: true });
+  await cp(join(packageRoot, "helpers"), join(extractedRoot, "helpers"), { recursive: true });
+  await cp(join(packageRoot, "scripts"), join(extractedRoot, "scripts"), { recursive: true });
+  await cp(join(packageRoot, "test"), join(extractedRoot, "test"), { recursive: true });
+  await cp(join(packageRoot, "examples"), join(extractedRoot, "examples"), { recursive: true });
+  await cp(join(packageRoot, ".github"), join(extractedRoot, ".github"), { recursive: true });
 
-  const helperList = [
-    "lib/resolve-config.sh",
-    "lib/commit-capture-parse.sh",
-    "commit-meta.sh",
-    "keeper",
-    "lib/note-hash.sh",
-    "lib/vault-index.sh",
-    "lib/allowlist-validate.sh",
-    "lib/dedup-scan.sh",
+  const rootFiles = [
+    "package.json",
+    "package-lock.json",
+    "tsconfig.json",
+    "contract.json",
+    "monitor.mjs",
+    "README.md",
+    "LICENSE",
+    ".gitignore",
   ];
-  for (const rel of helperList) {
-    const src = join(packageRoot, "helpers", rel);
-    const dst = join(extractedHelpers, rel);
-    await copyFile(src, dst);
-    await chmod(dst, (rel.endsWith("keeper") || rel.endsWith("commit-meta.sh")) ? 0o755 : 0o644);
+  for (const file of rootFiles) {
+    const srcPath = join(packageRoot, file);
+    if (existsSync(srcPath)) {
+      await copyFile(srcPath, join(extractedRoot, file));
+    }
   }
 
-  await symlink(join(packageRoot, "node_modules"), join(extractedRoot, "node_modules"), "dir");
-  await run(process.execPath, ["scripts/build.mjs"], { cwd: extractedRoot });
+  for (const rel of ["keeper", "commit-meta.sh"]) {
+    const p = join(extractedRoot, "helpers", rel);
+    if (existsSync(p)) await chmod(p, 0o755);
+  }
 
+  await run("git", ["init", "--quiet", "--initial-branch=master"], { cwd: extractedRoot });
+  await run("git", ["config", "user.name", "Standalone Test"], { cwd: extractedRoot });
+  await run("git", ["config", "user.email", "standalone@example.invalid"], { cwd: extractedRoot });
+  await run("git", ["add", "."], { cwd: extractedRoot });
+  await run("git", ["-c", "core.hooksPath=/dev/null", "commit", "--quiet", "-m", "initial standalone commit"], {
+    cwd: extractedRoot,
+    env: {
+      ...process.env,
+      GIT_AUTHOR_NAME: "Standalone Test",
+      GIT_AUTHOR_EMAIL: "standalone@example.invalid",
+      GIT_COMMITTER_NAME: "Standalone Test",
+      GIT_COMMITTER_EMAIL: "standalone@example.invalid",
+    },
+  });
+
+  await cp(join(packageRoot, "node_modules"), join(extractedRoot, "node_modules"), { recursive: true });
+
+  const { stdout: headSha } = await run("git", ["rev-parse", "HEAD"], { cwd: extractedRoot });
+  const revision = headSha.trim();
+
+  await run(process.execPath, ["scripts/build.mjs"], { cwd: extractedRoot });
   await stat(join(extractedRoot, "dist", "stdio.mjs"));
   await stat(join(extractedRoot, "dist", "helpers", "keeper"));
   await stat(join(extractedRoot, "dist", "helpers", "lib", "note-hash.sh"));
+
+  await run("npm", ["test"], {
+    cwd: extractedRoot,
+    env: {
+      ...process.env,
+      OBSIDIAN_MCP_STANDALONE_FIXTURE: "1",
+    },
+  });
+
+  await run(process.execPath, ["scripts/release.mjs", "--revision", revision], {
+    cwd: extractedRoot,
+    env: {
+      ...process.env,
+      OBSIDIAN_MCP_STANDALONE_FIXTURE: "1",
+    },
+  });
+
+  const releaseEntries = await readdir(join(extractedRoot, "release"));
+  assert.ok(releaseEntries.some((f) => f.endsWith(".tgz")), "release directory must contain a tarball");
+  assert.ok(releaseEntries.some((f) => f.endsWith(".release.json")), "release directory must contain release metadata");
 
   await writeFile(config, `---\nvault_path: ${vault}\n---\n`);
   const child = spawn(process.execPath, [join(extractedRoot, "dist", "stdio.mjs")], {

@@ -2,13 +2,16 @@ import assert from "node:assert/strict";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
-import { spawn } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { once } from "node:events";
 import { test } from "node:test";
 
 const packageRoot = resolve(dirname(new URL(import.meta.url).pathname), "..");
 const entrypoint = join(packageRoot, "src", "stdio.mjs");
-const repositoryRoot = resolve(packageRoot, "../..");
+let repositoryRoot = packageRoot;
+try {
+  repositoryRoot = execFileSync("git", ["rev-parse", "--show-toplevel"], { cwd: packageRoot, encoding: "utf8" }).trim();
+} catch {}
 const promptFixtures = JSON.parse(await readFile(new URL("./fixtures/prompt-contracts.json", import.meta.url), "utf8"));
 
 function startStdioServer(configPath) {

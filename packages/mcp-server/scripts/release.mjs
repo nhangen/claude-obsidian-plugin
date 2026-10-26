@@ -72,11 +72,12 @@ run("npm", ["run", "build"]);
 const packOutput = JSON.parse(run("npm", ["pack", "--json", "--ignore-scripts", "--pack-destination", outputRoot], {
   stdio: ["ignore", "pipe", "inherit"],
 }));
-if (!Array.isArray(packOutput) || packOutput.length !== 1 || typeof packOutput[0].filename !== "string") {
+const packItems = Array.isArray(packOutput) ? packOutput : Object.values(packOutput);
+if (!Array.isArray(packItems) || packItems.length !== 1 || typeof packItems[0]?.filename !== "string") {
   throw new Error("npm pack did not return exactly one artifact");
 }
 
-const artifactPath = join(outputRoot, packOutput[0].filename);
+const artifactPath = join(outputRoot, packItems[0].filename);
 const extractionRoot = await mkdtemp(join(tmpdir(), "mcp-release-"));
 try {
   run("tar", ["-xzf", artifactPath, "-C", extractionRoot]);
