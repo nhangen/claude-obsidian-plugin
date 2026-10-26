@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { createHmac } from "node:crypto";
+import { createHmac, randomBytes } from "node:crypto";
 import { access, chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { request as httpRequest } from "node:http";
 import { once } from "node:events";
@@ -18,10 +18,10 @@ function base64url(value) {
   return Buffer.from(value).toString("base64url");
 }
 
-function token({ exp = Math.floor(Date.now() / 1000) + 300 } = {}) {
+function token({ exp = Math.floor(Date.now() / 1000) + 300, signingSecret = secret } = {}) {
   const header = base64url(JSON.stringify({ alg: "HS256", typ: "JWT" }));
   const payload = base64url(JSON.stringify({ aud: audience, exp, iss: issuer, scope: "vault:read repo:read" }));
-  const signature = createHmac("sha256", secret).update(`${header}.${payload}`).digest("base64url");
+  const signature = createHmac("sha256", signingSecret).update(`${header}.${payload}`).digest("base64url");
   return `${header}.${payload}.${signature}`;
 }
 
@@ -928,6 +928,29 @@ test("HTTP server startup fails closed on insecure example or placeholder secret
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
+});
+
+test("HTTP authentication preserves high-entropy keys containing placeholder-like text", async (t) => {
+  const { directory, config } = await fixture();
+  const signingSecret = `your-${randomBytes(32).toString("hex")}-Placeholder-Change-Me-Changeme-Example-Generate-Secret`;
+  const server = startServer(config, { MCP_HTTP_JWT_SECRET: signingSecret });
+  t.after(async () => {
+    await server.stop();
+    await rm(directory, { recursive: true, force: true });
+  });
+  const url = await server.ready;
+  const accepted = await fetch(`${url}/mcp`, {
+    method: "POST",
+    headers: headers(url, token({ signingSecret })),
+    body: JSON.stringify(initialize()),
+  });
+  assert.equal(accepted.status, 200);
+  const wrongKey = await fetch(`${url}/mcp`, {
+    method: "POST",
+    headers: headers(url, token()),
+    body: JSON.stringify(initialize(2)),
+  });
+  assert.equal(wrongKey.status, 401);
 });
 
 test("reverse proxy Host header validation allows configured public domain and blocks unlisted hosts", async (t) => {

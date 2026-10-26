@@ -38,17 +38,14 @@ function validateJwtSecret(secret) {
   if (Buffer.byteLength(secret, "utf8") < 32) {
     throw new Error("MCP_HTTP_JWT_SECRET must be at least 32 bytes");
   }
-  const trimmed = secret.trim();
-  const lower = trimmed.toLowerCase();
-  if (
-    /^<.+>$/.test(trimmed) ||
-    lower.startsWith("your-") ||
-    lower.includes("placeholder") ||
-    lower.includes("change-me") ||
-    lower.includes("changeme") ||
-    lower.includes("example") ||
-    lower.includes("generate-secret")
-  ) {
+  const placeholderSecrets = new Set([
+    "<generate-secret-using-openssl-rand-hex-32>",
+    "your-32-byte-secret-here-0123456789",
+    "change-me-please-secret-0123456789",
+    "example-secret-key-32-bytes-long",
+    "placeholder-secret-key-value-here",
+  ]);
+  if (placeholderSecrets.has(secret.toLowerCase())) {
     throw new Error("MCP_HTTP_JWT_SECRET must not use an example or placeholder secret; generate a cryptographically secure secret (e.g. openssl rand -hex 32)");
   }
   return secret;
