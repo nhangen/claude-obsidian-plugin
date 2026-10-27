@@ -689,6 +689,9 @@ try {
   await verifyRuntime();
   const packedRuntime = Boolean(process.env.OBSIDIAN_MCP_TEST_READ_LAUNCHER);
   const runtime = packedRuntime ? null : await installRuntime(temp);
+  if (mutation === "captured-session") {
+    await scenario(runtime, "late", temp);
+  } else {
   if (!packedRuntime) {
     await rejectedStartup(runtime, [], temp);
     await rejectedStartup(runtime, ["--preauthenticated-http=false", "--header", `Authorization:Bearer ${authSecret}`], temp);
@@ -761,6 +764,7 @@ try {
   await scenario(runtime, "http-408", temp);
   await scenario(runtime, "auth", temp);
   await scenario(runtime, "write", temp);
+  }
   console.log(`obsidian-mcp-read-bridge: PASS mutation=${mutation}`);
 } finally {
   await rm(temp, { recursive: true, force: true });

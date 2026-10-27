@@ -543,7 +543,10 @@ for mutation in captured-session read-allowlist clear-session preauthenticated-h
   if node "$ROOT/tests/obsidian-mcp-read-bridge.test.mjs" "$mutation" >"$tmp/$mutation.out" 2>&1; then
     fail "$mutation regression survived"
   fi
-  grep -Eq "$expected" "$tmp/$mutation.out" || fail "$mutation failed outside its regression assertion"
+  if ! grep -Eq "$expected" "$tmp/$mutation.out"; then
+    grep -m 1 -E '^(AssertionError|Error:)' "$tmp/$mutation.out" | cut -c 1-500 >&2 || true
+    fail "$mutation failed outside its regression assertion"
+  fi
 done
 
 python3 - "$ROOT" "$bundle" "$fake_bin" "$fake_home" <<'PY'

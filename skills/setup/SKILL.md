@@ -1,6 +1,6 @@
 ---
 name: setup
-description: First-time setup wizard for the Obsidian plugin. Guides the user through configuring vault path, domain taxonomy, and routing rules, then writes obsidian.local.md. Triggers on "/obsidian:setup", "set up obsidian", "configure obsidian plugin", "obsidian first run".
+description: Set up the Obsidian plugin for a remote public MCP server or a local vault. Triggers on "/obsidian:setup", "set up obsidian", "configure obsidian plugin", "obsidian first run".
 version: 1.0.0
 ---
 
@@ -18,11 +18,56 @@ Interactive first-run wizard. Writes `obsidian.local.md` from user answers so ro
 
 ### 0. Choose the Host Role
 
-If this is an MCP-only client using a vault on another host, skip the local
-vault and watcher wizard. Follow the thin-client connection instructions in
-`packages/mcp-server/README.md` instead. Configure the vault and any watcher on
-the host with the local vault or server-side vault mount; never run a local
-watcher installer on a client that cannot access that vault.
+Choose remote MCP when the user has a shared server and no local vault. Complete
+the remote branch below, then STOP this wizard. Do not ask for local vault paths,
+create `obsidian.local.md`, install a watcher, or run local keeper commands.
+Only follow steps 1 onward for an explicitly local vault setup.
+
+#### Remote MCP setup
+
+1. Obtain the server endpoint and references to separately scoped read/write
+   credentials. Never ask the user to paste tokens into chat. Use existing owned
+   0400/0600 token files, or the host environment variables
+   `OBSIDIAN_MCP_READ_TOKEN` and `OBSIDIAN_MCP_WRITE_TOKEN`.
+2. Reuse an installed, verified public client if present. Otherwise install the
+   client release from https://github.com/nhangen/obsidian-mcp/releases using its
+   public installation instructions and independently verified bootstrap/metadata
+   checksums. No llm-tools checkout, plugin-built bundle, client vault mount or
+   local server is required. Do not execute an unverified downloaded bootstrap.
+3. Preview Claude user-scope registration and exact routine-write permissions:
+
+   ```bash
+   python3 "${CLAUDE_PLUGIN_ROOT}/scripts/setup-mcp.py" \
+     --client-dir /absolute/public-client/current \
+     --endpoint https://your-server.example/mcp
+   ```
+
+   Substitute the actual installed client and endpoint. For token files, add
+   `--read-token-file /absolute/read-token --write-token-file /absolute/write-token`.
+   Tailnet HTTP additionally requires `--allow-tailnet-http`; do not enable it for
+   an arbitrary public HTTP address. After checking the preview, rerun with
+   `--apply`. Existing differing registrations or conflicting ask/deny rules are
+   refused, never removed or overwritten. Inspect them before proposing a
+   migration. The helper supports the normal Claude user configuration; custom
+   `CLAUDE_CONFIG_DIR` requires explicit manual host setup. Project and managed
+   policy can still override user permissions; verify the effective policy
+   during the reconnect check rather than weakening those policies.
+4. Reconnect the host, verify discovery and a bounded read. If the user requested
+   a save, verify its real note content, INDEX and daily backlink and inspect the
+   write receipt. Never call registration itself a successful connection or save.
+5. Report automatic capture as UNCHANGED. This setup adds MCP tools, not a new
+   session/commit writer. Remote-only users should ask for explicit MCP saves;
+   plugin local-vault commands are not remote-compatible merely because the MCP
+   tools connected. Do not enable automatic MCP capture, disable legacy hooks,
+   uninstall the plugin, replay pending events, or claim full plugin migration
+   without the separately verified ownership handoff tracked in #254.
+
+The helper preserves unrelated servers, hooks and permissions, stores credential
+references only, defaults to a no-write preview and keeps unique private backups
+of changed existing files. A partial setup exits nonzero; inspect the two config
+files and backups, then rerun the same arguments to complete it. Backups can
+contain existing credentials and must remain private. Do not restore a whole
+backup over later unrelated host changes.
 
 ### 1. Check for Existing Config
 
