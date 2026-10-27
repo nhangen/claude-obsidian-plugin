@@ -5,7 +5,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/scripts/config-doctor.sh\"",
+            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/scripts/capture-hook.sh\" SessionStart",
             "timeout": 10
           }
         ]
@@ -16,7 +16,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/scripts/session-save.sh\"",
+            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/scripts/capture-hook.sh\" Stop",
             "timeout": 60
           }
         ]
@@ -24,11 +24,11 @@
     ],
     "PreToolUse": [
       {
-        "matcher": "Bash",
+        "matcher": "^(Bash|mcp__obsidian-write__obsidian_keeper_save|mcp__obsidian-write__obsidian_daily_append)$",
         "hooks": [
           {
             "type": "command",
-            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/scripts/commit-capture-pre.sh\"",
+            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/scripts/capture-hook.sh\" PreToolUse",
             "timeout": 10
           }
         ]
@@ -36,15 +36,24 @@
     ],
     "PostToolUse": [
       {
-        "matcher": "Bash",
+        "matcher": "^(Bash|mcp__obsidian-write__obsidian_keeper_save|mcp__obsidian-write__obsidian_daily_append)$",
         "hooks": [
           {
             "type": "command",
-            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/scripts/commit-capture.sh\"",
+            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/scripts/capture-hook.sh\" PostToolUse",
             "timeout": 10
           }
         ]
       }
+    ],
+    "UserPromptSubmit": [
+      {"hooks": [{"type": "command", "command": "bash \"${CLAUDE_PLUGIN_ROOT}/scripts/capture-hook.sh\" UserPromptSubmit", "timeout": 10}]}
+    ],
+    "PostToolUseFailure": [
+      {"matcher": "^(Bash|mcp__obsidian-write__obsidian_keeper_save|mcp__obsidian-write__obsidian_daily_append)$", "hooks": [{"type": "command", "command": "bash \"${CLAUDE_PLUGIN_ROOT}/scripts/capture-hook.sh\" PostToolUseFailure", "timeout": 10}]}
+    ],
+    "StopFailure": [
+      {"hooks": [{"type": "command", "command": "bash \"${CLAUDE_PLUGIN_ROOT}/scripts/capture-hook.sh\" StopFailure", "timeout": 10}]}
     ]
   }
 }

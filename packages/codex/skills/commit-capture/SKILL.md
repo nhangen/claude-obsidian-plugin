@@ -5,6 +5,13 @@ description: Capture Codex conversation context in Obsidian immediately after ev
 
 # Obsidian Commit Capture
 
+This is the legacy projection, not an MCP capture adapter. Before metadata or
+writes, run `python3 "<this skill directory>/scripts/lib/capture-owner.py" status`.
+Continue only for stable legacy ownership. MCP, disabled, draining or unreadable
+ownership must not invoke this keeper or reconstruct a commit event. Use the
+separately activated public Codex native profile for MCP capture; configuring
+the plugin's Claude attachment does not migrate Codex. Never capture twice.
+
 Preserve why a commit happened. Git already stores the code and subject; the note stores the goal, investigation, decisions, debugging, and loose ends from the conversation.
 
 Codex does not currently deliver this plugin's bundled tool hooks in a normal CLI session. Invoke this skill after the successful commit instead of waiting for a hook record.

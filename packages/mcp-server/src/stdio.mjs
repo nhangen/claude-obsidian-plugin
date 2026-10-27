@@ -36,7 +36,7 @@ const packagedHelperRoot = join(packageRoot, "dist", "helpers");
 
 function helperPath(...segments) {
   if (existsSync(join(localHelperRoot, "keeper"))) return join(localHelperRoot, ...segments);
-  if (isSourceCheckout) return join(sourceRepositoryRoot, "scripts", ...segments);
+  if (isSourceCheckout) return join(sourceRepositoryRoot, "scripts", ...(segments[0] === "keeper" ? ["keeper-core", ...segments.slice(1)] : segments));
   return join(packagedHelperRoot, ...segments);
 }
 

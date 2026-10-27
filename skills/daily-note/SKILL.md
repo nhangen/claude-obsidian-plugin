@@ -6,6 +6,13 @@ version: 1.2.0
 
 # Daily Note Management
 
+Run `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/lib/capture-owner.py" status` first.
+For stable MCP ownership, use bounded MCP daily-note reads and
+`obsidian:keeper-save`'s MCP APPEND branch for writes. The server's configured
+daily path is authoritative; do not assume a local `Daily/` directory, render a
+local template, or invoke GUI open. STOP before the local procedure. For
+disabled/draining ownership or an error, do not start a write or switch routes.
+
 Manages the daily note in `Daily/YYYY-MM-DD.md`.
 
 Append and create-on-absent are filed through the **keeper-save** skill

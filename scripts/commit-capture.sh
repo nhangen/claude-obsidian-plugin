@@ -13,6 +13,11 @@
 
 set -uo pipefail
 
+CAPTURE_SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+if ! python3 "$CAPTURE_SCRIPT_DIR/lib/capture-owner.py" lease; then
+  exec python3 "$CAPTURE_SCRIPT_DIR/lib/capture-owner.py" route --event PostToolUse --script "$0" -- "$@"
+fi
+
 INPUT=$(cat)
 
 # --- Quick exit for non-commit commands ---
@@ -90,6 +95,7 @@ REPO_ROOT=$(GIT rev-parse --show-toplevel 2>/dev/null) || REPO_ROOT=""
 # --- Did a commit actually land? ---
 
 SNAP_FILE="$(cc_snapshot_file "$INPUT")"
+PROCESSING_FILE=""
 HEAD_BEFORE=""
 SNAP_ROOT=""
 SNAP_INTENT=""
@@ -101,9 +107,10 @@ if [ -f "$SNAP_FILE" ]; then
       intent=*) SNAP_INTENT="${line#intent=}" ;;
     esac
   done < "$SNAP_FILE"
-  # Consumed: one snapshot answers for exactly one invocation, so a second
-  # PostToolUse for the same call cannot re-capture the commit.
-  rm -f "$SNAP_FILE" 2>/dev/null || true
+  PROCESSING_DIR="$(cc_state_dir)/pre-commit-processing"
+  mkdir -p "$PROCESSING_DIR" || exit 0
+  PROCESSING_FILE="$PROCESSING_DIR/${SNAP_FILE##*/}"
+  mv "$SNAP_FILE" "$PROCESSING_FILE" || exit 0
 fi
 
 # Which of the three states is this snapshot in?
@@ -161,6 +168,51 @@ esac
 # dry-run, short-circuited by `false &&`, or found nothing to commit leaves HEAD
 # exactly where the snapshot found it.
 if [ "$HEAD_BEFORE" = "$FULL_SHA" ]; then
+  if [ "$SNAP_STATE" = trusted ] && [ -n "$PROCESSING_FILE" ]; then
+    if ! python3 - "$SCRIPT_DIR" "$PROCESSING_FILE" "$REPO_ROOT" "$HEAD_BEFORE" <<'PY'
+import hashlib
+import os
+from pathlib import Path
+import re
+import runpy
+import subprocess
+import sys
+
+try:
+    scripts, path, repo, before = sys.argv[1:]
+    owner = runpy.run_path(str(Path(scripts) / "lib/capture-owner.py"))
+    path = Path(path)
+    descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    with os.fdopen(descriptor) as stream:
+        snapshot = stream.read(1048577)
+    if len(snapshot.encode()) > 1048576 or not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", before):
+        raise ValueError("invalid snapshot")
+    fields = dict(line.split("=", 1) for line in snapshot.splitlines())
+    root = subprocess.check_output(["git", "-C", repo, "rev-parse", "--show-toplevel"], text=True).strip()
+    after = subprocess.check_output(["git", "-C", repo, "rev-parse", "--verify", "HEAD"], text=True).strip()
+    if fields.get("sha") != before or fields.get("root") != root or root != repo or before != after:
+        raise ValueError("no trusted unchanged HEAD")
+    history = fields.get("reflog_sha256", "")
+    if not re.fullmatch(r"[0-9a-f]{64}", history) or owner["reflog_digest"](repo) != history:
+        raise ValueError("commit history changed or unavailable")
+    terminal = owner["directory"](owner["root"]() / "pre-commit-terminal")
+    key = path.name + "-" + hashlib.sha256(snapshot.encode()).hexdigest()
+    owner["write"](terminal / (key + ".json"), dict(
+        status="no_commit", repo=root, head_before=before, head_after=after, reflog_sha256=history, snapshot=snapshot))
+    path.unlink()
+    descriptor = os.open(path.parent, os.O_RDONLY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+except (OSError, ValueError, subprocess.SubprocessError):
+    print("commit-capture: no-op proof or archival failed; inspect retained capture evidence", file=sys.stderr)
+    sys.exit(1)
+PY
+    then
+      say "not captured: could not archive verified no-commit evidence"
+    fi
+  fi
   exit 0
 fi
 
@@ -490,7 +542,18 @@ fi
 for SHA_ONE in $SHAS; do
   ONE_HASH=$(GIT rev-parse --verify "$SHA_ONE^{commit}" 2>/dev/null) || continue
   ONE_MSG=$(GIT log -1 --pretty=format:'%s' "$SHA_ONE" 2>/dev/null) || ONE_MSG=""
+  COMMIT_TARGET="Projects/Development/$ORG_REPO/$TODAY.md"
+  case "$ORG_REPO" in
+    altamira2/mtf-builder|altamira2_mtf-builder|local/mtf-builder)
+      COMMIT_TARGET="Altamira/mtf-builder/commits/$TODAY-mtf-builder-commits.md" ;;
+  esac
+  if ! python3 "$SCRIPT_DIR/lib/capture-owner.py" record-commit \
+      --commit "$ONE_HASH" --vault "$VAULT_PATH" --target "$COMMIT_TARGET"; then
+    say "not captured: could not retain pending commit evidence"
+    exit 0
+  fi
   say "$(printf 'hash=%s | branch=%s | files=%s | org_repo=%s | repo_name=%s | ticket=%s | date=%s | time=%s | vault_path=%s | msg=%s' \
     "$ONE_HASH" "$BRANCH" "$(scrub_field "$(cc_files_for "$SHA_ONE")")" "$ORG_REPO" "$REPO_NAME" \
     "$TICKET" "$TODAY" "$NOW" "$VAULT_PATH" "$(scrub_field "$ONE_MSG")")"
 done
+[ -z "$PROCESSING_FILE" ] || rm -f "$PROCESSING_FILE"

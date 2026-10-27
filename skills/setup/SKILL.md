@@ -69,6 +69,53 @@ files and backups, then rerun the same arguments to complete it. Backups can
 contain existing credentials and must remain private. Do not restore a whole
 backup over later unrelated host changes.
 
+#### Explicit capture attachment, separate from connection setup
+
+Only when automatic MCP capture is explicitly requested and a compatible public
+client release is installed, check its advertised support first:
+
+```bash
+python3 /absolute/public-client/current/bin/obsidian-mcp-native capabilities \
+  --release-sha256 <independently-verified-release-json-sha256>
+```
+
+Require `claude-plugin` and `attach`, `profile-status`, `drain-status`, `hook`.
+Client 0.1.0 lacks this capability; stop without changing ownership if the probe
+fails. Use the public release's verified bytes, never copy a private runtime.
+Resolve a session folder from the server taxonomy and obtain the declared daily
+folder from server setup. Do not infer either from a local vault mount or assume
+`Daily` when the server uses another path. Attach a new private capture profile:
+
+```bash
+python3 /absolute/public-client/current/bin/obsidian-mcp-native attach \
+  --host claude-plugin --home /absolute/new-capture-profile \
+  --project /absolute/git-project --folder <authorized-session-folder> \
+  --daily-folder <declared-server-daily-folder> \
+  --release-sha256 <independently-verified-release-json-sha256>
+```
+
+Attachment creates capture state only and preserves host/project settings. It
+does not activate hooks, change the writer, replay history or reinstall a server.
+Stop older plugin sessions and competing writers and inspect pending history
+before the separately authorized handoff:
+
+```bash
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/lib/capture-owner.py" handoff \
+  --owner mcp --project /absolute/git-project --profile /absolute/new-capture-profile \
+  --verification legacy-writers-stopped-and-history-inspected
+```
+
+Never supply that attestation unless it was actually established. Refused
+handoffs preserve evidence and leave admission closed; inspect `status`. Use
+`resume` only to cancel the incomplete transition and recover through the same
+previous owner, not to bypass pending work. Reconnect the updated plugin and
+verify actual Claude hook delivery, exact-target commit/session receipts,
+content/INDEX/daily links, replay/conflict and interrupted-write recovery before
+claiming migration. Do not disable a public profile as a substitute for draining
+it. Source fixtures and scripted hook events do not establish installed-Claude
+provider acceptance. Existing Codex projections remain legacy compatibility
+unless their public native profile is separately activated and verified.
+
 ### 1. Check for Existing Config
 
 Resolve any existing config (checks the stable path and legacy locations):

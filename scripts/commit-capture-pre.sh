@@ -18,6 +18,11 @@
 
 set -uo pipefail
 
+CAPTURE_SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+if ! python3 "$CAPTURE_SCRIPT_DIR/lib/capture-owner.py" lease; then
+  exec python3 "$CAPTURE_SCRIPT_DIR/lib/capture-owner.py" route --event PreToolUse --script "$0" -- "$@"
+fi
+
 INPUT=$(cat)
 
 case "$INPUT" in
@@ -91,11 +96,7 @@ if ! mkdir -p "$SNAP_DIR" 2>/dev/null; then
   exit 0
 fi
 
-# A snapshot is consumed by the post-hook, which deletes it. One is left behind
-# whenever the tool call never completes (denied, interrupted, session killed),
-# so sweep anything older than a day. Only runs on commit-shaped calls, so this
-# is not a per-Bash-call cost.
-find "$SNAP_DIR" -type f -mtime +1 -delete 2>/dev/null || true
+# Interrupted invocations remain evidence until their history is inspected.
 
 SNAP_FILE="$(cc_snapshot_file "$INPUT")"
 KEY="${SNAP_FILE##*/}"
@@ -112,7 +113,11 @@ KEY="${SNAP_FILE##*/}"
 # adding a field does not strand an in-flight snapshot from an older version.
 TMP_FILE="${SNAP_DIR}/.tmp.${KEY}.$$"
 WROTE=0
-if { printf 'sha=%s\nroot=%s\nintent=%s\n' "$SHA" "$ROOT" "$INTENT" > "$TMP_FILE"; } 2>/dev/null; then
+REFLOG_SHA=unavailable
+if [ -n "$ROOT" ]; then
+  REFLOG_SHA=$(python3 "$SCRIPT_DIR/lib/capture-owner.py" reflog --project "$ROOT" 2>/dev/null) || REFLOG_SHA=unavailable
+fi
+if { printf 'sha=%s\nroot=%s\nintent=%s\nreflog_sha256=%s\n' "$SHA" "$ROOT" "$INTENT" "$REFLOG_SHA" > "$TMP_FILE"; } 2>/dev/null; then
   if mv -f "$TMP_FILE" "$SNAP_FILE" 2>/dev/null; then
     WROTE=1
   fi

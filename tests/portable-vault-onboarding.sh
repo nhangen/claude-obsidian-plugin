@@ -215,6 +215,7 @@ EOF
           VAULTKEEPER_INSTALL="$case_dir/bin/install-fixture" \
           bash -c "trap wait EXIT; source \"\$0\"" "$ROOT_DIR/scripts/session-save.sh" \
         || { fail 'rendered configuration failed at the production Stop hook'; return 1; }
+      python3 "$ROOT_DIR/tests/lib/wait-capture.py" "$case_dir/home/.local/state"
       if [ "$auto_save" = true ]; then
         grep -qxF save "$case_dir/calls" \
           || { fail 'selected autosave did not launch'; return 1; }

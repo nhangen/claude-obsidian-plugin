@@ -6,6 +6,15 @@ version: 2.6.0
 
 # Commit Capture
 
+Before the legacy procedure, run
+`python3 "${CLAUDE_PLUGIN_ROOT}/scripts/lib/capture-owner.py" status`.
+For `owner: mcp`, follow only the public native hook's prepared commit request
+and exact receipt/recovery guidance. Do not run commit-meta again, synthesize a
+record from HEAD, invoke local keeper, or capture the same commit through both
+routes. A diagnostic is not a successful commit event. For disabled/draining or
+an unreadable ownership record, report the state and stop. Only stable legacy
+ownership follows the local steps below.
+
 The value here is not commit metadata — git already has that. The value is the conversation context: what you were investigating, what you tried, what you decided, and why.
 
 ## Architecture

@@ -6,6 +6,14 @@ version: 1.1.0
 
 # Ask the Vault Librarian
 
+Run `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/lib/capture-owner.py" status` first.
+For stable MCP ownership, QUERY uses bounded public MCP reads or the retained
+read-only `ask_vault_librarian` prompt. INSERT resolves routing/dedup with those
+reads and invokes `obsidian:keeper-save`'s MCP branch. Do not dispatch a local
+librarian writer, read a client-side vault, or fall back on transport failure.
+STOP before the local procedure below. Disabled/draining ownership or an error
+must not start a write; report the state.
+
 Dispatch the `vault-librarian` subagent to answer a vault query or file new
 information.
 

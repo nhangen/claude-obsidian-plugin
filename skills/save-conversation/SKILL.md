@@ -6,6 +6,16 @@ version: 1.3.0
 
 # Save Conversation to Obsidian
 
+First run `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/lib/capture-owner.py" status`.
+For stable MCP ownership, summarize the actual conversation, resolve its folder
+and duplicates with bounded MCP reads, and use `obsidian:keeper-save`'s MCP
+branch with the exact body and requested daily link. If the native hook already
+planned this turn's capture, complete that request rather than making a second
+session note. STOP before the local fast path below. Remote capture does not
+perform MOC moves, local chapter splitting, filesystem scans, or GUI launch.
+For disabled/draining ownership or an error, stop without a local fallback.
+Only stable legacy ownership uses the local workflow below.
+
 Exports the current Claude Code session to the Obsidian vault as a structured markdown note.
 
 This skill owns the **cognition** — session-intent inference, routing

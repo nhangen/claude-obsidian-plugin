@@ -7,6 +7,9 @@
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+if ! python3 "$SCRIPT_DIR/lib/capture-owner.py" lease; then
+  exec python3 "$SCRIPT_DIR/lib/capture-owner.py" route --event Stop --script "$0" -- "$@"
+fi
 PLUGIN_ROOT="$(dirname "$SCRIPT_DIR")"
 . "${SCRIPT_DIR}/lib/resolve-config.sh"
 
@@ -142,7 +145,7 @@ if [ -z "$FILE_SIZE" ] || [ "$FILE_SIZE" -lt 200 ]; then
   exit 0
 fi
 
-if ! python3 "${SCRIPT_DIR}/lib/session-capture.py" --prepare "$VAULT_PATH" "$TRANSCRIPT_PATH" "$SESSION_ID" >/dev/null; then
+if ! CAPTURE_REQUEST_ID=$(python3 "${SCRIPT_DIR}/lib/session-capture.py" --prepare "$VAULT_PATH" "$TRANSCRIPT_PATH" "$SESSION_ID"); then
   exit 0
 fi
 
@@ -153,6 +156,6 @@ if ! cp "$TRANSCRIPT_PATH" "$TMPFILE"; then
   exit 0
 fi
 
-nohup python3 "${SCRIPT_DIR}/lib/session-capture.py" "$TMPFILE" "$CONFIG_FILE" "$VAULT_PATH" "$TRANSCRIPT_PATH" "$SESSION_ID" "$RETRY_REQUESTED" "$CAPTURE_REQUESTED" "$CAPTURE_CWD" &>/dev/null &
+OBSIDIAN_CAPTURE_REQUEST_ID="$CAPTURE_REQUEST_ID" nohup python3 "${SCRIPT_DIR}/lib/session-capture.py" "$TMPFILE" "$CONFIG_FILE" "$VAULT_PATH" "$TRANSCRIPT_PATH" "$SESSION_ID" "$RETRY_REQUESTED" "$CAPTURE_REQUESTED" "$CAPTURE_CWD" &>/dev/null &
 
 exit 0

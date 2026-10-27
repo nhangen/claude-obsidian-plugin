@@ -234,13 +234,11 @@ esac
 
 # A dry run cannot move HEAD, so a snapshot equal to the current tip rejects it —
 # and that same snapshot proves the rejection is the gate's, not a flag check.
-SNAP_HEAD="$(git -C "$REAL" rev-parse HEAD)"
-# The root has to be what the hook will resolve — rev-parse output, not the path
-# string — or it reads as a snapshot from a different repo.
-SNAP_ROOT="$(git -C "$REAL" rev-parse --show-toplevel)"
 DRY_PAYLOAD="$(payload 'git commit --dry-run' "$REAL")"
 rm -rf "${STATE_HOME:?}/claude-obsidian"
-snapshot_for "$DRY_PAYLOAD" "$SNAP_HEAD" "$SNAP_ROOT"
+printf '%s' "$DRY_PAYLOAD" | OBSIDIAN_LOCAL_MD="$CFG_FILE" XDG_STATE_HOME="$STATE_HOME" \
+  bash "$ROOT_DIR/scripts/commit-capture-pre.sh"
+git -C "$REAL" commit --dry-run >/dev/null 2>&1 || true
 OUT="$( cd "$REAL" && printf '%s' "$DRY_PAYLOAD" | OBSIDIAN_LOCAL_MD="$CFG_FILE" XDG_STATE_HOME="$STATE_HOME" bash "$SCRIPT" 2>/dev/null )" || true
 [ -z "$OUT" ] || fail "--dry-run was captured"$'\n'"got: $OUT"
 
@@ -375,6 +373,7 @@ rm -f "$ERR"
 COPY="$WORK/plugincopy"
 mkdir -p "$COPY/scripts/lib"
 cp "$SCRIPT" "$COPY/scripts/commit-capture.sh"
+cp "${ROOT_DIR}/scripts/lib/capture-owner.py" "$COPY/scripts/lib/"
 cp "${ROOT_DIR}/scripts/lib/commit-capture-parse.sh" "$COPY/scripts/lib/"
 COPY_PAYLOAD="$(payload 'git commit -q -m x' "$REAL")"
 rm -rf "${STATE_HOME:?}/claude-obsidian"
@@ -395,8 +394,9 @@ rm -f "$ERR"
 # Without the parsing lib the hook has no decoder at all. It must say so rather
 # than exit 0 like a non-commit call.
 BARE="$WORK/barecopy"
-mkdir -p "$BARE/scripts"
+mkdir -p "$BARE/scripts/lib"
 cp "$SCRIPT" "$BARE/scripts/commit-capture.sh"
+cp "${ROOT_DIR}/scripts/lib/capture-owner.py" "$BARE/scripts/lib/"
 ERR="$(mktemp)"
 OUT="$( cd "$REAL" && printf '%s' "$COPY_PAYLOAD" | HOME="$EMPTY_HOME" XDG_CONFIG_HOME="$EMPTY_XDG" OBSIDIAN_LOCAL_MD="" XDG_STATE_HOME="$STATE_HOME" bash "$BARE/scripts/commit-capture.sh" 2>"$ERR" )" || true
 case "$OUT" in
@@ -412,6 +412,7 @@ rm -f "$ERR"
 BROKEN="$WORK/brokencopy"
 mkdir -p "$BROKEN/scripts/lib"
 cp "$SCRIPT" "$BROKEN/scripts/commit-capture.sh"
+cp "${ROOT_DIR}/scripts/lib/capture-owner.py" "$BROKEN/scripts/lib/"
 printf 'this is not valid shell (\n' > "$BROKEN/scripts/lib/commit-capture-parse.sh"
 OUT="$( cd "$REAL" && printf '%s' "$COPY_PAYLOAD" | HOME="$EMPTY_HOME" XDG_CONFIG_HOME="$EMPTY_XDG" OBSIDIAN_LOCAL_MD="" XDG_STATE_HOME="$STATE_HOME" bash "$BROKEN/scripts/commit-capture.sh" 2>/dev/null )" || true
 case "$OUT" in

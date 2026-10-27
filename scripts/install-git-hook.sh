@@ -36,6 +36,8 @@ install_runtime() {
   if ! mkdir -p "$stage/lib" \
     || ! cp -p "$DEFAULT_COMMIT_META" "$stage/commit-meta.sh" \
     || ! cp -p "$DEFAULT_KEEPER" "$stage/keeper" \
+    || ! cp -p "$SCRIPT_DIR/keeper-core" "$stage/keeper-core" \
+    || ! cp -p "$SCRIPT_DIR/lib/capture-owner.py" "$stage/lib/capture-owner.py" \
     || ! cp -p "$SCRIPT_DIR"/lib/*.sh "$stage/lib/" \
     || ! chmod +x "$stage/commit-meta.sh" "$stage/keeper"; then
     rm -rf "$stage"

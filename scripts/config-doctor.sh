@@ -15,6 +15,9 @@
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+if ! python3 "$SCRIPT_DIR/lib/capture-owner.py" lease; then
+  exec python3 "$SCRIPT_DIR/lib/capture-owner.py" route --event SessionStart --script "$0" -- "$@"
+fi
 PLUGIN_ROOT="$(dirname "$SCRIPT_DIR")"
 . "${SCRIPT_DIR}/lib/resolve-config.sh"
 

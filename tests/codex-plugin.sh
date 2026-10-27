@@ -51,6 +51,8 @@ drift = os.environ.get("CODEX_PLUGIN_TEST_VENDOR_DRIFT")
 for relative in (
     "commit-meta.sh",
     "keeper",
+    "keeper-core",
+    "lib/capture-owner.py",
     "lib/commit-capture-parse.sh",
     "lib/note-hash.sh",
     "lib/resolve-config.sh",
@@ -78,7 +80,7 @@ for relative in (
     "lib/vault-index.sh",
 ):
     mcp_helper = mcp_helpers / relative
-    canonical = root / "scripts" / relative
+    canonical = root / "scripts" / ("keeper-core" if relative == "keeper" else relative)
     if not mcp_helper.is_file():
         print(f"missing mcp helper: {relative}", file=sys.stderr)
         sys.exit(1)
