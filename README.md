@@ -329,6 +329,16 @@ Claude Code supplies `${CLAUDE_PLUGIN_ROOT}`. The Codex skill resolves its bundl
 
 ## Standalone Obsidian MCP Client & Native Integrations
 
+For a shared remote server, run `/obsidian:setup` and select remote MCP. The
+wizard reuses the verified public client and registers separate read/write tools
+and scoped routine-write permissions. It needs no local vault or llm-tools.
+`scripts/setup-mcp.py` previews by default; `--apply` preserves unrelated settings
+and refuses existing differing registrations. Credentials stay in the host
+environment or private token files, not in the generated config. Reconnect and
+verify a real read after setup. This does not migrate automatic capture or make
+the plugin's local-vault commands remotely compatible; that remains tracked in
+[#254](https://github.com/nhangen/claude-obsidian-plugin/issues/254).
+
 Obsidian MCP can be used completely independently of the Claude plugin, local vault mounts, or private harnesses. Any compatible Model Context Protocol (MCP) host can connect directly.
 
 ### Packages & Distribution
