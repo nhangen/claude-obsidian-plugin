@@ -6,6 +6,14 @@ version: 1.3.0
 
 # Create Note in Obsidian
 
+Run `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/lib/capture-owner.py" status` first.
+For stable MCP ownership, create single notes through `obsidian:keeper-save`'s
+MCP branch after bounded remote routing/dedup. Do not run local allow-list or
+vault commands. Project scaffolding is local-maintenance-only and unavailable
+through the public note API; report that limitation without creating local
+folders. Stop on disabled/draining ownership or an unreadable record. The local
+procedure below applies only to stable legacy ownership.
+
 Creates new notes or project structures in the vault.
 
 Single notes and pages are filed through the **keeper-save** skill — the

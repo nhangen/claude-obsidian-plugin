@@ -8,6 +8,79 @@ Long agent sessions and the commits they produce hold context that's gone the mo
 
 ## How it works
 
+Client capture entry points require Bash and Python 3.11+ with POSIX `fcntl`
+locking on macOS, Linux or WSL, including the guarded legacy keeper. Native
+Windows Python is not supported by this writer guard. Install these prerequisites
+before upgrading existing clients; missing guards fail closed, not through an
+unguarded local fallback. The authoritative server's keeper primitive remains
+separate and does not adopt a client's ownership setting.
+
+Legacy local capture remains the default. The opt-in MCP writer uses the public
+[obsidian-mcp client](https://github.com/nhangen/obsidian-mcp), not a private
+harness or another local server. Its plugin attachment is a separate capture
+profile, not a replacement for existing host settings. It requires a public
+client release that explicitly supports `claude-plugin` attachment; client
+`0.1.0` does not. Source support alone does not activate or publish a rollout.
+
+### MCP writer handoff
+
+The plugin dispatches hooks through `scripts/capture-hook.sh`. Generic capture
+planning, commit execution, receipts, retry and recovery remain in the verified
+public client. The plugin owns only host-local writer admission and delegation.
+Manual skills honor the same owner. MCP failure never falls back to a vault
+mount or local keeper. Codex's instruction-driven plugin projection remains a
+legacy compatibility route; this attachment does not migrate Codex clients.
+
+Inspect ownership without changing clients:
+
+```bash
+python3 scripts/lib/capture-owner.py status
+```
+
+An intentional handoff requires stopping older plugin clients and all competing
+writers, inspecting their history, attaching a verified public profile for each
+project, then invoking `handoff --owner mcp --project /absolute/project
+--profile /absolute/profile --verification
+legacy-writers-stopped-and-history-inspected`. Use `--owner legacy` for rollback
+or `--owner disabled` to stop all captures. This is host-local ownership, not a
+cross-machine fence. It does not stop another machine, uninstall maintenance,
+remove credentials, or change a running client's loaded plugin version.
+
+The shared admission lock covers worker launch and descendants, including when
+their supervisor is killed. A durable launch intent exists before spawning;
+missing workers and busy requests for a newer boundary stay unresolved until
+that exact boundary is observed or its evidence is deliberately reconciled.
+An observed launch is not a successful-write receipt. Handoff refuses active workers, unresolved legacy
+snapshots/receipts/emitted commits, and pending public capture. A transition
+that stops after closing admission stays `draining`; repair the evidence and
+rerun it. To cancel an incomplete transition and recover through the unchanged
+previous owner, run `capture-owner.py resume`; it reopens that owner only and
+retains all pending state. Never delete pending state to make the check pass. When history and
+the authoritative vault have been inspected, `resolve-legacy --evidence
+<specific state-relative file> --verification
+authoritative-vault-and-history-inspected --reason <explanation>` retains a
+content-bound resolution alongside the original evidence. It is explicitly an
+operator resolution, not a fabricated MCP success receipt.
+
+New legacy commit records remain pending until keeper returns success and its
+exact commit heading is read back using the keeper's fence-aware parser.
+Full-hash keeper appends register before execution, including installed Git
+hooks; configured vaults and date targets are resolved once and forwarded to
+the writer. Failed attempts block handoff, and re-admitted captures cannot reuse
+an earlier operator resolution. The internal `has-commit-heading` core command
+is read-only; the existing append/insert write primitives are unchanged.
+Historical successful legacy process exits
+are accepted only as terminal legacy work, never upgraded to MCP acceptance.
+Unmapped projects under MCP ownership refuse capture. Routine note, session,
+daily and commit paths use MCP; local scaffolding, chapter splitting, moves and
+reorganization are explicitly unsupported remote-maintenance operations.
+
+Release publication, installed-host execution, interrupted-write recovery,
+writer activation and client migration remain separate acceptance gates in
+[#254](https://github.com/nhangen/claude-obsidian-plugin/issues/254).
+
+### Legacy local workflow
+
 - A **Stop hook** runs at session end; if the session is significant, a background `claude --print` summarizer writes a structured note to your vault.
 - Session capture infers `session_intent`, `capture_action`, and `research_state_change` with confidence scores and evidence bullets, so routing can distinguish execution, research, planning, operations, reflection, scratch work, and claim/evidence changes that should land in the Research Substrate.
 - In Claude Code, a **PreToolUse/PostToolUse hook pair** on `Bash` notices when a `git commit` actually moved `HEAD` and appends goal / investigation / decision / loose-ends bullets to a per-repo daily file.
@@ -31,7 +104,10 @@ Long agent sessions and the commits they produce hold context that's gone the mo
 
 ### Vault Librarian
 
-`/obsidian:ask` dispatches the `vault-librarian` subagent. It answers queries by
+`/obsidian:ask` reads the ownership-aware skill from its physical file. MCP
+ownership uses remote reads and guarded MCP writes without a client-side vault;
+disabled or draining ownership stops local work. Only stable legacy ownership
+dispatches the `vault-librarian` subagent. It answers legacy queries by
 routing to the relevant domain folder, refreshing that slice's `INDEX.md`
 on-demand (two-stage: file mtime narrows candidates, a stored `size:sha256`
 content hash confirms real changes — so a Syncthing mtime-bump doesn't trigger
@@ -39,6 +115,12 @@ re-indexing), then reading only the indexed notes and citing them with a
 confidence level. It reports indexing gaps rather than answering from a partial
 slice, and falls back to the `find` skill for raw-text search when the index
 misses.
+
+Legacy librarian INDEX reconciliation uses `scripts/vault-index-apply`, which
+holds the same admission lease as other client writes. The raw INDEX library is
+an internal authoritative-server/maintenance primitive, not a client write entry
+point. Existing maintenance writers still require coordinated retirement during
+migration; this host-local guard is not a distributed fence.
 
 For inserts it routes new notes through the taxonomy, dedups against existing
 notes, writes via the matching `Templates/` file, and appends a link to the

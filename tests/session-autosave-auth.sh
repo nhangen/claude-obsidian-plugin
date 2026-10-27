@@ -223,6 +223,7 @@ run_hook() {
       EXPECTED_CONFIG="${CASE_DIR}/config.md" \
       EXPECTED_VAULT="$VAULT_DIR" \
       "$@" bash -c "trap wait EXIT; source \"\$0\"" "${ROOT_DIR}/scripts/session-save.sh"
+  python3 "$ROOT_DIR/tests/lib/wait-capture.py" "${CASE_DIR}/state"
 }
 
 test_recursion_guard() {

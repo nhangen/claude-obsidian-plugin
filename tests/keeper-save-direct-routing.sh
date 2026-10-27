@@ -7,6 +7,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 KEEPER="$ROOT_DIR/scripts/keeper"
 fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/keeper-save-direct-XXXXXX")"; trap 'rm -rf "$TMP"' EXIT
+export XDG_STATE_HOME="$TMP/state"
 
 SKILL="$ROOT_DIR/skills/keeper-save/SKILL.md"
 DESC="$(sed -n '/^description:/p' "$SKILL")"

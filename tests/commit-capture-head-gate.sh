@@ -147,10 +147,54 @@ for cmd in \
   reset_state
   P="$(payload "$cmd" "$REPO" call-2)"
   run_pre "$P"
+  ( cd "$REPO" && eval "$cmd" ) >/dev/null 2>&1 || true
   run_post_verbose "$P"
   [ -z "$POST_OUT" ] || fail "HEAD did not move but the call was captured: $cmd"$'\n'"got: $POST_OUT"
   [ -z "$POST_ERR" ] || fail "a legitimate no-capture wrote to stderr: $cmd"$'\n'"got: $POST_ERR"
+  python3 - "$STATE_HOME/claude-obsidian" "$REPO" <<'PY' || fail "no-op lacked terminal proof"
+import json, pathlib, subprocess, sys
+base, repo = pathlib.Path(sys.argv[1]), sys.argv[2]
+record, = (base / 'pre-commit-terminal').glob('*.json')
+value = json.loads(record.read_text())
+head = subprocess.check_output(['git', '-C', repo, 'rev-parse', 'HEAD'], text=True).strip()
+assert value['status'] == 'no_commit'
+assert value['head_before'] == value['head_after'] == head
+assert value['repo'] == str(pathlib.Path(repo).resolve())
+assert ('sha=' + head + '\n') in value['snapshot']
+assert not list((base / 'pre-commit-processing').iterdir())
+PY
+  XDG_STATE_HOME="$STATE_HOME" python3 "$ROOT_DIR/scripts/lib/capture-owner.py" handoff \
+    --owner disabled --verification legacy-writers-stopped-and-history-inspected >/dev/null \
+    || fail "a proven no-op blocked handoff"
 done
+
+reset_state
+P="$(payload 'git commit -m transient && git reset --soft HEAD~' "$REPO" call-transient)"
+run_pre "$P"
+git -C "$REPO" -c core.hooksPath=/dev/null commit --allow-empty -qm transient
+git -C "$REPO" reset --soft HEAD~
+run_post_verbose "$P"
+[ -n "$(ls -A "$STATE_HOME/claude-obsidian/pre-commit-processing")" ] \
+  || fail "a transient commit with unchanged final HEAD lost its evidence"
+[ ! -d "$STATE_HOME/claude-obsidian/pre-commit-terminal" ] \
+  || fail "a changed reflog was falsely promoted to no_commit"
+
+reset_state
+P="$(payload 'git commit --dry-run' "$REPO" call-archive-failure)"
+run_pre "$P"
+touch "$STATE_HOME/claude-obsidian/pre-commit-terminal"
+( cd "$REPO" && git commit --dry-run ) >/dev/null 2>&1 || true
+run_post_verbose "$P"
+case "$POST_OUT" in
+  *'could not archive verified no-commit evidence'*) : ;;
+  *) fail "terminal archive failure was not reported" ;;
+esac
+[ -n "$(ls -A "$STATE_HOME/claude-obsidian/pre-commit-processing")" ] \
+  || fail "terminal archive failure discarded processing evidence"
+if XDG_STATE_HOME="$STATE_HOME" python3 "$ROOT_DIR/scripts/lib/capture-owner.py" handoff \
+  --owner disabled --verification legacy-writers-stopped-and-history-inspected >/dev/null 2>&1; then
+  fail "unarchived no-op incorrectly allowed handoff"
+fi
 
 # --- 3. failure phrases no longer suppress a real capture -------------------
 # The retired guard read the tool *response*, and a subject supplied via `-F -`
@@ -259,6 +303,16 @@ case "$POST_OUT" in
   *'is about'*) : ;;
   *) fail "discarding a foreign snapshot was not reported, or reused the missing-snapshot message"$'\n'"got: ${POST_OUT:-<empty>}" ;;
 esac
+python3 - "$STATE_HOME/claude-obsidian" <<'PY' || fail "foreign snapshot lost unresolved evidence"
+import pathlib, sys
+base = pathlib.Path(sys.argv[1])
+assert list((base / 'pre-commit-processing').iterdir())
+assert not list((base / 'pre-commit-terminal').glob('*.json'))
+PY
+if XDG_STATE_HOME="$STATE_HOME" python3 "$ROOT_DIR/scripts/lib/capture-owner.py" handoff \
+  --owner disabled --verification legacy-writers-stopped-and-history-inspected >/dev/null 2>&1; then
+  fail "foreign snapshot incorrectly allowed handoff"
+fi
 
 # --- 9. the pre-hook is silent, exits 0, and only snapshots commit calls -----
 reset_state
@@ -294,7 +348,7 @@ run_pre "$(payload 'git commit -q -m x' "$WORK" call-9b)"
 [ ! -d "$SNAP_DIR" ] || [ -z "$(ls -A "$SNAP_DIR" 2>/dev/null)" ] \
   || fail "a snapshot was written for a call with no resolvable and no named repository"$'\n'"got: $(cat "$SNAP_DIR"/* 2>/dev/null)"
 
-# --- 10. abandoned snapshots are swept -------------------------------------
+# --- 10. abandoned snapshots remain handoff evidence -----------------------
 # One is left behind whenever the tool call never completes (denied, interrupted,
 # session killed). Nothing else deletes them.
 reset_state
@@ -303,8 +357,8 @@ printf 'sha=deadbeef\nroot=\n' > "${SNAP_DIR}/stale-key"
 touch -t 200001010000 "${SNAP_DIR}/stale-key"
 printf 'sha=deadbeef\nroot=\n' > "${SNAP_DIR}/fresh-key"
 run_pre "$(payload 'git commit -q -m x' "$REPO" call-10)"
-[ ! -f "${SNAP_DIR}/stale-key" ] || fail "an abandoned snapshot was not swept"
-[ -f "${SNAP_DIR}/fresh-key" ] || fail "the sweep deleted a current snapshot"
+[ -f "${SNAP_DIR}/stale-key" ] || fail "an abandoned snapshot was discarded"
+[ -f "${SNAP_DIR}/fresh-key" ] || fail "a current snapshot was discarded"
 
 # --- 11. concurrent calls do not cross when the payload carries an id -------
 reset_state
@@ -965,14 +1019,14 @@ esac
 # every capture into a stderr diagnostic.
 HJ="${ROOT_DIR}/hooks/hooks.json"
 python3 -c "
-import json
+import json, re
 h = json.load(open('$HJ'))['hooks']
-for event, script in (('PreToolUse', 'commit-capture-pre.sh'), ('PostToolUse', 'commit-capture.sh')):
+for event in ('PreToolUse', 'PostToolUse'):
     assert event in h, event + ' not registered'
-    groups = [g for g in h[event] if g.get('matcher') == 'Bash']
+    groups = [g for g in h[event] if re.fullmatch(g.get('matcher', ''), 'Bash')]
     assert groups, event + ' has no Bash matcher'
     cmds = [hk['command'] for g in groups for hk in g['hooks']]
-    assert any(script in c for c in cmds), (event, script, cmds)
+    assert any('capture-hook.sh' in c and event in c for c in cmds), (event, cmds)
 " || fail "hooks.json does not register both commit-capture halves on Bash"
 
 printf 'ok   commit-capture-head-gate.sh (PreToolUse HEAD snapshot decides capture)\n'

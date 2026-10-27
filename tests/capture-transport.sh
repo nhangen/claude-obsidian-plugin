@@ -76,6 +76,21 @@ run_hook() {
       bash -c "trap wait EXIT; source \"\$0\"" \
       "${ROOT_DIR}/scripts/session-save.sh" "$@" 2>"$err_file" \
     || fail "hook exited non-zero for [$*]"
+  python3 - "$state_dir/claude-obsidian/capture-ownership/admission.lock" <<'PY'
+import fcntl, pathlib, sys, time
+path = pathlib.Path(sys.argv[1])
+if path.exists():
+    with path.open("r+") as stream:
+        deadline = time.monotonic() + 5
+        while True:
+            try:
+                fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if time.monotonic() > deadline:
+                    raise
+                time.sleep(.01)
+PY
   printf '%s' "$err_file"
 }
 

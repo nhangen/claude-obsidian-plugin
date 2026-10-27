@@ -74,7 +74,7 @@ import json
 h=json.load(open('$HJ'))['hooks']
 assert 'SessionStart' in h, 'no SessionStart hook registered'
 cmds=[hk['command'] for grp in h['SessionStart'] for hk in grp['hooks']]
-assert any('config-doctor.sh' in c for c in cmds), cmds
-" || fail "hooks.json does not register config-doctor.sh on SessionStart"
+assert any('capture-hook.sh' in c and 'SessionStart' in c for c in cmds), cmds
+" || fail "hooks.json does not register the config-doctor dispatcher on SessionStart"
 
 echo "PASS: config-doctor"

@@ -6,6 +6,12 @@ version: 1.0.0
 
 # Find Notes in Obsidian
 
+Run `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/lib/capture-owner.py" status` first.
+For stable MCP ownership, use bounded `obsidian_find_notes` and advertised read
+resources. Return remote vault-relative links, not invented client filesystem
+paths. No local find/grep, vault discovery, or GUI open. STOP before the local
+procedure below. Report an unreadable/draining ownership record without fallback.
+
 Searches the vault for notes matching a query.
 
 ## Vault Path

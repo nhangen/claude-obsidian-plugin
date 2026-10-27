@@ -814,6 +814,7 @@ test("source entrypoint uses canonical helpers before a build exists", async (t)
   await copyFile(join(repositoryRoot, "scripts", "lib", "note-hash.sh"), join(scriptLibrary, "note-hash.sh"));
   await copyFile(join(repositoryRoot, "scripts", "lib", "vault-index.sh"), join(scriptLibrary, "vault-index.sh"));
   await copyFile(join(repositoryRoot, "scripts", "keeper"), sourceKeeper);
+  await copyFile(join(repositoryRoot, "scripts", "keeper-core"), join(sourceRoot, "scripts", "keeper-core"));
   await chmod(sourceKeeper, 0o755);
   await copyFile(join(repositoryRoot, "scripts", "commit-meta.sh"), join(sourceRoot, "scripts", "commit-meta.sh"));
   await copyFile(join(repositoryRoot, ".claude-plugin", "plugin.json"), join(pluginDirectory, "plugin.json"));

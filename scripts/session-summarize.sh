@@ -6,6 +6,11 @@
 
 set -uo pipefail
 
+CAPTURE_SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+if ! python3 "$CAPTURE_SCRIPT_DIR/lib/capture-owner.py" lease; then
+  exec python3 "$CAPTURE_SCRIPT_DIR/lib/capture-owner.py" legacy -- bash "$0" "$@"
+fi
+
 TMPFILE="$1"
 CONFIG_FILE="$2"
 VAULT_PATH="$3"

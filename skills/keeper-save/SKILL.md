@@ -6,6 +6,37 @@ version: 1.2.1
 
 # keeper-save (Agent-Facing Vault Write)
 
+## Writer ownership first
+
+Run `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/lib/capture-owner.py" status` before
+any local config, vault read, or write. An error or `phase: draining` means stop
+and report unresolved ownership, not a fallback. `owner: disabled` means no
+writes, including explicit saves. `owner: legacy` follows the local steps below.
+
+For `owner: mcp`, use only the connected public MCP tools and STOP before the
+local procedure below. No vault mount, local keeper, watcher, or librarian writer:
+
+- Resolve routing and duplicates using bounded MCP reads and the server's
+  `obsidian://taxonomy` resource and advertised conventions. Do not invent
+  unavailable folders or interpret prompt results as write authority.
+- INSERT uses `obsidian_keeper_save` with `title`, exact `body`, resolved
+  `folder_hint`, `resolved: true`, and a stable `idempotency_key`. The API derives
+  the filename from title; do not send `target`. Verify the advertised schema
+  before translating a caller's exact target. Omit `type` unless metadata
+  injection was requested; a verbatim body must not acquire extra frontmatter.
+  Pass `session_link_date` only when requested.
+- APPEND uses `obsidian_daily_append`: body becomes `content`, target becomes
+  `target_path`, or pass `date` without `target_path`; preserve `section`,
+  `skip_if_hash` and optional `init_content`. Use a stable idempotency key.
+- A committed/skipped receipt with no warnings or recovery requirement is not
+  interchangeable with timeout, partial success, conflict, or a missing receipt.
+  Verify the authoritative target and requested INDEX/daily links. For an
+  uncertain result inspect status and read back before retrying the identical
+  payload/key. Never change keys to evade a conflict or retry through local files.
+
+Routine authorized saves need no extra human approval. If managed host policy
+denies a tool, report that policy; do not weaken it or switch writers.
+
 File or append a structured note through the vault keeper. This is the
 agent-facing door: humans use `/obsidian:ask`; agents and sub-skills use this.
 

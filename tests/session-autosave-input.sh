@@ -61,6 +61,8 @@ print(json.dumps({"type": "result", "subtype": "success",
                             str(root / "scripts/session-save.sh")],
                            input=json.dumps({"transcript_path": str(source)}),
                            text=True, env=dict(env, SAVE_NOTE=str(save).lower()), check=True)
+            subprocess.run([sys.executable, str(root / "tests/lib/wait-capture.py"), str(case / "state")],
+                           check=True)
         else:
             scratch = case / "scratch.jsonl"
             scratch.write_bytes(source.read_bytes())

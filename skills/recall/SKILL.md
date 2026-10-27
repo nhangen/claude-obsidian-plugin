@@ -6,6 +6,12 @@ version: 1.1.0
 
 # Recall
 
+Run `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/lib/capture-owner.py" status` first.
+With stable MCP ownership, replace only the vault source below with bounded MCP
+reads; local Git and GitHub remain independent optional evidence sources. Do
+not require local vault config or scan a fallback vault. Stop on ownership
+errors/draining; retain missing-source distinctions rather than inventing data.
+
 Synthesizes a report about past work from multiple data sources.
 
 ## Config

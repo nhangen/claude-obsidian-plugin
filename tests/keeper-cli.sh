@@ -4,6 +4,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 KEEPER="$ROOT_DIR/scripts/keeper"
 fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/keeper-cli-XXXXXX")"; trap 'rm -rf "$TMP"' EXIT
+export XDG_STATE_HOME="$TMP/state"
 
 # A real vault has .obsidian at its root; vault_index_apply finds it to write
 # vault-root-relative link targets. Without it the fixture exercises a shape
@@ -514,8 +515,8 @@ else
 
   # I11c: swap failure on an existing daily note warns specifically about linking.
   FSWAP="$TMP/fault-swap"; mkdir -p "$FSWAP/lib"
-  cp "${ROOT_DIR}/scripts/keeper" "$FSWAP/"
-  cp "${ROOT_DIR}/scripts/lib/"* "$FSWAP/lib/"
+  cp "${ROOT_DIR}/scripts/keeper" "${ROOT_DIR}/scripts/keeper-core" "$FSWAP/"
+  find "${ROOT_DIR}/scripts/lib" -maxdepth 1 -type f -exec cp {} "$FSWAP/lib/" \;
   cat >> "$FSWAP/lib/note-hash.sh" <<'EOF'
 keeper_swap_or_clean() {
   case "$2" in
@@ -562,8 +563,8 @@ else
 
   # I10c: when the locked INDEX apply returns a non-zero rc, insert reports the rc suffix.
   FIDX="$TMP/fault-idx"; mkdir -p "$FIDX/lib"
-  cp "${ROOT_DIR}/scripts/keeper" "$FIDX/"
-  cp "${ROOT_DIR}/scripts/lib/"* "$FIDX/lib/"
+  cp "${ROOT_DIR}/scripts/keeper" "${ROOT_DIR}/scripts/keeper-core" "$FIDX/"
+  find "${ROOT_DIR}/scripts/lib" -maxdepth 1 -type f -exec cp {} "$FIDX/lib/" \;
   cat >> "$FIDX/lib/vault-index.sh" <<'EOF'
 vault_index_apply_held() { return 42; }
 EOF

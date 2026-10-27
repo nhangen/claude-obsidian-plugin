@@ -5,6 +5,7 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/codex-plugin-XXXXXX")"
+export XDG_STATE_HOME="$TMP/state"
 trap 'rm -rf "$TMP"' EXIT
 fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
 
@@ -51,6 +52,8 @@ drift = os.environ.get("CODEX_PLUGIN_TEST_VENDOR_DRIFT")
 for relative in (
     "commit-meta.sh",
     "keeper",
+    "keeper-core",
+    "lib/capture-owner.py",
     "lib/commit-capture-parse.sh",
     "lib/note-hash.sh",
     "lib/resolve-config.sh",
@@ -78,7 +81,7 @@ for relative in (
     "lib/vault-index.sh",
 ):
     mcp_helper = mcp_helpers / relative
-    canonical = root / "scripts" / relative
+    canonical = root / "scripts" / ("keeper-core" if relative == "keeper" else relative)
     if not mcp_helper.is_file():
         print(f"missing mcp helper: {relative}", file=sys.stderr)
         sys.exit(1)

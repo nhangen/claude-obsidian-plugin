@@ -3,6 +3,7 @@ import fcntl
 import hashlib
 import json
 import os
+import re
 import runpy
 from pathlib import Path
 import subprocess
@@ -16,6 +17,7 @@ redact = runpy.run_path(str(Path(__file__).with_name("autosave-input.py")))["red
 _statefile = runpy.run_path(str(Path(__file__).with_name("statefile.py")))
 write_record = _statefile["write_record"]
 state_home = _statefile["state_home"]
+_owner = runpy.run_path(str(Path(__file__).with_name("capture-owner.py")))
 
 
 def digest(value):
@@ -65,6 +67,8 @@ def acknowledged(next_state, sent_path):
     state = {key: value for key, value in next_state.items() if key != "current"}
     state["seen"] = [fp for fp in next_state["current"]
                      if fp in delivered]
+    state["pending"] = [fp for fp in dict.fromkeys(next_state.get("pending", []) + next_state["current"])
+                        if fp not in delivered]
     return state, status
 
 
@@ -90,14 +94,70 @@ def prepare_state(vault, source, session_id):
     return source_id, state, records
 
 
+def prepare_request(state):
+    requests = state / "launches"
+    private_directory(requests)
+    identifier = uuid.uuid4().hex
+    _owner["write"](requests / (identifier + ".json"), dict(status="prepared", created_at=time.time()))
+    return identifier
+
+
+def request_outcome(state, identifier, outcome, boundary_id=None):
+    path = state / "launches" / (identifier + ".json")
+    record = _owner["read"](path)
+    record.update(status=outcome)
+    if boundary_id is not None:
+        record["boundary"] = boundary_id
+    _owner["write"](path, record)
+
+
+def observe_requests(state, boundary_id):
+    for path in (state / "launches").glob("*.json"):
+        record = _owner["read"](path)
+        if record.get("boundary") == boundary_id:
+            record["status"] = "observed"
+            _owner["write"](path, record)
+
+
 def capture(snapshot, config, vault, source, session_id, retry, forced=False, cwd=""):
+    with _owner["admission"]() as lease:
+        current = _owner["ownership"]()
+        if current["owner"] != "legacy" or current["phase"] != "stable":
+            raise ValueError("legacy capture no longer owns this writer")
+        os.environ["OBSIDIAN_CAPTURE_LEASE_FD"] = str(lease)
+        _, state, _ = prepare_state(vault, source, session_id)
+        identifier = os.environ.get("OBSIDIAN_CAPTURE_REQUEST_ID") or prepare_request(state)
+        if not re.fullmatch(r"[0-9a-f]{32}", identifier):
+            raise ValueError("invalid capture request")
+        if _owner["read"](state / "launches" / (identifier + ".json")).get("status") != "prepared":
+            raise ValueError("capture request already started")
+        try:
+            boundary_id = boundary(snapshot)
+        except (ValueError, UnicodeError):
+            boundary_id = None
+        request_outcome(state, identifier, "started", boundary_id)
+        try:
+            result = capture_admitted(snapshot, config, vault, source, session_id, retry, forced, cwd)
+        except Exception:
+            request_outcome(state, identifier, "failed", boundary_id)
+            raise
+        if result is None:
+            request_outcome(state, identifier, "deferred_busy", boundary_id)
+            return 0
+        request_outcome(state, identifier, "observed" if result == 0 else "failed", boundary_id)
+        if result == 0 and boundary_id is not None:
+            observe_requests(state, boundary_id)
+        return result
+
+
+def capture_admitted(snapshot, config, vault, source, session_id, retry, forced=False, cwd=""):
     _, state, _ = prepare_state(vault, source, session_id)
     descriptor = os.open(state / "activity.lock", os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
     with os.fdopen(descriptor, "r+") as lock:
         try:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
-            return 0
+            return None
         return capture_locked(snapshot, config, vault, source, session_id, retry, forced, cwd, lock.fileno())
 
 
@@ -122,7 +182,7 @@ def capture_locked(snapshot, config, vault, source, session_id, retry, forced, c
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
             write_record(state / "last-event.json", dict(event, status="deduplicated_in_flight"))
-            return 0
+            return None
         previous = {}
         if receipt_path.exists():
             try:
@@ -149,11 +209,13 @@ def capture_locked(snapshot, config, vault, source, session_id, retry, forced, c
             write_record(state / "last-event.json", dict(event, status="activity_error"))
             raise
         if status != "eligible":
+            write_record(state / "activity.json", next_state)
             write_record(state / "last-event.json", dict(event, status=status, activity=facts))
             return 0
         activity_path = state / "activity.json"
         previous_activity = json.loads(activity_path.read_text()) if activity_path.exists() else {}
-        write_record(activity_path, dict(previous_activity, last_attempt=next_state["last_attempt"]))
+        write_record(activity_path, dict(previous_activity, last_attempt=next_state["last_attempt"],
+                                         pending=next_state["pending"]))
         sent_path = state / f"sent-{boundary_id}.json"
         context_path = state / f"context-{boundary_id}.json"
         sent_path.unlink(missing_ok=True)
@@ -179,7 +241,9 @@ def capture_locked(snapshot, config, vault, source, session_id, retry, forced, c
                     ["bash", str(Path(__file__).resolve().parents[1] / "session-summarize.sh"),
                      str(snapshot), str(config), str(vault), str(source)],
                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                    pass_fds=(lock.fileno(), activity_fd), env=child_env, check=False)
+                    pass_fds=tuple(set((lock.fileno(), activity_fd,
+                                       int(child_env["OBSIDIAN_CAPTURE_LEASE_FD"])))),
+                    env=child_env, check=False)
                 exit_code = result.returncode
             except OSError:
                 exit_code = 127
@@ -207,7 +271,12 @@ def main():
     if sys.argv[1:2] == ["--prepare"]:
         try:
             vault, source, session_id = sys.argv[2:]
-            prepare_state(Path(vault), Path(source), session_id)
+            with _owner["admission"]():
+                current = _owner["ownership"]()
+                if current["owner"] != "legacy" or current["phase"] != "stable":
+                    raise ValueError("legacy capture no longer owns this writer")
+                _, state, _ = prepare_state(Path(vault), Path(source), session_id)
+                print(prepare_request(state))
             return 0
         except (OSError, ValueError, TypeError):
             print("session-capture: cannot initialize capture state; check XDG_STATE_HOME "

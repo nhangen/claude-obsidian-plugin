@@ -6,6 +6,13 @@ version: 1.0.0
 
 # Reorganize Vault
 
+First run `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/lib/capture-owner.py" status`.
+This is an explicit local-maintenance compatibility operation, not MCP parity.
+Run the local workflow only for stable legacy ownership. With MCP, disabled,
+draining, or unreadable ownership, stop; public MCP does not expose moves or a
+filesystem reorganization transaction. Never bypass the owner with direct file
+tools or enable a second writer.
+
 Analyzes and reorganizes vault content. Always proposes a plan before touching any files.
 
 ## Resolve the Local Vault

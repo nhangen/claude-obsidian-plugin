@@ -49,8 +49,10 @@ def checkpoint(snapshot, config, state, cwd, forced):
     if not isinstance(previous, dict):
         raise ValueError("invalid activity state")
     seen = previous.get("seen", [])
+    retained = previous.get("pending", [])
     last_attempt = previous.get("last_attempt", 0)
     if (not isinstance(seen, list) or any(not isinstance(v, str) for v in seen)
+            or not isinstance(retained, list) or any(not isinstance(v, str) for v in retained)
             or type(last_attempt) not in (int, float) or not math.isfinite(last_attempt)):
         raise ValueError("invalid activity state")
     scalar = runpy.run_path(str(Path(__file__).with_name("summary-call.py")))["scalar"]
@@ -71,12 +73,14 @@ def checkpoint(snapshot, config, state, cwd, forced):
     now = time.time()
     facts = {"pending_messages": len(meaningful), "git_changed": git_changed,
              "interval_secs": interval, "minimum_messages": minimum}
+    observation = dict(previous, pending=list(dict.fromkeys(retained + [event["fp"] for event in pending])))
     if not forced:
         if now - last_attempt < interval:
-            return "deferred_interval", facts, None, None
+            return "deferred_interval", facts, observation, None
         if not pending or (len(meaningful) < minimum and not (git_changed and meaningful)):
-            return "deferred_activity", facts, None, None
+            return "deferred_activity", facts, observation, None
     next_state = {"version": 1, "seen": [fp for fp in fingerprints if fp in known], "git": git_hash,
-                  "head": git.get("head"), "last_attempt": now, "current": fingerprints}
+                  "head": git.get("head"), "last_attempt": now, "current": fingerprints,
+                  "pending": observation["pending"]}
     context = None if forced else {"seen": sorted(known), "git": git}
     return "eligible", facts, next_state, context

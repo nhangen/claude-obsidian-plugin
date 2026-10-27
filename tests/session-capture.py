@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import signal
+import shutil
 import subprocess
 import tempfile
 import time
@@ -80,11 +81,11 @@ print(json.dumps({"type":"result", "subtype":"success", "is_error":False,
                                      "message": {"role": "assistant", "content": [
                                          {"type": "text", "text": text}]}}) + "\n")
 
-    def start(self, *args, session="fixture-session", **env):
+    def start(self, *args, session="fixture-session", script=None, **env):
         payload = {"transcript_path": str(self.transcript), "session_id": session, "cwd": str(self.case / "repo")}
         process = subprocess.Popen(
             ["bash", "-c", 'trap wait EXIT; source "$0" "$@"',
-             str(ROOT / "scripts/session-save.sh"), *args],
+             str(script or ROOT / "scripts/session-save.sh"), *args],
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             text=True, env=dict(self.env, **env))
         process.stdin.write(json.dumps(payload))
@@ -102,6 +103,17 @@ print(json.dumps({"type":"result", "subtype":"success", "is_error":False,
     def finish(self, process):
         stdout, stderr = process.communicate(timeout=20)
         self.assertEqual(process.returncode, 0, (stdout, stderr))
+        lock_path = self.case / "state/claude-obsidian/capture-ownership/admission.lock"
+        provider_blocked = (self.case / "ready").exists() and not (self.case / "release").exists()
+        if lock_path.exists() and not provider_blocked:
+            def completed():
+                with lock_path.open("r+") as stream:
+                    try:
+                        fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                        return True
+                    except BlockingIOError:
+                        return False
+            self.wait_for(completed)
         return stderr
 
     def run_hook(self, *args, **kwargs):
@@ -151,6 +163,134 @@ print(json.dumps({"type":"result", "subtype":"success", "is_error":False,
         self.run_hook("--capture")
         self.assertEqual(len(self.calls()), 2)
         self.assertIn("further research finding", (self.case / "provider-input").read_text())
+
+    def assert_deferred_observation_blocks_handoff(self, interval, minimum, count, expected):
+        repo = self.case / "repo"
+        subprocess.run(["git", "init", "-q", str(repo)], env=self.env, check=True)
+        subprocess.run(["git", "-C", str(repo), "-c", "user.name=Fixture", "-c",
+                        "user.email=fixture@example.invalid", "-c", "core.hooksPath=/dev/null",
+                        "-c", "commit.gpgsign=false", "commit", "--allow-empty", "-qm", "Baseline"],
+                       env=self.env, check=True)
+        self.run_hook(PROVIDER_NOTE="1")
+        activity, = (self.case / "state").glob("**/activity.json")
+        acknowledged = json.loads(activity.read_text())
+        self.assertIsNotNone(acknowledged["git"])
+        self.assertEqual(len(acknowledged["head"]), 40)
+        self.config.write_text(self.config.read_text().replace(
+            "summary_interval_secs: 0", f"summary_interval_secs: {interval}").replace(
+            "summary_min_messages: 1", f"summary_min_messages: {minimum}"))
+        for index in range(count):
+            self.message(f"deferred-{index}", f"Pending research finding {index}: " + "new evidence " * 12)
+        self.run_hook(PROVIDER_NOTE="1")
+        last, = (self.case / "state").glob("**/last-event.json")
+        self.assertEqual(json.loads(last.read_text())["status"], expected)
+        observed = json.loads(activity.read_text())
+        self.assertEqual(len(observed.get("pending", [])), count)
+        self.assertEqual({k: v for k, v in observed.items() if k != "pending"},
+                         {k: v for k, v in acknowledged.items() if k != "pending"})
+        self.assertEqual(len(self.calls()), 1)
+        self.run_hook(PROVIDER_NOTE="1")
+        self.assertEqual(json.loads(activity.read_text()), observed)
+        result = subprocess.run(
+            ["python3", str(ROOT / "scripts/lib/capture-owner.py"), "handoff", "--owner", "disabled",
+             "--verification", "legacy-writers-stopped-and-history-inspected"],
+            env=self.env, text=True, capture_output=True, timeout=10)
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        self.assertIn("legacy activity", result.stderr)
+        self.assertEqual(json.loads(activity.read_text()), observed)
+
+    def test_deferred_interval_observations_block_handoff_after_success(self):
+        self.assert_deferred_observation_blocks_handoff(900, 1, 3, "deferred_interval")
+
+    def test_deferred_activity_observations_block_handoff_after_success(self):
+        self.assert_deferred_observation_blocks_handoff(0, 3, 1, "deferred_activity")
+
+    def test_rewritten_transcript_cannot_acknowledge_omitted_deferred_evidence(self):
+        self.run_hook(PROVIDER_NOTE="1")
+        original = self.transcript.read_bytes()
+        self.config.write_text(self.config.read_text().replace(
+            "summary_interval_secs: 0", "summary_interval_secs: 900"))
+        self.message("omitted", "An unacknowledged decision before a rewrite. " * 8)
+        self.run_hook()
+        activity, = (self.case / "state").glob("**/activity.json")
+        omitted = json.loads(activity.read_text())["pending"]
+        self.assertEqual(len(omitted), 1)
+        self.transcript.write_bytes(original)
+        self.message("replacement", "New information after the transcript was rewritten. " * 8)
+        self.run_hook("--capture", PROVIDER_NOTE="1")
+        self.assertTrue(set(omitted).issubset(json.loads(activity.read_text())["pending"]))
+        result = subprocess.run(
+            ["python3", str(ROOT / "scripts/lib/capture-owner.py"), "handoff", "--owner", "disabled",
+             "--verification", "legacy-writers-stopped-and-history-inspected"],
+            env=self.env, capture_output=True, timeout=10)
+        self.assertNotEqual(result.returncode, 0)
+
+    def test_eligible_observation_survives_preparation_failure_before_receipt(self):
+        repo = self.case / "repo"
+        subprocess.run(["git", "init", "-q", str(repo)], env=self.env, check=True)
+        subprocess.run(["git", "-C", str(repo), "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
+                        "-c", "core.hooksPath=/dev/null", "-c", "commit.gpgsign=false", "commit", "--allow-empty", "-qm", "Baseline"],
+                       env=self.env, check=True)
+        self.run_hook(PROVIDER_NOTE="1")
+        self.message("new-eligible", "A meaningful new decision must remain pending if preparation fails. " * 4)
+        scripts = self.case / "copied-scripts"
+        shutil.copytree(ROOT / "scripts", scripts)
+        counter = self.case / "redaction-count"
+        counter.write_text("0")
+        (scripts / "lib/redact-secrets.sh").write_text('''#!/usr/bin/env bash
+set -euo pipefail
+count=$(<"${REDACTION_CALL_COUNT:?}")
+count=$((count + 1))
+printf '%s' "$count" > "$REDACTION_CALL_COUNT"
+[ "$count" -ne 2 ] || exit 23
+exec bash "${REAL_REDACTOR:?}" "$@"
+''')
+        self.run_hook(script=scripts / "session-save.sh", PROVIDER_NOTE="1", REDACTION_CALL_COUNT=str(counter),
+                      REAL_REDACTOR=str(ROOT / "scripts/lib/redact-secrets.sh"))
+        last, = (self.case / "state").glob("**/last-event.json")
+        self.assertEqual(json.loads(last.read_text())["status"], "redaction_error")
+        self.assertEqual(len(self.calls()), 1)
+        activity, = (self.case / "state").glob("**/activity.json")
+        self.assertTrue(all(receipt["status"] == "process_succeeded" for receipt in self.receipts()))
+        result = subprocess.run(["python3", str(ROOT / "scripts/lib/capture-owner.py"), "handoff", "--owner", "disabled",
+                                 "--verification", "legacy-writers-stopped-and-history-inspected"],
+                                env=self.env, capture_output=True, timeout=10)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(len(json.loads(activity.read_text())["pending"]), 1)
+
+    def test_unstarted_launch_cannot_pass_handoff(self):
+        prepared = subprocess.run(["python3", str(ROOT / "scripts/lib/session-capture.py"), "--prepare",
+                                   str(self.case / "vault"), str(self.transcript), "fixture-session"],
+                                  env=self.env, capture_output=True, text=True, check=True)
+        self.assertEqual(len(prepared.stdout.strip()), 32)
+        launch, = (self.case / "state").glob("**/launches/*.json")
+        self.assertEqual(json.loads(launch.read_text())["status"], "prepared")
+        refused = subprocess.run(["python3", str(ROOT / "scripts/lib/capture-owner.py"), "handoff", "--owner", "disabled",
+                                  "--verification", "legacy-writers-stopped-and-history-inspected"],
+                                 env=self.env, capture_output=True)
+        self.assertNotEqual(refused.returncode, 0)
+
+    def test_busy_new_boundary_remains_pending_after_older_capture_finishes(self):
+        first = self.start(BLOCK_PROVIDER="1", PROVIDER_NOTE="1")
+        self.wait_for(lambda: (self.case / "ready").exists())
+        self.message("busy-new", "New meaningful evidence arrived while another capture held the activity lock. " * 4)
+        self.finish(self.start(PROVIDER_NOTE="1"))
+        (self.case / "release").touch()
+        self.finish(first)
+        launches = [json.loads(path.read_text()) for path in (self.case / "state").glob("**/launches/*.json")]
+        self.assertTrue(any(record["status"] == "deferred_busy" for record in launches))
+        owner = ["python3", str(ROOT / "scripts/lib/capture-owner.py")]
+        refused = subprocess.run(owner + ["handoff", "--owner", "disabled", "--verification",
+                                         "legacy-writers-stopped-and-history-inspected"],
+                                 env=self.env, capture_output=True)
+        self.assertNotEqual(refused.returncode, 0)
+        subprocess.run(owner + ["resume"], env=self.env, check=True, capture_output=True)
+        self.run_hook(PROVIDER_NOTE="1")
+        self.assertEqual(len(self.calls()), 2)
+        settled = subprocess.run(owner + ["handoff", "--owner", "disabled", "--verification",
+                                         "legacy-writers-stopped-and-history-inspected"],
+                                 env=self.env, capture_output=True)
+        self.assertEqual(settled.returncode, 0, settled.stderr)
 
     def test_git_changes_qualify_and_successful_capture_uses_only_new_activity(self):
         self.automatic_defaults()
@@ -287,8 +427,19 @@ print(json.dumps({"type":"result", "subtype":"success", "is_error":False,
         self.assertEqual(self.seen_count(), metadata["sent_events"])
         note, = (self.case / "vault/Inbox").glob("*-gate-fixture-*.md")
         self.assertIn('"context_incomplete":true', note.read_text())
-        self.expire()
+        activity, = (self.case / "state").glob("**/activity.json")
+        retained = json.loads(activity.read_text())
+        self.config.write_text(self.config.read_text().replace(
+            "summary_interval_secs: 0", "summary_interval_secs: 900"))
         self.message("later", "later " + "note " * 100)
+        self.run_hook()
+        deferred = json.loads(activity.read_text())
+        self.assertEqual(len(self.calls()), 1)
+        self.assertTrue(set(retained["pending"]).issubset(deferred["pending"]))
+        self.assertEqual(len(deferred["pending"]), len(retained["pending"]) + 1)
+        self.assertEqual(deferred["seen"], retained["seen"])
+        self.assertEqual(deferred["last_attempt"], retained["last_attempt"])
+        self.expire()
         self.run_hook()
         self.assertEqual(len(self.calls()), 2)
         second = self.provider_text()
