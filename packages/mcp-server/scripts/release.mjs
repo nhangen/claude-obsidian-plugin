@@ -63,6 +63,7 @@ function requireCleanWorktree() {
 
 requireCleanWorktree();
 run("npm", ["ci"]);
+run("npm", ["audit", "--omit=dev", "--audit-level=high"]);
 run("npm", ["test"]);
 requireCleanWorktree();
 
