@@ -22,6 +22,14 @@ class OwnershipTests(unittest.TestCase):
             os.environ,
             HOME=str(self.case / "home"),
             XDG_STATE_HOME=str(self.case / "state"),
+            XDG_CONFIG_HOME=str(self.case / "config"),
+            XDG_DATA_HOME=str(self.case / "data"),
+            GIT_CONFIG_GLOBAL=os.devnull,
+            GIT_CONFIG_NOSYSTEM="1",
+            GIT_AUTHOR_NAME="Fixture",
+            GIT_AUTHOR_EMAIL="fixture@example.invalid",
+            GIT_COMMITTER_NAME="Fixture",
+            GIT_COMMITTER_EMAIL="fixture@example.invalid",
         )
         self.base = self.case / "state/claude-obsidian"
         self.state = self.base / "capture-ownership"
@@ -45,7 +53,7 @@ class OwnershipTests(unittest.TestCase):
             owner,
             "--verification",
             "legacy-writers-stopped-and-history-inspected",
-            *args
+            *args,
         )
 
     def evidence(self, relative, value):
@@ -356,18 +364,399 @@ class OwnershipTests(unittest.TestCase):
 
     def test_nested_keeper_with_inherited_lease_keeps_pending_evidence(self):
         commit = "b" * 40
-        result = self.run_owner(
-            "record-commit",
-            "--commit",
-            commit,
+        command = (
+            "legacy",
+            "--",
+            "bash",
+            str(ROOT / "scripts/keeper"),
+            "append",
             "--vault",
             str(self.vault),
             "--target",
             "Notes/commit.md",
+            "--section",
+            "## 12:00 " + commit,
+            "--skip-if-hash",
+            commit,
+        )
+        self.env["KEEPER_FAULT_INJECT"] = "before_append"
+        failed = self.run_owner(*command, payload="Private inherited-lease context")
+        self.assertNotEqual(failed.returncode, 0)
+        (pending,) = (self.state / "pending-commits").glob("*.json")
+        original = pending.read_bytes()
+        self.assertNotIn(b"Private inherited-lease context", original)
+        self.assertNotEqual(self.handoff().returncode, 0)
+        self.assertEqual(pending.read_bytes(), original)
+        self.assertEqual(self.run_owner("resume").returncode, 0)
+        del self.env["KEEPER_FAULT_INJECT"]
+        succeeded = self.run_owner(*command, payload="Private inherited-lease context")
+        self.assertEqual(succeeded.returncode, 0, succeeded.stderr)
+        self.assertFalse(pending.exists())
+        (archived,) = (self.state / "acknowledged-commits").glob("*.json")
+        self.assertEqual(archived.read_bytes(), original)
+        self.assertIn(commit, (self.vault / "Notes/commit.md").read_text())
+        self.assertEqual(self.handoff().returncode, 0)
+
+    def test_installed_git_hook_failure_and_readmission_remain_pending_until_retry(
+        self,
+    ):
+        repo = self.case / "git-hook-repo"
+        config = self.case / "config.md"
+        config.write_text(f"---\nvault_path: {self.vault}\n---\n")
+        self.env.update(
+            OBSIDIAN_LOCAL_MD=str(config), KEEPER_FAULT_INJECT="before_append"
+        )
+
+        def run(*command):
+            return subprocess.run(
+                command,
+                env=self.env,
+                capture_output=True,
+                text=True,
+                timeout=15,
+                cwd=self.case,
+            )
+
+        self.assertEqual(run("git", "init", "-q", str(repo)).returncode, 0)
+        installed = run(
+            "bash", str(ROOT / "scripts/install-git-hook.sh"), "install", str(repo)
+        )
+        self.assertEqual(installed.returncode, 0, installed.stderr)
+        committed = run(
+            "git",
+            "-C",
+            str(repo),
+            "-c",
+            "commit.gpgsign=false",
+            "commit",
+            "--allow-empty",
+            "-qm",
+            "Fixture capture failure",
+        )
+        self.assertEqual(committed.returncode, 0, committed.stderr)
+        self.assertIn("keeper append failed", committed.stderr)
+        commit = run("git", "-C", str(repo), "rev-parse", "HEAD").stdout.strip()
+        (pending,) = (self.state / "pending-commits").glob("*.json")
+        original = pending.read_bytes()
+        record = json.loads(original)
+        self.assertEqual(record["hash"], commit)
+        self.assertEqual(record["vault"], str(self.vault))
+        self.assertEqual(set(record), {"hash", "vault", "target"})
+        hook = repo / ".git/hooks/post-commit"
+
+        def replay():
+            return run(
+                "git",
+                "-C",
+                str(repo),
+                "-c",
+                "alias.capture=!bash " + str(hook),
+                "capture",
+            )
+
+        self.assertIn("keeper append failed", replay().stderr)
+        self.assertEqual(pending.read_bytes(), original)
+        self.assertNotEqual(self.handoff().returncode, 0)
+        self.assertEqual(self.run_owner("resume").returncode, 0)
+        resolved = self.run_owner(
+            "resolve-legacy",
+            "--evidence",
+            str(pending.relative_to(self.base)),
+            "--verification",
+            "authoritative-vault-and-history-inspected",
+            "--reason",
+            "Fixture operator inspected the failed capture",
+        )
+        self.assertEqual(resolved.returncode, 0, resolved.stderr)
+        (resolution,) = (self.state / "resolutions").glob("*.json")
+        history = resolution.read_bytes()
+        self.assertIn("keeper append failed", replay().stderr)
+        readmitted = pending.read_bytes()
+        self.assertNotEqual(readmitted, original)
+        self.assertEqual(resolution.read_bytes(), history)
+        self.assertIn("keeper append failed", replay().stderr)
+        self.assertEqual(pending.read_bytes(), readmitted)
+        self.assertNotEqual(self.handoff().returncode, 0)
+        self.assertEqual(self.run_owner("resume").returncode, 0)
+        del self.env["KEEPER_FAULT_INJECT"]
+        succeeded = replay()
+        self.assertEqual(succeeded.returncode, 0, succeeded.stderr)
+        self.assertNotIn("keeper append failed", succeeded.stderr)
+        self.assertFalse(pending.exists())
+        self.assertIn(commit, (self.vault / record["target"]).read_text())
+        self.assertEqual(resolution.read_bytes(), history)
+        self.assertEqual(self.handoff().returncode, 0)
+
+    def test_full_hash_append_rejects_duplicate_identity_options_before_write(self):
+        for option, value in (
+            ("--vault", str(self.case / "other")),
+            ("--target", "Notes/other.md"),
+            ("--skip-if-hash", "c" * 40),
+        ):
+            with self.subTest(option=option):
+                result = self.run_owner(
+                    "legacy",
+                    "--",
+                    "bash",
+                    str(ROOT / "scripts/keeper"),
+                    "append",
+                    "--vault",
+                    str(self.vault),
+                    "--target",
+                    "Notes/commit.md",
+                    "--section",
+                    "## 12:00 " + "b" * 40,
+                    "--skip-if-hash",
+                    "b" * 40,
+                    option,
+                    value,
+                    payload="Private context",
+                )
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("duplicate", result.stderr)
+                self.assertFalse((self.vault / "Notes/commit.md").exists())
+                self.assertFalse((self.vault / "Notes/other.md").exists())
+
+    def test_full_hash_append_registration_failure_prevents_keeper_write(self):
+        self.run_owner("status")
+        self.evidence("capture-ownership/pending-commits", {})
+        result = self.run_owner(
+            "legacy",
+            "--",
+            "bash",
+            str(ROOT / "scripts/keeper"),
+            "append",
+            "--vault",
+            str(self.vault),
+            "--target",
+            "Notes/commit.md",
+            "--section",
+            "## 12:00 " + "a" * 40,
+            "--skip-if-hash",
+            "a" * 40,
+            payload="Must not be written",
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse((self.vault / "Notes/commit.md").exists())
+
+    def test_full_hash_append_without_verified_heading_stays_pending(self):
+        result = self.run_owner(
+            "legacy",
+            "--",
+            "bash",
+            str(ROOT / "scripts/keeper"),
+            "append",
+            "--vault",
+            str(self.vault),
+            "--target",
+            "Notes/commit.md",
+            "--section",
+            "## Heading without the commit",
+            "--skip-if-hash",
+            "a" * 40,
+            payload="Written but not acknowledged",
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("heading readback failed", result.stderr)
+        self.assertIn(
+            "Written but not acknowledged", (self.vault / "Notes/commit.md").read_text()
+        )
+        self.assertEqual(len(list((self.state / "pending-commits").glob("*.json"))), 1)
+        self.assertNotEqual(self.handoff().returncode, 0)
+
+    def test_uppercase_full_hash_registers_and_acknowledges_but_short_hash_stays_manual(
+        self,
+    ):
+        command = (
+            "legacy",
+            "--",
+            "bash",
+            str(ROOT / "scripts/keeper"),
+            "append",
+            "--vault",
+            str(self.vault),
+            "--target",
+            "Notes/commit.md",
+            "--section",
+            "## 12:00 " + "AB" * 20,
+            "--skip-if-hash",
+            "AB" * 20,
+        )
+        self.env["KEEPER_FAULT_INJECT"] = "before_append"
+        self.assertNotEqual(
+            self.run_owner(*command, payload="Private context").returncode, 0
+        )
+        (pending,) = (self.state / "pending-commits").glob("*.json")
+        self.assertEqual(json.loads(pending.read_text())["hash"], "ab" * 20)
+        del self.env["KEEPER_FAULT_INJECT"]
+        succeeded = self.run_owner(*command, payload="Private context")
+        self.assertEqual(succeeded.returncode, 0, succeeded.stderr)
+        self.assertFalse(pending.exists())
+        short_command = list(command)
+        short_command[short_command.index("--target") + 1] = "Notes/short.md"
+        short_command[short_command.index("--section") + 1] = "## 12:00 deadbee"
+        short_command[-1] = "deadbee"
+        short = self.run_owner(*short_command, payload="Manual context")
+        self.assertEqual(short.returncode, 0, short.stderr)
+        self.assertFalse(list((self.state / "pending-commits").glob("*.json")))
+
+    def test_full_hash_date_append_retains_and_acknowledges_daily_target(self):
+        commit = "c" * 40
+        body = self.case / "date-body.md"
+        body.write_text("Date-shaped capture\n")
+        command = [
+            "bash",
+            str(ROOT / "scripts/keeper"),
+            "append",
+            "--vault",
+            str(self.vault),
+            "--date",
+            "2026-10-27",
+            "--section",
+            "## 12:00 " + commit,
+            "--body-file",
+            str(body),
+            "--skip-if-hash",
+            commit,
+        ]
+        failed = subprocess.run(
+            command,
+            env=dict(self.env, KEEPER_FAULT_INJECT="before_append"),
+            capture_output=True,
+            timeout=10,
+        )
+        self.assertNotEqual(failed.returncode, 0)
+        pending = list((self.state / "pending-commits").glob("*.json"))
+        self.assertEqual(len(pending), 1)
+        self.assertEqual(
+            json.loads(pending[0].read_text())["target"], "Daily/2026-10-27.md"
+        )
+        self.assertNotEqual(self.handoff().returncode, 0)
+        self.assertEqual(self.run_owner("resume").returncode, 0)
+        success = subprocess.run(command, env=self.env, capture_output=True, timeout=10)
+        self.assertEqual(success.returncode, 0, success.stderr)
+        self.assertFalse(pending[0].exists())
+        self.assertIn(commit, (self.vault / "Daily/2026-10-27.md").read_text())
+
+    def test_configured_vault_full_hash_append_retains_resolved_identity(self):
+        commit = "d" * 40
+        config = self.case / "obsidian.local.md"
+        config.write_text("---\nvault_path: " + str(self.vault) + "\n---\n")
+        self.env["OBSIDIAN_LOCAL_MD"] = str(config)
+        body = self.case / "configured-body.md"
+        body.write_text("Configured capture\n")
+        command = [
+            "bash",
+            str(ROOT / "scripts/keeper"),
+            "append",
+            "--target",
+            "Notes/configured.md",
+            "--section",
+            "## 12:00 " + commit,
+            "--body-file",
+            str(body),
+            "--skip-if-hash",
+            commit,
+        ]
+        failed = subprocess.run(
+            command,
+            env=dict(self.env, KEEPER_FAULT_INJECT="before_append"),
+            capture_output=True,
+            timeout=10,
+        )
+        self.assertNotEqual(failed.returncode, 0)
+        pending = list((self.state / "pending-commits").glob("*.json"))
+        self.assertEqual(len(pending), 1)
+        self.assertEqual(json.loads(pending[0].read_text())["vault"], str(self.vault))
+        self.assertNotEqual(self.handoff().returncode, 0)
+        self.assertEqual(self.run_owner("resume").returncode, 0)
+        succeeded = subprocess.run(
+            command, env=self.env, capture_output=True, timeout=10
+        )
+        self.assertEqual(succeeded.returncode, 0, succeeded.stderr)
+        self.assertFalse(pending[0].exists())
+
+    def test_fenced_examples_and_unclosed_fences_do_not_acknowledge_capture(self):
+        for existing in (False, True):
+            with self.subTest(existing=existing):
+                commit = ("e" if existing else "f") * 40
+                target = "Notes/fenced-" + str(existing) + ".md"
+                note = self.vault / target
+                note.parent.mkdir(exist_ok=True)
+                body = self.case / ("fenced-body-" + str(existing))
+                if existing:
+                    note.write_text("```markdown\nAn unclosed prior fence\n")
+                    body.write_text("Real context\n")
+                    section = "## 12:00 " + commit
+                else:
+                    body.write_text("```markdown\n## 12:00 " + commit + "\n```\n")
+                    section = "## Examples only"
+                result = subprocess.run(
+                    [
+                        "bash",
+                        str(ROOT / "scripts/keeper"),
+                        "append",
+                        "--vault",
+                        str(self.vault),
+                        "--target",
+                        target,
+                        "--section",
+                        section,
+                        "--body-file",
+                        str(body),
+                        "--skip-if-hash",
+                        commit,
+                    ],
+                    env=self.env,
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
+                )
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("heading readback failed", result.stderr)
+                pending = [
+                    p
+                    for p in (self.state / "pending-commits").glob("*.json")
+                    if json.loads(p.read_text())["hash"] == commit
+                ]
+                self.assertEqual(len(pending), 1)
+                self.assertNotEqual(self.handoff().returncode, 0)
+                self.assertEqual(self.run_owner("resume").returncode, 0)
+
+    def test_heading_verifier_reuses_production_parser_without_writes(self):
+        commit = "a" * 40
+        note = self.vault / "verified.md"
+        note.write_text("## 12:00 " + commit + "\nBody\n")
+        before = note.read_bytes()
+        result = subprocess.run(
+            [
+                "bash",
+                str(ROOT / "scripts/keeper-core"),
+                "has-commit-heading",
+                str(note),
+                commit,
+            ],
+            env=self.env,
+            capture_output=True,
+            timeout=10,
         )
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertNotEqual(self.handoff().returncode, 0)
-        self.assertEqual(len(list((self.state / "pending-commits").glob("*.json"))), 1)
+        self.assertEqual(note.read_bytes(), before)
+        missing = self.vault / "absent.md"
+        absent = subprocess.run(
+            [
+                "bash",
+                str(ROOT / "scripts/keeper-core"),
+                "has-commit-heading",
+                str(missing),
+                commit,
+            ],
+            env=self.env,
+            capture_output=True,
+            timeout=10,
+        )
+        self.assertNotEqual(absent.returncode, 0)
+        self.assertFalse(missing.exists())
 
     def test_stop_error_has_only_one_blocking_continuation(self):
         self.run_owner("status")

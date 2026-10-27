@@ -160,34 +160,125 @@ def legacy(command, payload=None):
                 + current["phase"]
                 + "; use the configured MCP route, no local fallback"
             )
+        keeper = len(command) > 2 and Path(command[1]).name == "keeper-core"
+        if keeper:
+            record = keeper_commit(command[2:])
+            if record is not None:
+                commit_record(record)
+                command = [*command[:2], *record.arguments]
         result = execute(command, descriptor, payload)
-        if result == 0 and len(command) > 2 and Path(command[1]).name == "keeper-core":
+        if result == 0 and keeper:
             acknowledge_commit(command[2:])
         return result
 
 
+def keeper_commit(arguments):
+    if arguments[:1] != ["append"]:
+        return None
+    options = {}
+    names = {
+        "--vault",
+        "--target",
+        "--date",
+        "--section",
+        "--body-file",
+        "--init-file",
+        "--skip-if-hash",
+        "--request-id",
+        "--idempotency-key",
+        "--format",
+    }
+    for index in range(1, len(arguments), 2):
+        name = arguments[index]
+        if name not in names or index + 1 >= len(arguments):
+            raise OwnershipError("invalid keeper append arguments")
+        if name in options:
+            raise OwnershipError("duplicate keeper append option: " + name)
+        options[name] = arguments[index + 1]
+    commit = options.get("--skip-if-hash", "")
+    if not re.fullmatch(r"[0-9a-fA-F]{40}|[0-9a-fA-F]{64}", commit):
+        return None
+    vault = options.get("--vault", "")
+    if not vault:
+        try:
+            configured = subprocess.run(
+                [
+                    "bash",
+                    "-c",
+                    '. "$1"; obsidian_config_value vault_path "$2"',
+                    "capture-identity",
+                    str(Path(__file__).parent / "resolve-config.sh"),
+                    str(Path(__file__).parent.parent),
+                ],
+                capture_output=True,
+                text=True,
+                timeout=5,
+                check=False,
+            )
+        except (OSError, subprocess.SubprocessError):
+            raise OwnershipError(
+                "configured capture vault could not be resolved"
+            ) from None
+        if configured.returncode != 0:
+            raise OwnershipError("full-hash capture requires a resolved vault")
+        vault = configured.stdout.rstrip("\n")
+    if not vault or not Path(vault).is_dir():
+        raise OwnershipError("full-hash capture requires an existing vault")
+    target = options.get("--target", "")
+    date = options.get("--date", "")
+    if target and date:
+        raise OwnershipError("capture requires --target or --date, not both")
+    target = target or ("Daily/" + date + ".md" if date else "")
+    if not target:
+        raise OwnershipError("full-hash capture requires --target or --date")
+    vault = str(Path(vault).resolve())
+    target = str(Path(target))
+    effective = ["append"]
+    for name, value in options.items():
+        if name not in ("--vault", "--target", "--date"):
+            effective.extend((name, value))
+    effective.extend(("--vault", vault, "--target", target))
+    return argparse.Namespace(
+        commit=commit.lower(), vault=vault, target=target, arguments=effective
+    )
+
+
 def commit_record(args):
-    if not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", args.commit or ""):
+    if not re.fullmatch(r"[0-9a-fA-F]{40}|[0-9a-fA-F]{64}", args.commit or ""):
         raise OwnershipError("full commit hash required")
     target = Path(args.target)
     if target.is_absolute() or ".." in target.parts:
         raise OwnershipError("vault-relative commit target required")
     value = dict(
-        hash=args.commit, vault=str(Path(args.vault).resolve()), target=str(target)
+        hash=args.commit.lower(),
+        vault=str(Path(args.vault).resolve()),
+        target=str(target),
     )
     key = hashlib.sha256(json.dumps(value, sort_keys=True).encode()).hexdigest()
     with admission():
         current = ownership()
         if current["owner"] != "legacy" or current["phase"] != "stable":
             raise OwnershipError("legacy commit ownership changed")
-        write(directory(state_path() / "pending-commits") / (key + ".json"), value)
+        path = directory(state_path() / "pending-commits") / (key + ".json")
+        try:
+            previous = read(path)
+        except FileNotFoundError:
+            previous = None
+        if previous is not None:
+            if not isinstance(previous, dict) or any(
+                previous.get(k) != v for k, v in value.items()
+            ):
+                raise OwnershipError("invalid pending commit identity")
+            if not resolved(path):
+                return
+        if resolution_path(path).exists():
+            value["attempt_id"] = os.urandom(16).hex()
+        write(path, value)
 
 
 def acknowledge_commit(arguments):
-    def option(name):
-        return arguments[arguments.index(name) + 1] if name in arguments else None
-
-    if arguments[:1] != ["append"] or not option("--skip-if-hash"):
+    record = keeper_commit(arguments)
+    if record is None:
         return
     pending = state_path() / "pending-commits"
     if not pending.exists():
@@ -195,19 +286,28 @@ def acknowledge_commit(arguments):
     for path in pending.glob("*.json"):
         value = read(path)
         if (
-            value["hash"] != option("--skip-if-hash")
-            or value["target"] != option("--target")
-            or value["vault"] != str(Path(option("--vault")).resolve())
+            value["hash"] != record.commit
+            or value["target"] != str(Path(record.target))
+            or value["vault"] != str(Path(record.vault).resolve())
         ):
             continue
         note = Path(value["vault"]) / value["target"]
-        if not re.search(
-            r"^## [^\n]*(?<![0-9a-fA-F])"
-            + re.escape(value["hash"])
-            + r"(?![0-9a-fA-F])[^\n]*$",
-            note.read_text(),
-            re.MULTILINE,
-        ):
+        try:
+            verified = subprocess.run(
+                [
+                    "bash",
+                    str(Path(__file__).parent.parent / "keeper-core"),
+                    "has-commit-heading",
+                    str(note),
+                    value["hash"],
+                ],
+                capture_output=True,
+                timeout=5,
+                check=False,
+            )
+        except (OSError, subprocess.SubprocessError):
+            raise OwnershipError("commit heading readback failed") from None
+        if verified.returncode != 0:
             raise OwnershipError("keeper succeeded but commit heading readback failed")
         archive = directory(state_path() / "acknowledged-commits")
         os.replace(path, archive / path.name)
@@ -328,10 +428,14 @@ def public_hook(profile, descriptor, value, event):
     return 0
 
 
-def resolved(path):
+def resolution_path(path):
     key = hashlib.sha256(str(path.relative_to(root())).encode()).hexdigest()
+    return state_path() / "resolutions" / (key + ".json")
+
+
+def resolved(path):
     try:
-        record = read(state_path() / "resolutions" / (key + ".json"))
+        record = read(resolution_path(path))
     except FileNotFoundError:
         return False
     return record.get("sha256") == evidence_digest(path)

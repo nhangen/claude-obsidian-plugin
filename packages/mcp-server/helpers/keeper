@@ -788,6 +788,13 @@ main() {
   case "$sub" in
     append) cmd_append "$@" ;;
     insert) cmd_insert "$@" ;;
+    has-commit-heading)
+      [ "$#" -eq 2 ] || keeper_die "has-commit-heading requires a file and full hash"
+      case "$2" in ''|*[!0-9a-fA-F]*) keeper_die "full hexadecimal hash required" ;; esac
+      [ "${#2}" -eq 40 ] || [ "${#2}" -eq 64 ] || keeper_die "full commit hash required"
+      [ -f "$1" ] && [ ! -L "$1" ] || return 1
+      keeper_heading_sha_relation "$1" "$2"
+      ;;
     *) keeper_die "unknown subcommand: $sub (expected: append or insert)" ;;
   esac
 }

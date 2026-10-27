@@ -63,7 +63,13 @@ content-bound resolution alongside the original evidence. It is explicitly an
 operator resolution, not a fabricated MCP success receipt.
 
 New legacy commit records remain pending until keeper returns success and its
-exact commit heading is read back. Historical successful legacy process exits
+exact commit heading is read back using the keeper's fence-aware parser.
+Full-hash keeper appends register before execution, including installed Git
+hooks; configured vaults and date targets are resolved once and forwarded to
+the writer. Failed attempts block handoff, and re-admitted captures cannot reuse
+an earlier operator resolution. The internal `has-commit-heading` core command
+is read-only; the existing append/insert write primitives are unchanged.
+Historical successful legacy process exits
 are accepted only as terminal legacy work, never upgraded to MCP acceptance.
 Unmapped projects under MCP ownership refuse capture. Routine note, session,
 daily and commit paths use MCP; local scaffolding, chapter splitting, moves and
