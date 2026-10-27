@@ -4,6 +4,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 KEEPER="$ROOT_DIR/scripts/keeper"
 fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/keeper-cli-XXXXXX")"; trap 'rm -rf "$TMP"' EXIT
+export XDG_STATE_HOME="$TMP/state"
 
 # A real vault has .obsidian at its root; vault_index_apply finds it to write
 # vault-root-relative link targets. Without it the fixture exercises a shape

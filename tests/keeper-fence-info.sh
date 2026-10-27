@@ -4,6 +4,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 KEEPER="$ROOT_DIR/scripts/keeper"
 fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/keeper-fence-info-XXXXXX")"
+export XDG_STATE_HOME="$TMP/state"
 trap 'rm -rf "$TMP"' EXIT
 V="$TMP/vault"
 mkdir -p "$V/.obsidian"

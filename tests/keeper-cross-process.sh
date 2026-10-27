@@ -6,6 +6,7 @@ KEEPER="$ROOT_DIR/scripts/keeper"
 BUNDLED_KEEPER="$ROOT_DIR/packages/codex/skills/commit-capture/scripts/keeper"
 fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/keeper-cross-process-XXXXXX")"
+export XDG_STATE_HOME="$TMP/state"
 trap 'rm -rf "$TMP"' EXIT
 V="$TMP/vault"
 mkdir -p "$V/.obsidian"

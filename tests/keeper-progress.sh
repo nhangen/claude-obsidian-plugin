@@ -16,6 +16,7 @@ KEEPER="$ROOT_DIR/scripts/keeper"
 fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
 
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/keeper-progress-XXXXXX")"; trap 'rm -rf "$TMP"' EXIT
+export XDG_STATE_HOME="$TMP/state"
 V="$TMP/vault"; mkdir -p "$V/.obsidian" "$V/Inbox" "$V/Daily"
 SHELL_BIN=bash
 
