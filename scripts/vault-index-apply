@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+set -euo pipefail
+if [ "$#" -ne 3 ]; then
+  printf 'Usage: vault-index-apply <vault> <folder> <index>\n' >&2
+  exit 64
+fi
+INDEX_DIR="$(cd "$(dirname "$0")" && pwd -P)"
+# shellcheck disable=SC2016
+exec python3 "$INDEX_DIR/lib/capture-owner.py" legacy -- bash -c '
+set -euo pipefail
+. "$1/lib/note-hash.sh"
+. "$1/lib/vault-index.sh"
+vault_index_apply "$2" "$3" "$4"
+' vault-index-apply "$INDEX_DIR" "$@"

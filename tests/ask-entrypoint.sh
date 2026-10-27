@@ -9,6 +9,6 @@ fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
 grep -q '^name: ask$' "$S" || fail "skill name must be bare 'ask'"
 grep -q '^description:' "$S" || fail "skill missing description"
 grep -qiF "vault-librarian" "$S" || fail "skill must dispatch vault-librarian"
-grep -qiF "vault-librarian" "$C" || fail "command must reference vault-librarian"
+grep -qF '${CLAUDE_PLUGIN_ROOT}/skills/ask/SKILL.md' "$C" || fail "command must read the physical ownership-aware skill"
 grep -q '^name: obsidian:ask$' "$C" || fail "commands/ask.md missing name: obsidian:ask"
 echo "PASS: ask-entrypoint"

@@ -40,6 +40,7 @@ here only for a query, or an INSERT whose routing/dedup is unresolved.
 4. If the subagent reports low-confidence routing or a near-duplicate, surface
    its question to the user — do not auto-resolve it.
 
-**QUERY is read-only.** The QUERY path never writes to the vault. It reads
-frontmatter, INDEX links, and note text via the live substrate — it does not
-produce side-effects. Routes to `recall` or claude-mem as typed by the question.
+**MCP QUERY is read-only.** Legacy QUERY may reconcile INDEX links through the
+ownership-guarded `scripts/vault-index-apply` CLI, but does not modify note
+content. The raw library is an internal server/maintenance primitive, not a
+client write entry point. Routes to `recall` or claude-mem as typed by the question.

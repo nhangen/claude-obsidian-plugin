@@ -11,6 +11,15 @@ layer is your memory.
 
 ## Bootstrap (every dispatch)
 
+Run `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/lib/capture-owner.py" status` first.
+For stable MCP ownership, QUERY uses bounded public MCP reads or the retained
+read-only `ask_vault_librarian` prompt; INSERT and APPEND follow the physical
+`${CLAUDE_PLUGIN_ROOT}/skills/keeper-save/SKILL.md` MCP procedure. Stop before
+the local bootstrap below. Do not inspect a client vault, dispatch a local
+writer, refresh a local INDEX, or fall back on transport failure.
+Disabled/draining ownership or an error must stop before local configuration
+access. Only stable legacy ownership may continue below.
+
 ```bash
 CONFIG="$(bash "${CLAUDE_PLUGIN_ROOT}/scripts/lib/resolve-config.sh")"
 [ -z "$CONFIG" ] && { echo "Run /obsidian:setup first."; exit 0; }
@@ -35,8 +44,10 @@ slice is one or two domain folders, never the whole vault.
 ## QUERY — "what do we know about X / where is Y / what did we decide about Z"
 
 1. Route the question to its slice (folder + INDEX).
-2. Refresh the slice: ``ADDED="$(vault_index_apply "$VAULT_PATH" "$FOLDER" "$FOLDER/INDEX.md")"``.
-   `vault_index_apply` writes the links itself (append-only), as
+2. Refresh the slice: ``ADDED="$(bash "${CLAUDE_PLUGIN_ROOT}/scripts/vault-index-apply" "$VAULT_PATH" "$FOLDER" "$FOLDER/INDEX.md")"``.
+   Stop and report a nonzero result; never fall back to the raw library.
+   This client entry point holds writer admission while `vault_index_apply`
+   writes the links itself (append-only), as
    ``- [[<path/from/vault/root>]]`` — a bare basename is ambiguous once two notes
    in different subfolders share one. Do **not** append them by hand; that is a
    second implementation that drifts. The `ADD` set it returns on stdout is the
@@ -106,8 +117,8 @@ deduped.)
    `scripts/keeper append` for each `Pending.md` entry (with `--vault`, a vault-relative
    `--target`, `--section`, and `--body-file`). Do not append Pending rows by
    hand: defer the question without interrogating the user mid-task.
-5. Refresh the touched INDEX: ``vault_index_apply "$VAULT_PATH" "$FOLDER" "$FOLDER/INDEX.md"`` —
-   this is what links the new note.
+5. Refresh the touched INDEX: ``bash "${CLAUDE_PLUGIN_ROOT}/scripts/vault-index-apply" "$VAULT_PATH" "$FOLDER" "$FOLDER/INDEX.md"``.
+   Stop and report a nonzero result; never fall back to the raw library.
 6. Return what you wrote, where, and a one-line summary.
 
 ## APPEND — "add this to today's note / log this entry"

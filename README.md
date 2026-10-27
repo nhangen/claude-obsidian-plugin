@@ -98,7 +98,10 @@ writer activation and client migration remain separate acceptance gates in
 
 ### Vault Librarian
 
-`/obsidian:ask` dispatches the `vault-librarian` subagent. It answers queries by
+`/obsidian:ask` reads the ownership-aware skill from its physical file. MCP
+ownership uses remote reads and guarded MCP writes without a client-side vault;
+disabled or draining ownership stops local work. Only stable legacy ownership
+dispatches the `vault-librarian` subagent. It answers legacy queries by
 routing to the relevant domain folder, refreshing that slice's `INDEX.md`
 on-demand (two-stage: file mtime narrows candidates, a stored `size:sha256`
 content hash confirms real changes — so a Syncthing mtime-bump doesn't trigger
@@ -106,6 +109,12 @@ re-indexing), then reading only the indexed notes and citing them with a
 confidence level. It reports indexing gaps rather than answering from a partial
 slice, and falls back to the `find` skill for raw-text search when the index
 misses.
+
+Legacy librarian INDEX reconciliation uses `scripts/vault-index-apply`, which
+holds the same admission lease as other client writes. The raw INDEX library is
+an internal authoritative-server/maintenance primitive, not a client write entry
+point. Existing maintenance writers still require coordinated retirement during
+migration; this host-local guard is not a distributed fence.
 
 For inserts it routes new notes through the taxonomy, dedups against existing
 notes, writes via the matching `Templates/` file, and appends a link to the
