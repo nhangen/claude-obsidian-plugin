@@ -934,8 +934,10 @@ def route(event, fallback, arguments):
         raise OwnershipError("hook payload exceeds bounded input")
     try:
         HOOK_INPUT = decode_json(payload)
-    except ValueError:
-        HOOK_INPUT = {}
+    except ValueError as error:
+        raise OwnershipError(
+            "hook input must be valid JSON without duplicate fields"
+        ) from error
     if not isinstance(HOOK_INPUT, dict):
         raise OwnershipError("hook input must be a JSON object")
     with admission() as descriptor:

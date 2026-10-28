@@ -503,6 +503,32 @@ class OwnershipTests(unittest.TestCase):
                     self.assertEqual(path.read_bytes(), original)
             path.unlink()
 
+    def test_invalid_hook_json_produces_explicit_refusal_instead_of_empty_input(self):
+        for owner_state in ("legacy", "disabled"):
+            self.assertEqual(self.handoff(owner_state).returncode, 0)
+            for owner in OWNERS:
+                for event in ("PreToolUse", "Stop", "UserPromptSubmit"):
+                    for payload in (
+                        '{"tool_name":"mcp__obsidian-write__obsidian_keeper_save",'
+                        '"tool_name":"mcp__obsidian-write__obsidian_daily_append"}',
+                        '{"tool_name":',
+                    ):
+                        with self.subTest(owner=owner, state=owner_state, event=event):
+                            result = self.run_owner(
+                                "route", "--event", event, payload=payload, owner=owner
+                            )
+                            self.assertEqual(result.returncode, 0, result.stderr)
+                            value = json.loads(result.stdout)
+                            if event == "PreToolUse":
+                                self.assertEqual(
+                                    value.get("hookSpecificOutput", {}).get(
+                                        "permissionDecision"
+                                    ),
+                                    "deny",
+                                )
+                            else:
+                                self.assertEqual(value.get("decision"), "block")
+
     def test_history_requires_explicit_content_bound_resolution_in_both_packages(self):
         path = self.evidence(
             "session-capture/session/activity.json", self.checkpoint_history()
