@@ -9,7 +9,7 @@ trap 'rm -rf "$WORK"' EXIT
 
 # Run the hook with a controlled HOME/XDG so config resolution is deterministic.
 run_doctor() {
-  HOME="$1" XDG_CONFIG_HOME="$1/.config" OBSIDIAN_LOCAL_MD="" bash "$DOCTOR"
+  printf '{}\n' | HOME="$1" XDG_CONFIG_HOME="$1/.config" XDG_STATE_HOME="$1/.local/state" OBSIDIAN_LOCAL_MD="" bash "$DOCTOR"
 }
 
 # --- config present + usable -> silent ---
@@ -53,7 +53,7 @@ assert 'obsidian:setup' in d['hookSpecificOutput']['additionalContext']
 
 # --- opt-out: env var silences ---
 H5="$WORK/h5"; mkdir -p "$H5/.config" "$H5/Documents/Obsidian"
-OUT="$(HOME="$H5" XDG_CONFIG_HOME="$H5/.config" OBSIDIAN_LOCAL_MD="" OBSIDIAN_DOCTOR_SILENCE=1 bash "$DOCTOR")"
+OUT="$(OBSIDIAN_DOCTOR_SILENCE=1 run_doctor "$H5")"
 [ -z "$OUT" ] || fail "OBSIDIAN_DOCTOR_SILENCE=1 must silence the advisory, got: $OUT"
 
 # --- opt-out: sentinel file silences ---
