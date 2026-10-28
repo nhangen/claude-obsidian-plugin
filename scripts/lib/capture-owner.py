@@ -22,6 +22,15 @@ class OwnershipError(ValueError):
     pass
 
 
+def canonical_path(path, strict=False):
+    try:
+        return Path(path).resolve(strict=strict)
+    except (OSError, RuntimeError) as error:
+        raise OwnershipError(
+            "cannot resolve canonical capture path; no fallback"
+        ) from error
+
+
 def root():
     home = os.environ.get("XDG_STATE_HOME")
     if home is not None:
@@ -247,7 +256,7 @@ def keeper_commit(arguments):
     target = target or ("Daily/" + date + ".md" if date else "")
     if not target:
         raise OwnershipError("full-hash capture requires --target or --date")
-    vault = str(Path(vault).resolve())
+    vault = str(canonical_path(vault))
     target = str(Path(target))
     effective = ["append"]
     for name, value in options.items():
@@ -267,7 +276,7 @@ def commit_record(args):
         raise OwnershipError("vault-relative commit target required")
     value = dict(
         hash=args.commit.lower(),
-        vault=str(Path(args.vault).resolve()),
+        vault=str(canonical_path(args.vault)),
         target=str(target),
     )
     key = hashlib.sha256(json.dumps(value, sort_keys=True).encode()).hexdigest()
@@ -304,7 +313,7 @@ def acknowledge_commit(arguments):
         if (
             value["hash"] != record.commit
             or value["target"] != str(Path(record.target))
-            or value["vault"] != str(Path(record.vault).resolve())
+            or value["vault"] != str(canonical_path(record.vault))
         ):
             continue
         note = Path(value["vault"]) / value["target"]
@@ -331,7 +340,7 @@ def acknowledge_commit(arguments):
 
 def public_profile(profile):
     home = Path(profile)
-    if not home.is_absolute() or home != home.resolve():
+    if not home.is_absolute() or home != canonical_path(home):
         raise OwnershipError("profile must be an absolute canonical path")
     config = read(home / "capture-profile.json")
     if (
@@ -560,7 +569,7 @@ def resolve_legacy(args):
     if (
         not path.is_file()
         or path.is_symlink()
-        or root().resolve() not in path.resolve().parents
+        or canonical_path(root()) not in canonical_path(path).parents
     ):
         raise OwnershipError("unsafe evidence path")
     with admission(exclusive=True):
@@ -950,7 +959,7 @@ def transition(args):
                 raise OwnershipError(
                     "MCP handoff requires project and attached public profile"
                 )
-            project = str(Path(args.project).resolve(strict=True))
+            project = str(canonical_path(args.project, strict=True))
             config = read(Path(args.profile) / "capture-profile.json")
             if config.get("project") != project:
                 raise OwnershipError("profile project does not match handoff project")
@@ -983,13 +992,13 @@ def resume():
 def capture_profile(current, cwd, deadline):
     if not isinstance(cwd, str) or not cwd or not Path(cwd).is_absolute():
         raise OwnershipError("hook project identity unavailable")
-    directory = Path(cwd).resolve(strict=True)
+    directory = canonical_path(cwd, strict=True)
     if not directory.is_dir():
         raise OwnershipError("hook project identity unavailable")
     registrations = {}
     for registered, profile in current["profiles"].items():
         project = Path(registered)
-        canonical = project.resolve()
+        canonical = canonical_path(project)
         if (
             not project.is_absolute()
             or str(canonical) != registered
@@ -1020,7 +1029,7 @@ def capture_profile(current, cwd, deadline):
             timeout=operation_timeout(deadline, 5),
         )
         if found.returncode or str(
-            Path(found.stdout.strip()).resolve(strict=True)
+            canonical_path(found.stdout.strip(), strict=True)
         ) != str(project):
             raise OwnershipError("hook project is not the registered Git checkout")
     return profile

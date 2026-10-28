@@ -1583,6 +1583,39 @@ class OwnershipTests(unittest.TestCase):
                 [call.kwargs["timeout"] for call in runner.call_args_list], [5, 2]
             )
 
+    def test_symlink_loops_do_not_bypass_explicit_hook_results(self):
+        project = self.case / "plain"
+        project.mkdir()
+        profile = self.attached_profile(project, "plain")
+        first, second = self.case / "loop-a", self.case / "loop-b"
+        first.symlink_to(second)
+        second.symlink_to(first)
+        for mapping, cwd, must_refuse in (
+            ({project: profile, first: profile}, project, False),
+            ({project: profile}, first, True),
+            ({project: first}, project, True),
+        ):
+            self.register_profiles(mapping)
+            for owner in OWNERS:
+                result = self.run_owner(
+                    "route",
+                    "--event",
+                    "UserPromptSubmit",
+                    payload=json.dumps(dict(cwd=str(cwd))),
+                    owner=owner,
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                output = json.loads(result.stdout)
+                if must_refuse:
+                    self.assertEqual(output.get("decision"), "block")
+                else:
+                    self.assertTrue(
+                        output.get("decision") == "block"
+                        or output.get("hookSpecificOutput", {}).get("additionalContext")
+                        == "plain"
+                    )
+                self.assertNotIn("Traceback", result.stderr)
+
     def test_noncanonical_duplicate_project_registration_is_refused(self):
         project = self.case / "plain"
         project.mkdir()
