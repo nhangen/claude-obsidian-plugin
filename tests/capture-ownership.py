@@ -443,6 +443,29 @@ class OwnershipTests(unittest.TestCase):
                 ):
                     self.assertTrue(inspect()["ready"])
 
+    def check_resolution_byte_budget(self, relative):
+        for index in range(17):
+            path = self.evidence(relative.format(index=index), {})
+            key = hashlib.sha256(str(path.relative_to(self.base)).encode()).hexdigest()
+            resolution = self.evidence(
+                "capture-ownership/resolutions/" + key + ".json",
+                dict(sha256=hashlib.sha256(path.read_bytes()).hexdigest()),
+            )
+            data = resolution.read_bytes()
+            resolution.write_bytes(data + b" " * (1048576 - len(data)))
+        for owner in OWNERS:
+            result = self.run_owner("inspect-legacy", owner=owner)
+            self.assertEqual(result.returncode, 2, result.stderr)
+            self.assertIn("16 MiB", result.stderr)
+
+    def test_commit_dispositions_count_toward_inspection_budget(self):
+        self.check_resolution_byte_budget("pre-commit-head/{index}")
+
+    def test_session_dispositions_count_toward_inspection_budget(self):
+        self.check_resolution_byte_budget(
+            "session-capture/session/boundaries/{index}.json"
+        )
+
     def test_history_requires_explicit_content_bound_resolution_in_both_packages(self):
         path = self.evidence(
             "session-capture/session/activity.json", self.checkpoint_history()

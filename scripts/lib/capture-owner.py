@@ -435,9 +435,9 @@ def resolution_path(path):
     return root() / "capture-ownership/resolutions" / (key + ".json")
 
 
-def resolved(path, digest=None):
+def resolved(path, digest=None, read_record=read):
     try:
-        record = read(resolution_path(path))
+        record = read_record(resolution_path(path))
     except FileNotFoundError:
         return False
     return isinstance(record, dict) and record.get("sha256") == (
@@ -641,12 +641,16 @@ def legacy_inspection():
             )
         )
 
+    def read_resolution(path):
+        data, _ = content(path, private=True)
+        return json.loads(data)
+
     def record(path):
         details = {}
         try:
             data, digest = content(path, private=True)
             details["sha256"] = digest
-            if resolved(path, digest):
+            if resolved(path, digest, read_resolution):
                 add(path, "operator_resolved", False, **details)
                 return None
             value = json.loads(data)
@@ -673,7 +677,7 @@ def legacy_inspection():
         for item in entries(path):
             try:
                 _, digest = content(item)
-                reconciled = resolved(item, digest)
+                reconciled = resolved(item, digest, read_resolution)
                 add(
                     item,
                     "operator_resolved" if reconciled else "unresolved_commit",
