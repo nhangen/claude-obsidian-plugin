@@ -89,10 +89,20 @@ folder from server setup. Do not infer either from a local vault mount or assume
 ```bash
 python3 /absolute/public-client/current/bin/obsidian-mcp-native attach \
   --host claude-plugin --home /absolute/new-capture-profile \
-  --project /absolute/git-project --folder <authorized-session-folder> \
+  --project /absolute/project --folder <authorized-session-folder> \
   --daily-folder <declared-server-daily-folder> \
   --release-sha256 <independently-verified-release-json-sha256>
 ```
+
+The default project mode is `git` and requires the exact Git checkout root. For
+session capture in a plain directory, require the pinned runtime's capabilities
+to advertise `projectModes["claude-plugin"]` containing `directory`, then add
+`--project-mode directory` and supply that directory's canonical absolute path.
+Do not initialize Git or alter the user's project to satisfy attachment. An older
+runtime without this capability must refuse directory setup without changing
+ownership. Directory profiles support sessions only, not commit capture. A nested
+repository remains session-only unless explicitly attached as a more-specific
+Git profile. Never reinterpret an existing immutable profile or its release pin.
 
 Attachment creates capture state only and preserves host/project settings. It
 does not activate hooks, change the writer, replay history or reinstall a server.
@@ -101,7 +111,7 @@ before the separately authorized handoff:
 
 ```bash
 python3 "${CLAUDE_PLUGIN_ROOT}/scripts/lib/capture-owner.py" handoff \
-  --owner mcp --project /absolute/git-project --profile /absolute/new-capture-profile \
+  --owner mcp --project /absolute/project --profile /absolute/new-capture-profile \
   --verification legacy-writers-stopped-and-history-inspected
 ```
 
@@ -109,7 +119,8 @@ Never supply that attestation unless it was actually established. Refused
 handoffs preserve evidence and leave admission closed; inspect `status`. Use
 `resume` only to cancel the incomplete transition and recover through the same
 previous owner, not to bypass pending work. Reconnect the updated plugin and
-verify actual Claude hook delivery, exact-target commit/session receipts,
+verify actual Claude hook delivery, session receipts and, for Git profiles,
+exact-target commit receipts,
 content/INDEX/daily links, replay/conflict and interrupted-write recovery before
 claiming migration. Do not disable a public profile as a substitute for draining
 it. Source fixtures and scripted hook events do not establish installed-Claude

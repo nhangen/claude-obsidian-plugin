@@ -13,12 +13,22 @@ import stat
 import subprocess
 import sys
 import tempfile
+import time
 
 HOOK_INPUT = {}
 
 
 class OwnershipError(ValueError):
     pass
+
+
+def canonical_path(path, strict=False):
+    try:
+        return Path(path).resolve(strict=strict)
+    except (OSError, RuntimeError) as error:
+        raise OwnershipError(
+            "cannot resolve canonical capture path; no fallback"
+        ) from error
 
 
 def root():
@@ -246,7 +256,7 @@ def keeper_commit(arguments):
     target = target or ("Daily/" + date + ".md" if date else "")
     if not target:
         raise OwnershipError("full-hash capture requires --target or --date")
-    vault = str(Path(vault).resolve())
+    vault = str(canonical_path(vault))
     target = str(Path(target))
     effective = ["append"]
     for name, value in options.items():
@@ -266,7 +276,7 @@ def commit_record(args):
         raise OwnershipError("vault-relative commit target required")
     value = dict(
         hash=args.commit.lower(),
-        vault=str(Path(args.vault).resolve()),
+        vault=str(canonical_path(args.vault)),
         target=str(target),
     )
     key = hashlib.sha256(json.dumps(value, sort_keys=True).encode()).hexdigest()
@@ -303,7 +313,7 @@ def acknowledge_commit(arguments):
         if (
             value["hash"] != record.commit
             or value["target"] != str(Path(record.target))
-            or value["vault"] != str(Path(record.vault).resolve())
+            or value["vault"] != str(canonical_path(record.vault))
         ):
             continue
         note = Path(value["vault"]) / value["target"]
@@ -328,18 +338,70 @@ def acknowledge_commit(arguments):
         os.replace(path, archive / path.name)
 
 
-def public_command(profile, operation):
+def public_profile(profile):
     home = Path(profile)
-    if not home.is_absolute() or home != home.resolve():
+    if not home.is_absolute() or home != canonical_path(home):
         raise OwnershipError("profile must be an absolute canonical path")
     config = read(home / "capture-profile.json")
-    if config.get("host") != "claude-plugin" or config.get("active") is not True:
+    if (
+        not isinstance(config, dict)
+        or config.get("host") != "claude-plugin"
+        or config.get("active") is not True
+    ):
         raise OwnershipError("active public claude-plugin profile required")
+    mode = config.get("projectMode", "git")
+    if not isinstance(mode, str) or mode not in ("git", "directory"):
+        raise OwnershipError("invalid public capture project mode")
+    return config
+
+
+def operation_timeout(deadline, maximum):
+    if deadline is None:
+        return maximum
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise OwnershipError(
+            "public capture exceeded its bounded hook budget; no fallback"
+        )
+    return min(remaining, maximum)
+
+
+def public_command(profile, operation, deadline=None):
+    config = public_profile(profile)
     bundle = Path(config.get("bundle", ""))
     executable = bundle / "bin/obsidian-mcp-native"
     if not bundle.is_absolute() or not executable.is_file():
         raise OwnershipError("public capture runtime unavailable; no fallback")
-    return [sys.executable, str(executable), operation, "--home", str(home)]
+    if config.get("projectMode", "git") == "directory":
+        capability = subprocess.run(
+            [
+                sys.executable,
+                str(executable),
+                "capabilities",
+                "--release-sha256",
+                config.get("releaseSha256", ""),
+            ],
+            capture_output=True,
+            timeout=operation_timeout(deadline, 5),
+            check=False,
+        )
+        if capability.returncode or len(capability.stdout) > 262144:
+            raise OwnershipError("public runtime does not advertise directory capture")
+        advertised = decode_json(capability.stdout)
+        modes = advertised.get("projectModes") if isinstance(advertised, dict) else None
+        supported = modes.get("claude-plugin") if isinstance(modes, dict) else None
+        hosts = advertised.get("hosts") if isinstance(advertised, dict) else None
+        if (
+            not isinstance(advertised, dict)
+            or type(advertised.get("apiVersion")) is not int
+            or advertised["apiVersion"] != 1
+            or not isinstance(hosts, list)
+            or "claude-plugin" not in hosts
+            or not isinstance(supported, list)
+            or "directory" not in supported
+        ):
+            raise OwnershipError("public runtime does not advertise directory capture")
+    return [sys.executable, str(executable), operation, "--home", str(profile)]
 
 
 def public_drained(profile):
@@ -355,16 +417,16 @@ def public_drained(profile):
         )
 
 
-def public_hook(profile, descriptor, value, event):
+def public_hook(profile, descriptor, value, event, deadline):
     env = dict(os.environ, OBSIDIAN_CAPTURE_LEASE_FD=str(descriptor))
     try:
         result = subprocess.run(
-            public_command(profile, "hook"),
+            public_command(profile, "hook", deadline),
             input=json.dumps(value).encode(),
             capture_output=True,
             env=env,
             pass_fds=(descriptor,),
-            timeout=8,
+            timeout=operation_timeout(deadline, 8),
             check=False,
         )
     except subprocess.SubprocessError as error:
@@ -507,7 +569,7 @@ def resolve_legacy(args):
     if (
         not path.is_file()
         or path.is_symlink()
-        or root().resolve() not in path.resolve().parents
+        or canonical_path(root()) not in canonical_path(path).parents
     ):
         raise OwnershipError("unsafe evidence path")
     with admission(exclusive=True):
@@ -897,7 +959,7 @@ def transition(args):
                 raise OwnershipError(
                     "MCP handoff requires project and attached public profile"
                 )
-            project = str(Path(args.project).resolve(strict=True))
+            project = str(canonical_path(args.project, strict=True))
             config = read(Path(args.profile) / "capture-profile.json")
             if config.get("project") != project:
                 raise OwnershipError("profile project does not match handoff project")
@@ -927,11 +989,58 @@ def resume():
         return current
 
 
+def capture_profile(current, cwd, deadline):
+    if not isinstance(cwd, str) or not cwd or not Path(cwd).is_absolute():
+        raise OwnershipError("hook project identity unavailable")
+    directory = canonical_path(cwd, strict=True)
+    if not directory.is_dir():
+        raise OwnershipError("hook project identity unavailable")
+    registrations = {}
+    for registered, profile in current["profiles"].items():
+        project = Path(registered)
+        canonical = canonical_path(project)
+        if (
+            not project.is_absolute()
+            or str(canonical) != registered
+            or canonical in registrations
+        ):
+            raise OwnershipError("invalid canonical project registration")
+        registrations[canonical] = profile
+    matches = [
+        project for project in registrations if directory.is_relative_to(project)
+    ]
+    if not matches:
+        raise OwnershipError(
+            "no MCP capture profile for this project; no legacy fallback"
+        )
+    project = max(matches, key=lambda candidate: len(candidate.parts))
+    profile = registrations[project]
+    config = public_profile(profile)
+    if config.get("project") != str(project):
+        raise OwnershipError(
+            "public capture profile does not match its project registration"
+        )
+    if config.get("projectMode", "git") == "git":
+        found = subprocess.run(
+            ["git", "-C", str(directory), "rev-parse", "--show-toplevel"],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=operation_timeout(deadline, 5),
+        )
+        if found.returncode or str(
+            canonical_path(found.stdout.strip(), strict=True)
+        ) != str(project):
+            raise OwnershipError("hook project is not the registered Git checkout")
+    return profile
+
+
 def route(event, fallback, arguments):
     global HOOK_INPUT
     payload = sys.stdin.buffer.read(262145)
     if len(payload) > 262144:
         raise OwnershipError("hook payload exceeds bounded input")
+    deadline = time.monotonic() + 8
     try:
         HOOK_INPUT = decode_json(payload)
     except ValueError as error:
@@ -975,25 +1084,9 @@ def route(event, fallback, arguments):
             print("{}")
             return 0
         value = decode_json(payload)
-        cwd = value.get("cwd")
-        if not isinstance(cwd, str) or not cwd or not Path(cwd).is_absolute():
-            raise OwnershipError("hook project identity unavailable")
-        found = subprocess.run(
-            ["git", "-C", cwd, "rev-parse", "--show-toplevel"],
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-        if found.returncode:
-            raise OwnershipError("hook project is not a Git checkout")
-        project = str(Path(found.stdout.strip()).resolve(strict=True))
-        profile = current["profiles"].get(project)
-        if not profile:
-            raise OwnershipError(
-                "no MCP capture profile for this project; no legacy fallback"
-            )
+        profile = capture_profile(current, value.get("cwd"), deadline)
         value["hook_event_name"] = event
-        return public_hook(profile, descriptor, value, event)
+        return public_hook(profile, descriptor, value, event, deadline)
 
 
 def main():
