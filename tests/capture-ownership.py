@@ -3,12 +3,14 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import runpy
 import stat
 import subprocess
 import sys
 import tempfile
 import time
 import unittest
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -415,11 +417,31 @@ class OwnershipTests(unittest.TestCase):
         self.assertEqual(report["ownership"]["phase"], "stable")
         self.assertEqual(self.state_snapshot(), before)
         with lock.open() as stream:
-            fcntl.flock(stream, fcntl.LOCK_SH | fcntl.LOCK_NB)
+            fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
             result = self.run_owner("inspect-legacy")
             self.assertEqual(result.returncode, 1, result.stderr)
             self.assertEqual(json.loads(result.stdout)["counts"]["active_writer"], 1)
         self.assertEqual(self.state_snapshot(), before)
+
+    def test_capture_can_enter_while_inspection_is_scanning(self):
+        self.run_owner("status")
+        for owner in OWNERS:
+            with self.subTest(owner=owner), mock.patch.dict(os.environ, self.env):
+                module = runpy.run_path(str(owner))
+                inspect = module["inspect_legacy"]
+                scan = module["legacy_inspection"]
+
+                def scan_with_capture():
+                    capture = self.run_owner(
+                        "legacy", "--", sys.executable, "-c", "pass", owner=owner
+                    )
+                    self.assertEqual(capture.returncode, 0, capture.stderr)
+                    return scan()
+
+                with mock.patch.dict(
+                    inspect.__globals__, legacy_inspection=scan_with_capture
+                ):
+                    self.assertTrue(inspect()["ready"])
 
     def test_history_requires_explicit_content_bound_resolution_in_both_packages(self):
         path = self.evidence(

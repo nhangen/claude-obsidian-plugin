@@ -783,7 +783,7 @@ def inspect_legacy():
             ):
                 raise OwnershipError("unsafe admission lock")
             try:
-                fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                fcntl.flock(descriptor, fcntl.LOCK_SH | fcntl.LOCK_NB)
             except BlockingIOError:
                 busy = True
         current = ownership(read_only=True)
