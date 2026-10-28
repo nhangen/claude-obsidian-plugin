@@ -48,6 +48,19 @@ def directory(path):
     return path
 
 
+def unique_fields(pairs):
+    value = {}
+    for key, item in pairs:
+        if key in value:
+            raise ValueError("duplicate JSON field")
+        value[key] = item
+    return value
+
+
+def decode_json(data):
+    return json.loads(data, object_pairs_hook=unique_fields)
+
+
 def read(path):
     descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     with os.fdopen(descriptor) as stream:
@@ -60,7 +73,7 @@ def read(path):
             or info.st_size > 1048576
         ):
             raise OwnershipError("unsafe capture state file")
-        return json.load(stream)
+        return json.load(stream, object_pairs_hook=unique_fields)
 
 
 def write(path, value):
@@ -336,7 +349,7 @@ def public_drained(profile):
         check=False,
         timeout=30,
     )
-    if result.returncode or json.loads(result.stdout).get("quiescent") is not True:
+    if result.returncode or decode_json(result.stdout).get("quiescent") is not True:
         raise OwnershipError(
             "public capture has pending or unverified work; admission remains closed"
         )
@@ -363,7 +376,7 @@ def public_hook(profile, descriptor, value, event):
             "public capture runtime failed; inspect its pinned release/profile and pending state, no fallback"
         )
     try:
-        output = json.loads(result.stdout)
+        output = decode_json(result.stdout)
     except ValueError as error:
         raise OwnershipError(
             "public capture runtime returned an invalid hook response; no fallback"
@@ -643,7 +656,7 @@ def legacy_inspection():
 
     def read_resolution(path):
         data, _ = content(path, private=True)
-        return json.loads(data)
+        return decode_json(data)
 
     def record(path):
         details = {}
@@ -653,7 +666,7 @@ def legacy_inspection():
             if resolved(path, digest, read_resolution):
                 add(path, "operator_resolved", False, **details)
                 return None
-            value = json.loads(data)
+            value = decode_json(data)
             if value is None:
                 add(path, "invalid_evidence", **details)
                 return None
@@ -920,7 +933,7 @@ def route(event, fallback, arguments):
     if len(payload) > 262144:
         raise OwnershipError("hook payload exceeds bounded input")
     try:
-        HOOK_INPUT = json.loads(payload)
+        HOOK_INPUT = decode_json(payload)
     except ValueError:
         HOOK_INPUT = {}
     if not isinstance(HOOK_INPUT, dict):
@@ -959,7 +972,7 @@ def route(event, fallback, arguments):
                 return execute(["bash", fallback, *arguments], descriptor, payload)
             print("{}")
             return 0
-        value = json.loads(payload)
+        value = decode_json(payload)
         cwd = value.get("cwd")
         if not isinstance(cwd, str) or not cwd or not Path(cwd).is_absolute():
             raise OwnershipError("hook project identity unavailable")

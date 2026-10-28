@@ -466,6 +466,43 @@ class OwnershipTests(unittest.TestCase):
             "session-capture/session/boundaries/{index}.json"
         )
 
+    def test_duplicate_json_fields_cannot_hide_pending_or_failed_evidence(self):
+        cases = (
+            ("activity.json", '{"pending":["' + "f" * 64 + '"],"pending":[]}'),
+            (
+                "boundaries/event.json",
+                '{"status":"process_failed","status":"process_succeeded",'
+                '"retry_required":false,"exit_code":0,"ack":"acknowledged"}',
+            ),
+            (
+                "boundaries/event.json",
+                '{"status":"process_succeeded","retry_required":true,'
+                '"retry_required":false,"exit_code":0,"ack":"acknowledged"}',
+            ),
+        )
+        for relative, payload in cases:
+            path = self.evidence("session-capture/session/" + relative, {})
+            path.write_text(payload)
+            original = path.read_bytes()
+            for owner in OWNERS:
+                with self.subTest(relative=relative, owner=owner, payload=payload):
+                    result = self.run_owner("inspect-legacy", owner=owner)
+                    self.assertEqual(result.returncode, 1, result.stderr)
+                    self.assertEqual(
+                        json.loads(result.stdout)["counts"]["invalid_evidence"], 1
+                    )
+                    denied = self.run_owner(
+                        "handoff",
+                        "--owner",
+                        "disabled",
+                        "--verification",
+                        "legacy-writers-stopped-and-history-inspected",
+                        owner=owner,
+                    )
+                    self.assertNotEqual(denied.returncode, 0)
+                    self.assertEqual(path.read_bytes(), original)
+            path.unlink()
+
     def test_history_requires_explicit_content_bound_resolution_in_both_packages(self):
         path = self.evidence(
             "session-capture/session/activity.json", self.checkpoint_history()
