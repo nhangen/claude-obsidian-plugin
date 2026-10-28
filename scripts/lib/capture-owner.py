@@ -381,10 +381,13 @@ def public_command(profile, operation, deadline=None):
         advertised = decode_json(capability.stdout)
         modes = advertised.get("projectModes") if isinstance(advertised, dict) else None
         supported = modes.get("claude-plugin") if isinstance(modes, dict) else None
+        hosts = advertised.get("hosts") if isinstance(advertised, dict) else None
         if (
             not isinstance(advertised, dict)
             or type(advertised.get("apiVersion")) is not int
             or advertised["apiVersion"] != 1
+            or not isinstance(hosts, list)
+            or "claude-plugin" not in hosts
             or not isinstance(supported, list)
             or "directory" not in supported
         ):

@@ -1309,10 +1309,14 @@ class OwnershipTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertNotIn("SENSITIVE VALUE", result.stderr)
 
-    def attached_profile(self, project, name, mode="directory", supported=True):
+    def attached_profile(
+        self, project, name, mode="directory", supported=True, hosts=("claude-plugin",)
+    ):
         bundle = self.case / ("bundle-" + name)
         (bundle / "bin").mkdir(parents=True)
-        capabilities = dict(apiVersion=1, hosts=["claude-plugin"])
+        capabilities = dict(
+            apiVersion=1, hosts=list(hosts) if hosts is not None else None
+        )
         if supported:
             capabilities["projectModes"] = {"claude-plugin": ["git", "directory"]}
         (bundle / "bin/obsidian-mcp-native").write_text(
@@ -1481,6 +1485,38 @@ class OwnershipTests(unittest.TestCase):
             self.assertIn("does not advertise directory", result.stderr)
         self.assertFalse((self.case / "hook-old").exists())
 
+    def test_directory_capability_requires_declared_host_before_route_and_handoff(self):
+        project = self.case / "plain"
+        project.mkdir()
+        for index, hosts in enumerate((None, ["codex"])):
+            name = "host-" + str(index)
+            profile = self.attached_profile(project, name, hosts=hosts)
+            for owner in OWNERS:
+                self.register_profiles({project: profile})
+                result = self.run_owner(
+                    "route",
+                    "--event",
+                    "UserPromptSubmit",
+                    payload=json.dumps(dict(cwd=str(project))),
+                    owner=owner,
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(json.loads(result.stdout).get("decision"), "block")
+                refused = self.run_owner(
+                    "handoff",
+                    "--owner",
+                    "mcp",
+                    "--project",
+                    str(project),
+                    "--profile",
+                    str(profile),
+                    "--verification",
+                    "legacy-writers-stopped-and-history-inspected",
+                    owner=owner,
+                )
+                self.assertNotEqual(refused.returncode, 0)
+            self.assertFalse((self.case / ("hook-" + name)).exists())
+
     def test_nonobject_profile_or_capability_is_an_explicit_refusal(self):
         project = self.case / "plain"
         project.mkdir()
@@ -1527,7 +1563,9 @@ class OwnershipTests(unittest.TestCase):
                     0,
                     json.dumps(
                         dict(
-                            apiVersion=1, projectModes={"claude-plugin": ["directory"]}
+                            apiVersion=1,
+                            hosts=["claude-plugin"],
+                            projectModes={"claude-plugin": ["directory"]},
                         )
                     ).encode(),
                 ),
