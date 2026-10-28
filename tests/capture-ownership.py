@@ -1309,6 +1309,297 @@ class OwnershipTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertNotIn("SENSITIVE VALUE", result.stderr)
 
+    def attached_profile(self, project, name, mode="directory", supported=True):
+        bundle = self.case / ("bundle-" + name)
+        (bundle / "bin").mkdir(parents=True)
+        capabilities = dict(apiVersion=1, hosts=["claude-plugin"])
+        if supported:
+            capabilities["projectModes"] = {"claude-plugin": ["git", "directory"]}
+        (bundle / "bin/obsidian-mcp-native").write_text(
+            "import json,sys,pathlib\n"
+            "if sys.argv[1] == 'capabilities':\n"
+            " print(" + repr(json.dumps(capabilities)) + ")\n"
+            "elif sys.argv[1] == 'drain-status':\n"
+            " print('{\"quiescent\":true}')\n"
+            "else:\n"
+            " event=json.load(sys.stdin)\n"
+            " pathlib.Path(" + repr(str(self.case / ("hook-" + name))) + ").touch()\n"
+            " print(json.dumps({'hookSpecificOutput':{'hookEventName':event['hook_event_name'],"
+            "'additionalContext':" + repr(name) + "}}))\n"
+        )
+        profile = self.case / ("profile-" + name)
+        profile.mkdir(mode=0o700)
+        config = profile / "capture-profile.json"
+        config.write_text(
+            json.dumps(
+                dict(
+                    host="claude-plugin",
+                    project=str(project),
+                    projectMode=mode,
+                    active=True,
+                    bundle=str(bundle),
+                    releaseSha256="a" * 64,
+                )
+            )
+        )
+        config.chmod(0o600)
+        return profile
+
+    def register_profiles(self, mapping):
+        self.run_owner("status")
+        self.evidence(
+            "capture-ownership/owner.json",
+            dict(
+                schema=1,
+                owner="mcp",
+                phase="stable",
+                generation=1,
+                profiles={str(root): str(profile) for root, profile in mapping.items()},
+            ),
+        )
+
+    def spy_on_git(self):
+        tools = self.case / "no-git"
+        tools.mkdir()
+        spy = tools / "git"
+        spy.write_text(
+            "#!/bin/sh\n: > " + str(self.case / "git-probed") + "\nexit 99\n"
+        )
+        spy.chmod(0o755)
+        self.env["PATH"] = str(tools) + os.pathsep + self.env["PATH"]
+
+    def test_plain_directory_session_routes_without_git_in_both_packages(self):
+        project = self.case / "plain"
+        nested = project / "nested"
+        nested.mkdir(parents=True)
+        profile = self.attached_profile(project, "plain")
+        self.register_profiles({project: profile})
+        self.spy_on_git()
+        for owner in OWNERS:
+            for cwd in (project, nested):
+                for event in ("SessionStart", "UserPromptSubmit", "Stop"):
+                    with self.subTest(owner=owner, cwd=cwd, event=event):
+                        result = self.run_owner(
+                            "route",
+                            "--event",
+                            event,
+                            payload=json.dumps(dict(cwd=str(cwd))),
+                            owner=owner,
+                        )
+                        self.assertEqual(result.returncode, 0, result.stderr)
+                        output = json.loads(result.stdout)
+                        self.assertEqual(
+                            output.get("hookSpecificOutput", {}).get(
+                                "additionalContext"
+                            ),
+                            "plain",
+                        )
+                        self.assertNotIn("decision", output)
+        self.assertFalse((self.case / "git-probed").exists())
+
+    def test_directory_mapping_refuses_sibling_prefix_and_symlink_escape(self):
+        project, outside = self.case / "plain", self.case / "plain-sibling"
+        project.mkdir()
+        outside.mkdir()
+        escape = project / "escape"
+        escape.symlink_to(outside, target_is_directory=True)
+        self.register_profiles({project: self.attached_profile(project, "plain")})
+        for owner in OWNERS:
+            for cwd in (outside, escape):
+                result = self.run_owner(
+                    "route",
+                    "--event",
+                    "Stop",
+                    payload=json.dumps(dict(cwd=str(cwd))),
+                    owner=owner,
+                )
+                self.assertEqual(json.loads(result.stdout).get("decision"), "block")
+        self.assertFalse((self.case / "hook-plain").exists())
+
+    def test_most_specific_directory_profile_is_independent_of_registration_order(self):
+        outer = self.case / "plain"
+        inner = outer / "nested"
+        inner.mkdir(parents=True)
+        outer_profile = self.attached_profile(outer, "outer")
+        inner_profile = self.attached_profile(inner, "inner")
+        for mapping in (
+            {outer: outer_profile, inner: inner_profile},
+            {inner: inner_profile, outer: outer_profile},
+        ):
+            self.register_profiles(mapping)
+            for owner in OWNERS:
+                result = self.run_owner(
+                    "route",
+                    "--event",
+                    "UserPromptSubmit",
+                    payload=json.dumps(dict(cwd=str(inner))),
+                    owner=owner,
+                )
+                self.assertEqual(
+                    json.loads(result.stdout)
+                    .get("hookSpecificOutput", {})
+                    .get("additionalContext"),
+                    "inner",
+                )
+
+    def test_directory_mode_is_validated_before_dispatch(self):
+        project = self.case / "plain"
+        project.mkdir()
+        profile = self.attached_profile(project, "plain")
+        self.register_profiles({project: profile})
+        config = profile / "capture-profile.json"
+        value = json.loads(config.read_text())
+        for mode in ("", None, "direcotry"):
+            value["projectMode"] = mode
+            config.write_text(json.dumps(value))
+            for owner in OWNERS:
+                result = self.run_owner(
+                    "route",
+                    "--event",
+                    "UserPromptSubmit",
+                    payload=json.dumps(dict(cwd=str(project))),
+                    owner=owner,
+                )
+                self.assertEqual(json.loads(result.stdout).get("decision"), "block")
+                self.assertIn("project mode", result.stderr)
+        self.assertFalse((self.case / "hook-plain").exists())
+
+    def test_directory_profile_requires_advertised_pinned_runtime_capability(self):
+        project = self.case / "plain"
+        project.mkdir()
+        profile = self.attached_profile(project, "old", supported=False)
+        self.register_profiles({project: profile})
+        for owner in OWNERS:
+            result = self.run_owner(
+                "route",
+                "--event",
+                "UserPromptSubmit",
+                payload=json.dumps(dict(cwd=str(project))),
+                owner=owner,
+            )
+            self.assertEqual(json.loads(result.stdout).get("decision"), "block")
+            self.assertIn("does not advertise directory", result.stderr)
+        self.assertFalse((self.case / "hook-old").exists())
+
+    def test_nonobject_profile_or_capability_is_an_explicit_refusal(self):
+        project = self.case / "plain"
+        project.mkdir()
+        profile = self.attached_profile(project, "plain")
+        self.register_profiles({project: profile})
+        config = profile / "capture-profile.json"
+        original = config.read_bytes()
+        runtime = self.case / "bundle-plain/bin/obsidian-mcp-native"
+        for damaged in ("profile", "capability"):
+            if damaged == "profile":
+                config.write_text("[]")
+            else:
+                config.write_bytes(original)
+                runtime.write_text("print('[]')\n")
+            for owner in OWNERS:
+                result = self.run_owner(
+                    "route",
+                    "--event",
+                    "UserPromptSubmit",
+                    payload=json.dumps(dict(cwd=str(project))),
+                    owner=owner,
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(json.loads(result.stdout).get("decision"), "block")
+                self.assertNotIn("Traceback", result.stderr)
+
+    def test_capability_and_hook_share_one_execution_deadline(self):
+        project = self.case / "plain"
+        project.mkdir()
+        profile = self.attached_profile(project, "plain")
+        output = json.dumps(
+            dict(
+                hookSpecificOutput=dict(
+                    hookEventName="UserPromptSubmit", additionalContext="context"
+                )
+            )
+        ).encode()
+        for owner in OWNERS:
+            module = runpy.run_path(str(owner))
+            function = module["public_hook"]
+            responses = [
+                subprocess.CompletedProcess(
+                    [],
+                    0,
+                    json.dumps(
+                        dict(
+                            apiVersion=1, projectModes={"claude-plugin": ["directory"]}
+                        )
+                    ).encode(),
+                ),
+                subprocess.CompletedProcess([], 0, output),
+            ]
+            with mock.patch.object(
+                module["subprocess"], "run", side_effect=responses
+            ) as runner, mock.patch.object(
+                module["time"], "monotonic", side_effect=[0, 3]
+            ), mock.patch.dict(
+                os.environ, self.env
+            ):
+                self.assertEqual(function(profile, 1, {}, "UserPromptSubmit", 5), 0)
+            self.assertEqual(
+                [call.kwargs["timeout"] for call in runner.call_args_list], [5, 2]
+            )
+
+    def test_noncanonical_duplicate_project_registration_is_refused(self):
+        project = self.case / "plain"
+        project.mkdir()
+        profile = self.attached_profile(project, "plain")
+        self.register_profiles({project: profile, str(project) + "/.": profile})
+        for owner in OWNERS:
+            result = self.run_owner(
+                "route",
+                "--event",
+                "UserPromptSubmit",
+                payload=json.dumps(dict(cwd=str(project))),
+                owner=owner,
+            )
+            self.assertEqual(json.loads(result.stdout).get("decision"), "block")
+            self.assertIn("canonical project registration", result.stderr)
+
+    def test_nested_git_remains_directory_session_only_until_explicitly_mapped(self):
+        project = self.case / "plain"
+        inner = project / "repository"
+        inner.mkdir(parents=True)
+        subprocess.run(["git", "init", "-q", str(inner)], check=True)
+        outer_profile = self.attached_profile(project, "outer")
+        self.register_profiles({project: outer_profile})
+        self.spy_on_git()
+        result = self.run_owner(
+            "route",
+            "--event",
+            "UserPromptSubmit",
+            payload=json.dumps(dict(cwd=str(inner))),
+        )
+        self.assertEqual(
+            json.loads(result.stdout)
+            .get("hookSpecificOutput", {})
+            .get("additionalContext"),
+            "outer",
+        )
+        self.assertFalse((self.case / "git-probed").exists())
+        self.env["PATH"] = self.env["PATH"].split(os.pathsep, 1)[1]
+        inner_profile = self.attached_profile(inner, "git", mode="git")
+        self.register_profiles({project: outer_profile, inner: inner_profile})
+        for owner in OWNERS:
+            result = self.run_owner(
+                "route",
+                "--event",
+                "UserPromptSubmit",
+                payload=json.dumps(dict(cwd=str(inner))),
+                owner=owner,
+            )
+            self.assertEqual(
+                json.loads(result.stdout)
+                .get("hookSpecificOutput", {})
+                .get("additionalContext"),
+                "git",
+            )
+
     def mock_runtime(self, program):
         subprocess.run(["git", "init", "-q", str(self.case)], check=True)
         bundle = self.case / "mock-bundle"

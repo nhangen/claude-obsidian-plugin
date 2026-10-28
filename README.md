@@ -57,6 +57,18 @@ new pending activity, failed receipts, missing/invalid acknowledgements, and
 unobserved launches remain blocking. An empty `pending` list does not authorize
 an unknown schema.
 
+Explicit directory attachments support session-only capture outside Git when the
+pinned public runtime advertises `projectModes["claude-plugin"]` containing
+`directory`. Attach with `--project-mode directory` and an exact canonical project
+directory. Session routing selects the most-specific registered root by path
+components before any Git operation; sibling-prefix paths, symlink escapes and
+noncanonical registrations are refused. Nested repositories remain session-only
+under a directory profile unless separately attached as a more-specific Git
+profile. Directory mode never manufactures commit metadata or enables commit
+capture. Existing profiles without `projectMode` retain Git behavior; malformed
+or unsupported modes fail closed. Capability negotiation and hook execution
+share the existing bounded hook budget.
+
 An intentional handoff requires stopping older plugin clients and all competing
 writers, inspecting their history, attaching a verified public profile for each
 project, then invoking `handoff --owner mcp --project /absolute/project

@@ -1,6 +1,6 @@
 {
   "name": "obsidian",
-  "version": "1.25.1",
+  "version": "1.25.2",
   "description": "Safe Obsidian commit-context capture for Codex.",
   "author": {
     "name": "nhangen"
