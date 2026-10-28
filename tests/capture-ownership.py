@@ -1,16 +1,24 @@
 import fcntl
+import hashlib
 import json
 import os
 from pathlib import Path
+import runpy
+import stat
 import subprocess
 import sys
 import tempfile
 import time
 import unittest
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
 OWNER = ROOT / "scripts/lib/capture-owner.py"
+OWNERS = (
+    OWNER,
+    ROOT / "packages/codex/skills/commit-capture/scripts/lib/capture-owner.py",
+)
 
 
 class OwnershipTests(unittest.TestCase):
@@ -36,9 +44,9 @@ class OwnershipTests(unittest.TestCase):
         self.vault = self.case / "vault"
         self.vault.mkdir()
 
-    def run_owner(self, *args, payload=None):
+    def run_owner(self, *args, payload=None, owner=OWNER):
         return subprocess.run(
-            [sys.executable, str(OWNER), *args],
+            [sys.executable, str(owner), *args],
             input=payload,
             text=True,
             env=self.env,
@@ -62,6 +70,500 @@ class OwnershipTests(unittest.TestCase):
         path.write_text(json.dumps(value))
         path.chmod(0o600)
         return path
+
+    def checkpoint_history(self):
+        return dict(
+            version=1, seen=["a" * 64], git="b" * 64, head="c" * 40, last_attempt=100.5
+        )
+
+    def terminal_receipt(self):
+        return dict(
+            schema_version=1,
+            source_session_hash="d" * 64,
+            boundary="e" * 64,
+            time=100.0,
+            finished_at=101.0,
+            status="process_succeeded",
+            exit_code=0,
+            retry_required=False,
+            ack="acknowledged",
+            attempt=1,
+            stage="summarizer_process",
+        )
+
+    def state_snapshot(self):
+        return {
+            str(path.relative_to(self.case)): (
+                stat.S_IMODE(path.lstat().st_mode),
+                path.read_bytes() if path.is_file() else None,
+            )
+            for path in self.case.rglob("*")
+        }
+
+    def test_inspection_of_missing_root_is_read_only_in_both_packages(self):
+        before = self.state_snapshot()
+        for owner in OWNERS:
+            with self.subTest(owner=owner):
+                result = self.run_owner("inspect-legacy", owner=owner)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                value = json.loads(result.stdout)
+                self.assertEqual(value["status"], "legacy_evidence_clear")
+                self.assertEqual(value["scope"], "legacy_evidence_only")
+                self.assertTrue(value["ready"])
+                self.assertEqual(value["ownership"]["generation"], 0)
+                self.assertEqual(self.state_snapshot(), before)
+
+    def test_old_checkpoint_is_history_with_indeterminate_delivery_not_new_pending(
+        self,
+    ):
+        self.evidence(
+            "session-capture/" + "d" * 64 + "/activity.json", self.checkpoint_history()
+        )
+        self.evidence(
+            "session-capture/" + "d" * 64 + "/boundaries/" + "e" * 64 + ".json",
+            self.terminal_receipt(),
+        )
+        before = self.state_snapshot()
+        for owner in OWNERS:
+            with self.subTest(owner=owner):
+                result = self.run_owner("inspect-legacy", owner=owner)
+                self.assertEqual(result.returncode, 1, result.stderr)
+                value = json.loads(result.stdout)
+                self.assertFalse(value["ready"])
+                self.assertEqual(value["counts"].get("pending_activity", 0), 0)
+                self.assertEqual(value["counts"]["legacy_checkpoint_history"], 1)
+                history = next(
+                    row
+                    for row in value["evidence"]
+                    if row["status"] == "legacy_checkpoint_history"
+                )
+                self.assertEqual(history["delivery"], "indeterminate")
+                path = self.base / history["path"]
+                self.assertEqual(
+                    history["sha256"], hashlib.sha256(path.read_bytes()).hexdigest()
+                )
+                self.assertTrue(history["terminal_boundary_observed"])
+                self.assertTrue(history["blocking"])
+                self.assertEqual(self.state_snapshot(), before)
+        result = self.handoff()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("legacy activity", result.stderr)
+
+    def test_old_checkpoint_schema_is_exact_and_hashes_and_time_are_validated(self):
+        valid = self.checkpoint_history()
+        invalid = [
+            dict(valid, version=True),
+            dict(valid, version=2),
+            dict(valid, last_attempt=True),
+            dict(valid, last_attempt=float("inf")),
+            dict(valid, last_attempt=float("nan")),
+            dict(valid, last_attempt=-1),
+            dict(valid, last_attempt=10**1000),
+            dict(valid, seen="a" * 64),
+            dict(valid, seen=["not-a-fingerprint"]),
+            dict(valid, git="bad"),
+            dict(valid, head="c" * 41),
+            dict(valid, current=["a" * 64]),
+            dict(valid, unexpected=True),
+            {key: value for key, value in valid.items() if key != "head"},
+            [valid],
+        ]
+        for owner in OWNERS:
+            for value in invalid:
+                with self.subTest(owner=owner, value=value):
+                    self.evidence("session-capture/session/activity.json", value)
+                    result = self.run_owner("inspect-legacy", owner=owner)
+                    self.assertEqual(result.returncode, 1, result.stderr)
+                    self.assertEqual(
+                        json.loads(result.stdout)["counts"]["invalid_activity"], 1
+                    )
+            self.evidence(
+                "session-capture/session/activity.json",
+                dict(valid, git=None, head=None),
+            )
+            result = self.run_owner("inspect-legacy", owner=owner)
+            value = json.loads(result.stdout)
+            self.assertEqual(value["counts"]["legacy_checkpoint_history"], 1)
+            self.assertFalse(value["evidence"][0]["terminal_boundary_observed"])
+
+    def test_pending_precedes_history_and_empty_pending_does_not_bless_unknown_schema(
+        self,
+    ):
+        for owner in OWNERS:
+            for value, expected in (
+                (
+                    dict(self.checkpoint_history(), pending=["f" * 64]),
+                    "pending_activity",
+                ),
+                (
+                    dict(self.checkpoint_history(), version=2, pending=[]),
+                    "invalid_activity",
+                ),
+                (dict(self.checkpoint_history(), pending=""), "invalid_activity"),
+                (dict(pending=[], unexpected=True), "invalid_activity"),
+                (dict(seen=[], pending=[]), "invalid_activity"),
+                (dict(pending=[]), "activity_clear"),
+                (dict(pending=[], last_attempt=100.5), "activity_clear"),
+                (dict(self.checkpoint_history(), pending=[]), "activity_clear"),
+            ):
+                with self.subTest(owner=owner, value=value):
+                    self.evidence("session-capture/session/activity.json", value)
+                    result = self.run_owner("inspect-legacy", owner=owner)
+                    self.assertEqual(
+                        result.returncode,
+                        int(expected != "activity_clear"),
+                        result.stderr,
+                    )
+                    self.assertEqual(json.loads(result.stdout)["counts"][expected], 1)
+                    handoff = self.run_owner(
+                        "handoff",
+                        "--owner",
+                        "disabled",
+                        "--verification",
+                        "legacy-writers-stopped-and-history-inspected",
+                        owner=owner,
+                    )
+                    self.assertEqual(
+                        handoff.returncode == 0,
+                        expected == "activity_clear",
+                        handoff.stderr,
+                    )
+
+    def test_malformed_evidence_is_reported_and_cannot_disappear_as_null(self):
+        for relative in (
+            "session-capture/session/activity.json",
+            "session-capture/session/boundaries/event.json",
+            "session-capture/session/launches/launch.json",
+        ):
+            self.evidence(relative, None)
+        result = self.run_owner("inspect-legacy")
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertEqual(json.loads(result.stdout)["counts"], dict(invalid_evidence=3))
+        self.assertNotEqual(self.handoff().returncode, 0)
+
+    def test_inspection_refuses_directory_symlinks_without_following_or_chmod(self):
+        outside = self.case / "outside"
+        outside.mkdir(mode=0o755)
+        for relative in (
+            "",
+            "session-capture",
+            "session-capture/session",
+            "session-capture/session/boundaries",
+            "capture-ownership/resolutions",
+        ):
+            with self.subTest(relative=relative):
+                path = self.base / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.symlink_to(outside, target_is_directory=True)
+                before = self.state_snapshot()
+                for owner in OWNERS:
+                    result = self.run_owner("inspect-legacy", owner=owner)
+                    self.assertEqual(result.returncode, 2, result.stderr)
+                    self.assertEqual(self.state_snapshot(), before)
+                path.unlink()
+
+    def test_inspection_limits_sessions_and_total_bytes_before_reporting_clear(self):
+        sessions = self.base / "session-capture"
+        sessions.mkdir(parents=True)
+        for index in range(257):
+            (sessions / str(index)).mkdir()
+        result = self.run_owner("inspect-legacy")
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertIn("256 sessions", result.stderr)
+        for session in sessions.iterdir():
+            session.rmdir()
+        boundaries = sessions / "one/boundaries"
+        boundaries.mkdir(parents=True)
+        for index in range(17):
+            path = boundaries / (str(index) + ".json")
+            path.write_text("{}" + " " * (1048576 - 2))
+            path.chmod(0o600)
+        result = self.run_owner("inspect-legacy")
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertIn("16 MiB", result.stderr)
+
+    def test_resolution_can_bind_the_digest_inspected_before_acquiring_admission(self):
+        path = self.evidence(
+            "session-capture/session/activity.json", self.checkpoint_history()
+        )
+        report = self.run_owner("inspect-legacy")
+        digest = json.loads(report.stdout)["evidence"][0]["sha256"]
+        self.evidence(
+            str(path.relative_to(self.base)),
+            dict(self.checkpoint_history(), last_attempt=200.0),
+        )
+        changed = path.read_bytes()
+        for owner in OWNERS:
+            result = self.run_owner(
+                "resolve-legacy",
+                "--evidence",
+                str(path.relative_to(self.base)),
+                "--evidence-sha256",
+                digest,
+                "--verification",
+                "authoritative-vault-and-history-inspected",
+                "--reason",
+                "Retain indeterminate history after inspection",
+                owner=owner,
+            )
+            self.assertEqual(result.returncode, 2, result.stderr)
+            self.assertIn("changed since inspection", result.stderr)
+            self.assertFalse((self.state / "resolutions").exists())
+            self.assertEqual(path.read_bytes(), changed)
+        current = self.run_owner("inspect-legacy")
+        digest = json.loads(current.stdout)["evidence"][0]["sha256"]
+        result = self.run_owner(
+            "resolve-legacy",
+            "--evidence",
+            str(path.relative_to(self.base)),
+            "--evidence-sha256",
+            digest,
+            "--verification",
+            "authoritative-vault-and-history-inspected",
+            "--reason",
+            "Retain indeterminate history after renewed inspection",
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            json.loads(result.stdout)["status"], "operator_resolved_not_mcp_receipt"
+        )
+
+    def test_terminal_receipt_corroboration_requires_same_session_boundary_and_time(
+        self,
+    ):
+        self.evidence(
+            "session-capture/" + "d" * 64 + "/activity.json", self.checkpoint_history()
+        )
+        for changes in (
+            dict(source_session_hash="f" * 64),
+            dict(boundary="f" * 64),
+            dict(time=101.0),
+            dict(finished_at=100.0),
+            dict(ack="receipt_missing"),
+        ):
+            with self.subTest(changes=changes):
+                self.evidence(
+                    "session-capture/" + "d" * 64 + "/boundaries/" + "e" * 64 + ".json",
+                    dict(self.terminal_receipt(), **changes),
+                )
+                result = self.run_owner("inspect-legacy")
+                self.assertEqual(result.returncode, 1, result.stderr)
+                history = next(
+                    row
+                    for row in json.loads(result.stdout)["evidence"]
+                    if row["status"] == "legacy_checkpoint_history"
+                )
+                self.assertFalse(history["terminal_boundary_observed"])
+
+    def test_ack_anomalies_and_unobserved_launches_remain_handoff_blockers(self):
+        for ack in (None, "receipt_missing", "receipt_invalid", "ack_write_failed"):
+            with self.subTest(ack=ack):
+                receipt = self.terminal_receipt()
+                if ack is None:
+                    del receipt["ack"]
+                else:
+                    receipt["ack"] = ack
+                self.evidence("session-capture/session/boundaries/event.json", receipt)
+                result = self.handoff()
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("unresolved legacy session", result.stderr)
+        self.evidence(
+            "session-capture/session/boundaries/event.json", self.terminal_receipt()
+        )
+        path = self.evidence(
+            "session-capture/session/launches/launch.json", dict(status="prepared")
+        )
+        before = self.state_snapshot()
+        inspected = self.run_owner("inspect-legacy")
+        self.assertEqual(json.loads(inspected.stdout)["counts"]["unobserved_launch"], 1)
+        self.assertEqual(self.state_snapshot(), before)
+        self.assertNotEqual(self.handoff().returncode, 0)
+        self.assertEqual(json.loads(path.read_text())["status"], "prepared")
+
+    def test_inspection_reports_all_blockers_without_closing_admission(self):
+        for name in (
+            "pre-commit-head/one",
+            "pre-commit-head/two",
+            "pre-commit-processing/three",
+        ):
+            self.evidence(name, dict(head_before="c" * 40))
+        self.evidence(
+            "session-capture/session/boundaries/failed.json",
+            dict(status="process_failed", retry_required=True),
+        )
+        self.evidence(
+            "session-capture/session/launches/unobserved.json", dict(status="started")
+        )
+        self.evidence(
+            "session-capture/session/activity.json", self.checkpoint_history()
+        )
+        self.run_owner("status")
+        lock = self.state / "admission.lock"
+        lock.chmod(0o600)
+        before = self.state_snapshot()
+        result = self.run_owner("inspect-legacy")
+        self.assertEqual(result.returncode, 1, result.stderr)
+        report = json.loads(result.stdout)
+        self.assertEqual(report["blocking_count"], 6)
+        self.assertEqual(
+            report["counts"],
+            dict(
+                unresolved_commit=3,
+                unresolved_receipt=1,
+                unobserved_launch=1,
+                legacy_checkpoint_history=1,
+            ),
+        )
+        self.assertEqual(report["ownership"]["phase"], "stable")
+        self.assertEqual(self.state_snapshot(), before)
+        with lock.open() as stream:
+            fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            result = self.run_owner("inspect-legacy")
+            self.assertEqual(result.returncode, 1, result.stderr)
+            self.assertEqual(json.loads(result.stdout)["counts"]["active_writer"], 1)
+        self.assertEqual(self.state_snapshot(), before)
+
+    def test_capture_can_enter_while_inspection_is_scanning(self):
+        self.run_owner("status")
+        for owner in OWNERS:
+            with self.subTest(owner=owner), mock.patch.dict(os.environ, self.env):
+                module = runpy.run_path(str(owner))
+                inspect = module["inspect_legacy"]
+                scan = module["legacy_inspection"]
+
+                def scan_with_capture():
+                    capture = self.run_owner(
+                        "legacy", "--", sys.executable, "-c", "pass", owner=owner
+                    )
+                    self.assertEqual(capture.returncode, 0, capture.stderr)
+                    return scan()
+
+                with mock.patch.dict(
+                    inspect.__globals__, legacy_inspection=scan_with_capture
+                ):
+                    self.assertTrue(inspect()["ready"])
+
+    def check_resolution_byte_budget(self, relative):
+        for index in range(17):
+            path = self.evidence(relative.format(index=index), {})
+            key = hashlib.sha256(str(path.relative_to(self.base)).encode()).hexdigest()
+            resolution = self.evidence(
+                "capture-ownership/resolutions/" + key + ".json",
+                dict(sha256=hashlib.sha256(path.read_bytes()).hexdigest()),
+            )
+            data = resolution.read_bytes()
+            resolution.write_bytes(data + b" " * (1048576 - len(data)))
+        for owner in OWNERS:
+            result = self.run_owner("inspect-legacy", owner=owner)
+            self.assertEqual(result.returncode, 2, result.stderr)
+            self.assertIn("16 MiB", result.stderr)
+
+    def test_commit_dispositions_count_toward_inspection_budget(self):
+        self.check_resolution_byte_budget("pre-commit-head/{index}")
+
+    def test_session_dispositions_count_toward_inspection_budget(self):
+        self.check_resolution_byte_budget(
+            "session-capture/session/boundaries/{index}.json"
+        )
+
+    def test_duplicate_json_fields_cannot_hide_pending_or_failed_evidence(self):
+        cases = (
+            ("activity.json", '{"pending":["' + "f" * 64 + '"],"pending":[]}'),
+            (
+                "boundaries/event.json",
+                '{"status":"process_failed","status":"process_succeeded",'
+                '"retry_required":false,"exit_code":0,"ack":"acknowledged"}',
+            ),
+            (
+                "boundaries/event.json",
+                '{"status":"process_succeeded","retry_required":true,'
+                '"retry_required":false,"exit_code":0,"ack":"acknowledged"}',
+            ),
+        )
+        for relative, payload in cases:
+            path = self.evidence("session-capture/session/" + relative, {})
+            path.write_text(payload)
+            original = path.read_bytes()
+            for owner in OWNERS:
+                with self.subTest(relative=relative, owner=owner, payload=payload):
+                    result = self.run_owner("inspect-legacy", owner=owner)
+                    self.assertEqual(result.returncode, 1, result.stderr)
+                    self.assertEqual(
+                        json.loads(result.stdout)["counts"]["invalid_evidence"], 1
+                    )
+                    denied = self.run_owner(
+                        "handoff",
+                        "--owner",
+                        "disabled",
+                        "--verification",
+                        "legacy-writers-stopped-and-history-inspected",
+                        owner=owner,
+                    )
+                    self.assertNotEqual(denied.returncode, 0)
+                    self.assertEqual(path.read_bytes(), original)
+            path.unlink()
+
+    def test_invalid_hook_json_produces_explicit_refusal_instead_of_empty_input(self):
+        for owner_state in ("legacy", "disabled"):
+            self.assertEqual(self.handoff(owner_state).returncode, 0)
+            for owner in OWNERS:
+                for event in ("PreToolUse", "Stop", "UserPromptSubmit"):
+                    for payload in (
+                        '{"tool_name":"mcp__obsidian-write__obsidian_keeper_save",'
+                        '"tool_name":"mcp__obsidian-write__obsidian_daily_append"}',
+                        '{"tool_name":',
+                    ):
+                        with self.subTest(owner=owner, state=owner_state, event=event):
+                            result = self.run_owner(
+                                "route", "--event", event, payload=payload, owner=owner
+                            )
+                            self.assertEqual(result.returncode, 0, result.stderr)
+                            value = json.loads(result.stdout)
+                            if event == "PreToolUse":
+                                self.assertEqual(
+                                    value.get("hookSpecificOutput", {}).get(
+                                        "permissionDecision"
+                                    ),
+                                    "deny",
+                                )
+                            else:
+                                self.assertEqual(value.get("decision"), "block")
+
+    def test_history_requires_explicit_content_bound_resolution_in_both_packages(self):
+        path = self.evidence(
+            "session-capture/session/activity.json", self.checkpoint_history()
+        )
+        original = path.read_bytes()
+        for owner in OWNERS:
+            unresolved = self.run_owner("inspect-legacy", owner=owner)
+            self.assertEqual(unresolved.returncode, 1, unresolved.stderr)
+        resolved = self.run_owner(
+            "resolve-legacy",
+            "--evidence",
+            str(path.relative_to(self.base)),
+            "--verification",
+            "authoritative-vault-and-history-inspected",
+            "--reason",
+            "Delivery remains indeterminate after authoritative inspection; retain history",
+        )
+        self.assertEqual(resolved.returncode, 0, resolved.stderr)
+        self.assertEqual(
+            json.loads(resolved.stdout)["status"], "operator_resolved_not_mcp_receipt"
+        )
+        for owner in OWNERS:
+            report = self.run_owner("inspect-legacy", owner=owner)
+            self.assertEqual(report.returncode, 0, report.stderr)
+            self.assertEqual(
+                json.loads(report.stdout)["counts"]["operator_resolved"], 1
+            )
+        self.assertEqual(path.read_bytes(), original)
+        self.assertEqual(self.handoff().returncode, 0)
+        self.evidence(
+            str(path.relative_to(self.base)),
+            dict(self.checkpoint_history(), last_attempt=200.0),
+        )
+        self.assertEqual(self.run_owner("inspect-legacy").returncode, 1)
+        self.assertNotEqual(self.handoff("legacy").returncode, 0)
 
     def test_default_is_legacy_and_disabled_gates_real_keeper(self):
         result = self.run_owner("status")
@@ -205,7 +707,7 @@ class OwnershipTests(unittest.TestCase):
     def test_successful_process_does_not_hide_retained_or_unknown_activity(self):
         self.evidence(
             "session-capture/session/boundaries/event.json",
-            dict(status="process_succeeded", retry_required=False),
+            self.terminal_receipt(),
         )
         for value in (dict(seen=["old"]), dict(seen=["old"], pending=["unsent"])):
             with self.subTest(value=value):
@@ -214,7 +716,8 @@ class OwnershipTests(unittest.TestCase):
                 self.assertNotEqual(result.returncode, 0)
                 self.assertIn("legacy activity", result.stderr)
         self.evidence(
-            "session-capture/session/activity.json", dict(seen=["old"], pending=[])
+            "session-capture/session/activity.json",
+            dict(self.checkpoint_history(), pending=[]),
         )
         self.assertEqual(self.handoff().returncode, 0)
 

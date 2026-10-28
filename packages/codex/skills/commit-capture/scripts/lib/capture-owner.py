@@ -5,6 +5,7 @@ import contextlib
 import fcntl
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -47,6 +48,19 @@ def directory(path):
     return path
 
 
+def unique_fields(pairs):
+    value = {}
+    for key, item in pairs:
+        if key in value:
+            raise ValueError("duplicate JSON field")
+        value[key] = item
+    return value
+
+
+def decode_json(data):
+    return json.loads(data, object_pairs_hook=unique_fields)
+
+
 def read(path):
     descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     with os.fdopen(descriptor) as stream:
@@ -59,7 +73,7 @@ def read(path):
             or info.st_size > 1048576
         ):
             raise OwnershipError("unsafe capture state file")
-        return json.load(stream)
+        return json.load(stream, object_pairs_hook=unique_fields)
 
 
 def write(path, value):
@@ -84,9 +98,10 @@ def state_path():
     return directory(root() / "capture-ownership")
 
 
-def ownership():
+def ownership(read_only=False):
     try:
-        value = read(state_path() / "owner.json")
+        path = root() / "capture-ownership" if read_only else state_path()
+        value = read(path / "owner.json")
     except FileNotFoundError:
         return dict(schema=1, owner="legacy", phase="stable", generation=0, profiles={})
     if (
@@ -334,7 +349,7 @@ def public_drained(profile):
         check=False,
         timeout=30,
     )
-    if result.returncode or json.loads(result.stdout).get("quiescent") is not True:
+    if result.returncode or decode_json(result.stdout).get("quiescent") is not True:
         raise OwnershipError(
             "public capture has pending or unverified work; admission remains closed"
         )
@@ -361,7 +376,7 @@ def public_hook(profile, descriptor, value, event):
             "public capture runtime failed; inspect its pinned release/profile and pending state, no fallback"
         )
     try:
-        output = json.loads(result.stdout)
+        output = decode_json(result.stdout)
     except ValueError as error:
         raise OwnershipError(
             "public capture runtime returned an invalid hook response; no fallback"
@@ -430,18 +445,20 @@ def public_hook(profile, descriptor, value, event):
 
 def resolution_path(path):
     key = hashlib.sha256(str(path.relative_to(root())).encode()).hexdigest()
-    return state_path() / "resolutions" / (key + ".json")
+    return root() / "capture-ownership/resolutions" / (key + ".json")
 
 
-def resolved(path):
+def resolved(path, digest=None, read_record=read):
     try:
-        record = read(resolution_path(path))
+        record = read_record(resolution_path(path))
     except FileNotFoundError:
         return False
-    return record.get("sha256") == evidence_digest(path)
+    return isinstance(record, dict) and record.get("sha256") == (
+        digest if digest is not None else evidence_digest(path)
+    )
 
 
-def evidence_digest(path):
+def evidence_bytes(path, private=False):
     descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     with os.fdopen(descriptor, "rb") as stream:
         info = os.fstat(stream.fileno())
@@ -450,12 +467,17 @@ def evidence_digest(path):
             or info.st_uid != os.getuid()
             or info.st_nlink != 1
             or info.st_size > 1048576
+            or (private and info.st_mode & 0o077)
         ):
             raise OwnershipError("unsafe legacy evidence file")
         data = stream.read(1048577)
         if len(data) > 1048576:
             raise OwnershipError("legacy evidence exceeds bounded inspection")
-        return hashlib.sha256(data).hexdigest()
+        return data
+
+
+def evidence_digest(path):
+    return hashlib.sha256(evidence_bytes(path)).hexdigest()
 
 
 def resolve_legacy(args):
@@ -489,10 +511,17 @@ def resolve_legacy(args):
     ):
         raise OwnershipError("unsafe evidence path")
     with admission(exclusive=True):
+        digest = evidence_digest(path)
+        if args.evidence_sha256 is not None and (
+            not hash_value(args.evidence_sha256) or args.evidence_sha256 != digest
+        ):
+            raise OwnershipError(
+                "legacy evidence changed since inspection; inspect again before resolving"
+            )
         key = hashlib.sha256(str(relative).encode()).hexdigest()
         record = dict(
             evidence=str(relative),
-            sha256=evidence_digest(path),
+            sha256=digest,
             verification=args.verification,
             reason=args.reason,
             status="operator_resolved_not_mcp_receipt",
@@ -501,52 +530,328 @@ def resolve_legacy(args):
         return record
 
 
-def legacy_drained():
+def finite_timestamp(value):
+    try:
+        return type(value) in (int, float) and math.isfinite(value) and value >= 0
+    except OverflowError:
+        return False
+
+
+def hash_value(value, lengths=(64,)):
+    return (
+        isinstance(value, str)
+        and len(value) in lengths
+        and bool(re.fullmatch(r"[0-9a-f]+", value))
+    )
+
+
+def checkpoint_schema(value):
+    return (
+        isinstance(value, dict)
+        and set(value) == {"version", "seen", "git", "head", "last_attempt"}
+        and type(value["version"]) is int
+        and value["version"] == 1
+        and isinstance(value["seen"], list)
+        and all(hash_value(item) for item in value["seen"])
+        and (value["git"] is None or hash_value(value["git"]))
+        and (value["head"] is None or hash_value(value["head"], (40, 64)))
+        and finite_timestamp(value["last_attempt"])
+    )
+
+
+def activity_status(value):
+    if not isinstance(value, dict):
+        return "invalid_activity"
+    if "pending" in value:
+        pending = value["pending"]
+        if not isinstance(pending, list) or not all(hash_value(fp) for fp in pending):
+            return "invalid_activity"
+        if pending:
+            return "pending_activity"
+        checkpoint = {key: item for key, item in value.items() if key != "pending"}
+        if checkpoint_schema(checkpoint) or (
+            set(checkpoint) <= {"last_attempt"}
+            and (not checkpoint or finite_timestamp(checkpoint["last_attempt"]))
+        ):
+            return "activity_clear"
+        return "invalid_activity"
+    return (
+        "legacy_checkpoint_history" if checkpoint_schema(value) else "invalid_activity"
+    )
+
+
+def terminal_receipt(value):
+    return (
+        isinstance(value, dict)
+        and value.get("status") == "process_succeeded"
+        and value.get("retry_required") is False
+        and type(value.get("exit_code")) is int
+        and value["exit_code"] == 0
+        and value.get("ack") == "acknowledged"
+    )
+
+
+def corroborates_checkpoint(path, value, checkpoint):
+    return (
+        terminal_receipt(value)
+        and type(value.get("schema_version")) is int
+        and value["schema_version"] == 1
+        and hash_value(value.get("source_session_hash"))
+        and value["source_session_hash"] == path.parent.parent.name
+        and hash_value(value.get("boundary"))
+        and value["boundary"] == path.stem
+        and finite_timestamp(value.get("time"))
+        and finite_timestamp(value.get("finished_at"))
+        and value["time"] <= checkpoint["last_attempt"] <= value["finished_at"]
+    )
+
+
+def existing_directory(path):
+    try:
+        info = path.lstat()
+    except FileNotFoundError:
+        return False
+    if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid():
+        raise OwnershipError("unsafe legacy evidence directory")
+    return True
+
+
+def legacy_inspection():
     base = root()
+    rows = []
+    entries_seen = files_seen = bytes_seen = 0
+
+    def entries(path):
+        nonlocal entries_seen
+        if not existing_directory(path):
+            return []
+        items = []
+        for item in path.iterdir():
+            entries_seen += 1
+            if entries_seen > 4096:
+                raise OwnershipError("legacy inspection exceeds 4096 directory entries")
+            items.append(item)
+        return sorted(items)
+
+    def content(path, private=False):
+        nonlocal files_seen, bytes_seen
+        files_seen += 1
+        if files_seen > 2048:
+            raise OwnershipError("legacy inspection exceeds 2048 evidence files")
+        data = evidence_bytes(path, private)
+        bytes_seen += len(data)
+        if bytes_seen > 16 * 1024 * 1024:
+            raise OwnershipError("legacy inspection exceeds 16 MiB of evidence")
+        return data, hashlib.sha256(data).hexdigest()
+
+    def add(path, status, blocking=True, **details):
+        rows.append(
+            dict(
+                path=str(path.relative_to(base)),
+                status=status,
+                blocking=blocking,
+                **details
+            )
+        )
+
+    def read_resolution(path):
+        data, _ = content(path, private=True)
+        return decode_json(data)
+
+    def record(path):
+        details = {}
+        try:
+            data, digest = content(path, private=True)
+            details["sha256"] = digest
+            if resolved(path, digest, read_resolution):
+                add(path, "operator_resolved", False, **details)
+                return None
+            value = decode_json(data)
+            if value is None:
+                add(path, "invalid_evidence", **details)
+                return None
+            return value, digest
+        except OwnershipError:
+            raise
+        except (OSError, ValueError, TypeError):
+            add(path, "invalid_evidence", **details)
+            return None
+
+    if not existing_directory(base):
+        return rows
+    if existing_directory(base / "capture-ownership"):
+        existing_directory(base / "capture-ownership/resolutions")
     for folder in (
         "pre-commit-head",
         "pre-commit-processing",
         "capture-ownership/pending-commits",
     ):
         path = base / folder
-        if path.exists() and any(not resolved(item) for item in path.iterdir()):
-            raise OwnershipError("unresolved legacy commit evidence in " + folder)
-    captures = base / "session-capture"
-    if not captures.exists():
-        return
-    for path in captures.glob("*/activity.lock"):
-        descriptor = os.open(path, os.O_RDWR | os.O_NOFOLLOW)
-        try:
+        for item in entries(path):
             try:
-                fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            except BlockingIOError as error:
-                raise OwnershipError(
-                    "legacy background worker is still active"
-                ) from error
-        finally:
+                _, digest = content(item)
+                reconciled = resolved(item, digest, read_resolution)
+                add(
+                    item,
+                    "operator_resolved" if reconciled else "unresolved_commit",
+                    not reconciled,
+                    sha256=digest,
+                )
+            except OwnershipError:
+                raise
+            except (OSError, ValueError, TypeError):
+                add(item, "invalid_evidence")
+    captures = base / "session-capture"
+    if not existing_directory(captures):
+        return rows
+    sessions = entries(captures)
+    if len(sessions) > 256:
+        raise OwnershipError("legacy inspection exceeds 256 sessions")
+    for session in sessions:
+        if not existing_directory(session):
+            continue
+        lock = session / "activity.lock"
+        try:
+            descriptor = os.open(lock, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        except FileNotFoundError:
+            descriptor = None
+        if descriptor is not None:
+            try:
+                info = os.fstat(descriptor)
+                if (
+                    not stat.S_ISREG(info.st_mode)
+                    or info.st_uid != os.getuid()
+                    or info.st_mode & 0o077
+                ):
+                    raise OwnershipError("unsafe legacy worker lock")
+                try:
+                    fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except BlockingIOError:
+                    _, digest = content(lock, private=True)
+                    add(lock, "active_worker", sha256=digest)
+            finally:
+                os.close(descriptor)
+        receipts = []
+        for path in entries(session / "boundaries"):
+            if path.suffix != ".json":
+                continue
+            result = record(path)
+            if result is not None:
+                value, digest = result
+                receipts.append((path, value))
+                terminal = terminal_receipt(value)
+                add(
+                    path,
+                    "terminal_receipt" if terminal else "unresolved_receipt",
+                    not terminal,
+                    sha256=digest,
+                )
+        path = session / "activity.json"
+        if path.exists() or path.is_symlink():
+            result = record(path)
+            if result is not None:
+                value, digest = result
+                status = activity_status(value)
+                details = {}
+                if status == "legacy_checkpoint_history":
+                    details = dict(
+                        delivery="indeterminate",
+                        terminal_boundary_observed=any(
+                            corroborates_checkpoint(receipt, result, value)
+                            for receipt, result in receipts
+                        ),
+                    )
+                add(path, status, status != "activity_clear", sha256=digest, **details)
+        for path in entries(session / "launches"):
+            if path.suffix != ".json":
+                continue
+            result = record(path)
+            if result is not None:
+                value, digest = result
+                observed = isinstance(value, dict) and value.get("status") == "observed"
+                add(
+                    path,
+                    "observed_launch" if observed else "unobserved_launch",
+                    not observed,
+                    sha256=digest,
+                )
+    return rows
+
+
+def inspect_legacy():
+    base = root()
+    descriptor = None
+    busy = False
+    if existing_directory(base) and existing_directory(base / "capture-ownership"):
+        try:
+            descriptor = os.open(
+                base / "capture-ownership/admission.lock",
+                os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK,
+            )
+        except FileNotFoundError:
+            pass
+    try:
+        if descriptor is not None:
+            info = os.fstat(descriptor)
+            if (
+                not stat.S_ISREG(info.st_mode)
+                or info.st_uid != os.getuid()
+                or info.st_mode & 0o077
+            ):
+                raise OwnershipError("unsafe admission lock")
+            try:
+                fcntl.flock(descriptor, fcntl.LOCK_SH | fcntl.LOCK_NB)
+            except BlockingIOError:
+                busy = True
+        current = ownership(read_only=True)
+        rows = legacy_inspection()
+        if busy:
+            rows.append(
+                dict(
+                    path="capture-ownership/admission.lock",
+                    status="active_writer",
+                    blocking=True,
+                    sha256=evidence_digest(base / "capture-ownership/admission.lock"),
+                )
+            )
+        counts = {}
+        for row in rows:
+            counts[row["status"]] = counts.get(row["status"], 0) + 1
+        blocking = sum(row["blocking"] for row in rows)
+        result = dict(
+            status="legacy_evidence_blocked" if blocking else "legacy_evidence_clear",
+            scope="legacy_evidence_only",
+            ready=not blocking,
+            ownership=current,
+            blocking_count=blocking,
+            counts=counts,
+            evidence=rows,
+        )
+        if len(json.dumps(result).encode()) > 1048576:
+            raise OwnershipError("legacy inspection report exceeds 1 MiB")
+        return result
+    finally:
+        if descriptor is not None:
             os.close(descriptor)
-    for path in captures.glob("*/boundaries/*.json"):
-        value = read(path)
-        if not resolved(path) and (
-            value.get("status") != "process_succeeded"
-            or value.get("retry_required") is not False
-        ):
-            raise OwnershipError(
+
+
+def legacy_drained():
+    for row in legacy_inspection():
+        if not row["blocking"]:
+            continue
+        if row["status"] == "unresolved_commit":
+            message = "unresolved legacy commit evidence"
+        elif row["status"] == "active_worker":
+            message = "legacy background worker is still active"
+        elif row["status"] == "unresolved_receipt":
+            message = (
                 "unresolved legacy session receipt; inspect retained session evidence"
             )
-    for path in captures.glob("*/activity.json"):
-        value = read(path)
-        if not resolved(path) and (
-            not isinstance(value.get("pending"), list) or value["pending"]
-        ):
-            raise OwnershipError(
-                "unsent or historical unverified legacy activity remains"
-            )
-    for path in captures.glob("*/launches/*.json"):
-        if not resolved(path) and read(path).get("status") != "observed":
-            raise OwnershipError(
-                "unobserved legacy capture launch remains; inspect or retry the original source"
-            )
+        elif row["status"] == "unobserved_launch":
+            message = "unobserved legacy capture launch remains; inspect or retry the original source"
+        else:
+            message = "unsent or historical unverified legacy activity remains"
+        raise OwnershipError(message + ": " + row["path"])
 
 
 def reflog_digest(project):
@@ -628,9 +933,11 @@ def route(event, fallback, arguments):
     if len(payload) > 262144:
         raise OwnershipError("hook payload exceeds bounded input")
     try:
-        HOOK_INPUT = json.loads(payload)
-    except ValueError:
-        HOOK_INPUT = {}
+        HOOK_INPUT = decode_json(payload)
+    except ValueError as error:
+        raise OwnershipError(
+            "hook input must be valid JSON without duplicate fields"
+        ) from error
     if not isinstance(HOOK_INPUT, dict):
         raise OwnershipError("hook input must be a JSON object")
     with admission() as descriptor:
@@ -667,7 +974,7 @@ def route(event, fallback, arguments):
                 return execute(["bash", fallback, *arguments], descriptor, payload)
             print("{}")
             return 0
-        value = json.loads(payload)
+        value = decode_json(payload)
         cwd = value.get("cwd")
         if not isinstance(cwd, str) or not cwd or not Path(cwd).is_absolute():
             raise OwnershipError("hook project identity unavailable")
@@ -698,6 +1005,7 @@ def main():
             "legacy",
             "route",
             "status",
+            "inspect-legacy",
             "handoff",
             "resume",
             "record-commit",
@@ -715,6 +1023,7 @@ def main():
     parser.add_argument("--vault")
     parser.add_argument("--target")
     parser.add_argument("--evidence")
+    parser.add_argument("--evidence-sha256")
     parser.add_argument("--reason")
     args, command = parser.parse_known_args()
     if command[:1] == ["--"]:
@@ -723,6 +1032,10 @@ def main():
         raise OwnershipError("unexpected arguments")
     if args.operation == "lease":
         return 0 if lease_valid() else 1
+    if args.operation == "inspect-legacy":
+        result = inspect_legacy()
+        print(json.dumps(result, sort_keys=True))
+        return 0 if result["ready"] else 1
     if args.operation == "record-commit":
         commit_record(args)
         return 0

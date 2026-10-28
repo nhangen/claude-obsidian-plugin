@@ -35,7 +35,27 @@ Inspect ownership without changing clients:
 
 ```bash
 python3 scripts/lib/capture-owner.py status
+python3 scripts/lib/capture-owner.py inspect-legacy
 ```
+
+`inspect-legacy` reports evidence paths, SHA-256 digests, classifications, and blocking counts
+without creating or changing state directories, locks, permissions, or ownership.
+Exit `0` means the inspected legacy evidence is clear, `1` means blockers remain,
+and `2` means inspection could not complete safely. This is a snapshot of legacy
+evidence only; it does not check public profiles or establish handoff readiness.
+Use this command before attempting a handoff, which closes admission.
+Inspection refuses directory symlinks and stops above 256 sessions, 4096 directory
+entries, 2048 evidence files, 16 MiB of evidence, or a 1 MiB report. Each evidence
+file is limited to 1 MiB. Exceeding a limit is an inspection error, not clearance.
+
+Exact v1 checkpoints from 1.24.1 without a `pending` field are classified as
+`legacy_checkpoint_history`, with indeterminate delivery. Same-session terminal
+boundary corroboration is reported separately and does not prove a saved note.
+This history remains blocking until explicitly reconciled through the
+content-bound operator resolution below. Unknown or malformed activity schemas,
+new pending activity, failed receipts, missing/invalid acknowledgements, and
+unobserved launches remain blocking. An empty `pending` list does not authorize
+an unknown schema.
 
 An intentional handoff requires stopping older plugin clients and all competing
 writers, inspecting their history, attaching a verified public profile for each
@@ -58,9 +78,13 @@ previous owner, run `capture-owner.py resume`; it reopens that owner only and
 retains all pending state. Never delete pending state to make the check pass. When history and
 the authoritative vault have been inspected, `resolve-legacy --evidence
 <specific state-relative file> --verification
-authoritative-vault-and-history-inspected --reason <explanation>` retains a
+authoritative-vault-and-history-inspected --evidence-sha256 <inspected digest>
+--reason <explanation>` retains a
 content-bound resolution alongside the original evidence. It is explicitly an
 operator resolution, not a fabricated MCP success receipt.
+The optional `--evidence-sha256` rejects changed evidence under the exclusive
+admission lock before recording a disposition. Supply the digest from inspection;
+older invocations without it remain supported and rely on the operator attestation.
 
 New legacy commit records remain pending until keeper returns success and its
 exact commit heading is read back using the keeper's fence-aware parser.
@@ -69,8 +93,8 @@ hooks; configured vaults and date targets are resolved once and forwarded to
 the writer. Failed attempts block handoff, and re-admitted captures cannot reuse
 an earlier operator resolution. The internal `has-commit-heading` core command
 is read-only; the existing append/insert write primitives are unchanged.
-Historical successful legacy process exits
-are accepted only as terminal legacy work, never upgraded to MCP acceptance.
+Historical successful legacy process exits with acknowledged input
+are terminal process evidence only, never saved-note proof or MCP acceptance.
 Unmapped projects under MCP ownership refuse capture. Routine note, session,
 daily and commit paths use MCP; local scaffolding, chapter splitting, moves and
 reorganization are explicitly unsupported remote-maintenance operations.
