@@ -200,6 +200,7 @@ def legacy(command, payload=None):
                 + current["phase"]
                 + "; use the configured MCP route, no local fallback"
             )
+        check_exclusion(current, os.getcwd())
         keeper = len(command) > 2 and Path(command[1]).name == "keeper-core"
         if keeper:
             record = keeper_commit(command[2:])
@@ -299,6 +300,7 @@ def commit_record(args):
         current = ownership()
         if current["owner"] != "legacy" or current["phase"] != "stable":
             raise OwnershipError("legacy commit ownership changed")
+        check_exclusion(current, os.getcwd())
         path = directory(state_path() / "pending-commits") / (key + ".json")
         try:
             previous = read(path)
@@ -1058,7 +1060,9 @@ def resume():
         return current
 
 
-def capture_profile(current, cwd, deadline):
+def check_exclusion(current, cwd):
+    if not current.get("excluded_projects"):
+        return
     if not isinstance(cwd, str) or not cwd or not Path(cwd).is_absolute():
         raise OwnershipError("hook project identity unavailable")
     directory = canonical_path(cwd, strict=True)
@@ -1072,6 +1076,15 @@ def capture_profile(current, cwd, deadline):
             raise CaptureUnavailable(
                 "Obsidian capture excluded for this workspace; no write or legacy fallback"
             )
+
+
+def capture_profile(current, cwd, deadline):
+    if not isinstance(cwd, str) or not cwd or not Path(cwd).is_absolute():
+        raise OwnershipError("hook project identity unavailable")
+    directory = canonical_path(cwd, strict=True)
+    if not directory.is_dir():
+        raise OwnershipError("hook project identity unavailable")
+    check_exclusion(current, cwd)
     registrations = {}
     for registered, profile in current["profiles"].items():
         project = Path(registered)
@@ -1162,6 +1175,7 @@ def route(event, fallback, arguments):
                 )
             )
             return 0
+        check_exclusion(current, HOOK_INPUT.get("cwd"))
         if current["owner"] == "legacy":
             if fallback:
                 return execute(["bash", fallback, *arguments], descriptor, payload)

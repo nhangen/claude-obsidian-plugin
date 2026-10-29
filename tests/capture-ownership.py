@@ -1303,6 +1303,88 @@ class OwnershipTests(unittest.TestCase):
         self.assertIn("no legacy fallback", result.stderr)
         self.assertFalse((self.base / "session-capture").exists())
 
+    def test_exclusions_survive_legacy_rollback_and_direct_admission(self):
+        private = self.case / "private"
+        private.mkdir()
+        self.register_profiles({}, excluded=[private])
+        self.assertEqual(self.handoff("legacy").returncode, 0)
+        marker = self.case / "legacy-ran"
+        script = self.case / "legacy.sh"
+        script.write_text("#!/bin/sh\ntouch " + str(marker) + "\n")
+        for owner in OWNERS:
+            result = self.run_owner(
+                "route",
+                "--event",
+                "Stop",
+                "--script",
+                str(script),
+                payload=json.dumps(dict(cwd=str(private))),
+                owner=owner,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("excluded", result.stdout)
+            result = subprocess.run(
+                [sys.executable, str(owner), "legacy", "--", "bash", str(script)],
+                cwd=private,
+                env=self.env,
+                capture_output=True,
+                text=True,
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("excluded", result.stderr)
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(owner),
+                    "record-commit",
+                    "--commit",
+                    "d" * 40,
+                    "--vault",
+                    str(self.vault),
+                    "--target",
+                    "note.md",
+                ],
+                cwd=private,
+                env=self.env,
+                capture_output=True,
+                text=True,
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("excluded", result.stderr)
+        for arguments in (
+            [
+                "--prepare",
+                str(self.vault),
+                str(self.case / "source"),
+                "private",
+                str(private),
+            ],
+            [
+                str(self.case / "snapshot"),
+                str(self.case / "config"),
+                str(self.vault),
+                str(self.case / "source"),
+                "private",
+                "false",
+                "false",
+                str(private),
+            ],
+        ):
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(ROOT / "scripts/lib/session-capture.py"),
+                    *arguments,
+                ],
+                env=self.env,
+                capture_output=True,
+                text=True,
+            )
+            self.assertNotEqual(result.returncode, 0)
+        self.assertFalse(marker.exists())
+        self.assertFalse((self.base / "session-capture").exists())
+        self.assertFalse((self.state / "pending-commits").exists())
+
     def test_unmapped_capture_never_blocks_prompts_or_ordinary_shell_work(self):
         self.register_profiles({})
         for owner in OWNERS:

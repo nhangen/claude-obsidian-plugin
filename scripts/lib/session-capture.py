@@ -124,6 +124,7 @@ def capture(snapshot, config, vault, source, session_id, retry, forced=False, cw
         current = _owner["ownership"]()
         if current["owner"] != "legacy" or current["phase"] != "stable":
             raise ValueError("legacy capture no longer owns this writer")
+        _owner["check_exclusion"](current, cwd or os.getcwd())
         os.environ["OBSIDIAN_CAPTURE_LEASE_FD"] = str(lease)
         _, state, _ = prepare_state(vault, source, session_id)
         identifier = os.environ.get("OBSIDIAN_CAPTURE_REQUEST_ID") or prepare_request(state)
@@ -270,11 +271,15 @@ def main():
     os.umask(0o077)
     if sys.argv[1:2] == ["--prepare"]:
         try:
-            vault, source, session_id = sys.argv[2:]
+            if len(sys.argv) not in (5, 6):
+                raise ValueError("invalid preparation arguments")
+            vault, source, session_id = sys.argv[2:5]
+            cwd = sys.argv[5] if len(sys.argv) > 5 else os.getcwd()
             with _owner["admission"]():
                 current = _owner["ownership"]()
                 if current["owner"] != "legacy" or current["phase"] != "stable":
                     raise ValueError("legacy capture no longer owns this writer")
+                _owner["check_exclusion"](current, cwd)
                 _, state, _ = prepare_state(Path(vault), Path(source), session_id)
                 print(prepare_request(state))
             return 0
