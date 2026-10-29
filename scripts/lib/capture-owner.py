@@ -22,6 +22,10 @@ class OwnershipError(ValueError):
     pass
 
 
+class CaptureUnavailable(OwnershipError):
+    pass
+
+
 def canonical_path(path, strict=False):
     try:
         return Path(path).resolve(strict=strict)
@@ -121,6 +125,17 @@ def ownership(read_only=False):
         or value.get("phase") not in ("stable", "draining")
         or type(value.get("generation")) is not int
         or not isinstance(value.get("profiles"), dict)
+        or (
+            "default_profile" in value
+            and (
+                not isinstance(value["default_profile"], str)
+                or not value["default_profile"]
+            )
+        )
+        or not isinstance(value.get("excluded_projects", []), list)
+        or any(
+            not isinstance(p, str) or not p for p in value.get("excluded_projects", [])
+        )
     ):
         raise OwnershipError("invalid writer ownership record; admission closed")
     return value
@@ -349,9 +364,16 @@ def public_profile(profile):
         or config.get("active") is not True
     ):
         raise OwnershipError("active public claude-plugin profile required")
-    mode = config.get("projectMode", "git")
-    if not isinstance(mode, str) or mode not in ("git", "directory"):
-        raise OwnershipError("invalid public capture project mode")
+    scope = config.get("scope", "project")
+    if scope not in ("project", "user") or not isinstance(scope, str):
+        raise OwnershipError("invalid public capture scope")
+    if scope == "user":
+        if config.get("project") is not None or "projectMode" in config:
+            raise OwnershipError("user capture profile must not declare a project")
+    else:
+        mode = config.get("projectMode", "git")
+        if not isinstance(mode, str) or mode not in ("git", "directory"):
+            raise OwnershipError("invalid public capture project mode")
     return config
 
 
@@ -372,7 +394,8 @@ def public_command(profile, operation, deadline=None):
     executable = bundle / "bin/obsidian-mcp-native"
     if not bundle.is_absolute() or not executable.is_file():
         raise OwnershipError("public capture runtime unavailable; no fallback")
-    if config.get("projectMode", "git") == "directory":
+    user_scope = config.get("scope", "project") == "user"
+    if user_scope or config.get("projectMode", "git") == "directory":
         capability = subprocess.run(
             [
                 sys.executable,
@@ -385,10 +408,17 @@ def public_command(profile, operation, deadline=None):
             timeout=operation_timeout(deadline, 5),
             check=False,
         )
+        capability_name = "user-scope" if user_scope else "directory"
         if capability.returncode or len(capability.stdout) > 262144:
-            raise OwnershipError("public runtime does not advertise directory capture")
+            raise OwnershipError(
+                "public runtime does not advertise " + capability_name + " capture"
+            )
         advertised = decode_json(capability.stdout)
-        modes = advertised.get("projectModes") if isinstance(advertised, dict) else None
+        modes = (
+            advertised.get("captureScopes" if user_scope else "projectModes")
+            if isinstance(advertised, dict)
+            else None
+        )
         supported = modes.get("claude-plugin") if isinstance(modes, dict) else None
         hosts = advertised.get("hosts") if isinstance(advertised, dict) else None
         if (
@@ -398,9 +428,11 @@ def public_command(profile, operation, deadline=None):
             or not isinstance(hosts, list)
             or "claude-plugin" not in hosts
             or not isinstance(supported, list)
-            or "directory" not in supported
+            or ("user" if user_scope else "directory") not in supported
         ):
-            raise OwnershipError("public runtime does not advertise directory capture")
+            raise OwnershipError(
+                "public runtime does not advertise " + capability_name + " capture"
+            )
     return [sys.executable, str(executable), operation, "--home", str(profile)]
 
 
@@ -500,6 +532,12 @@ def public_hook(profile, descriptor, value, event, deadline):
     ):
         raise OwnershipError(
             "public capture runtime returned an invalid hook decision; no fallback"
+        )
+    if event == "UserPromptSubmit" and output.get("decision") == "block":
+        output = dict(
+            hookSpecificOutput=dict(
+                hookEventName=event, additionalContext=output["reason"]
+            )
         )
     print(json.dumps(output))
     return 0
@@ -952,19 +990,50 @@ def transition(args):
         write(state_path() / "owner.json", current)
         legacy_drained()
         profiles = dict(current["profiles"])
-        for profile in profiles.values():
+        for profile in set(profiles.values()) | (
+            {current["default_profile"]} if current.get("default_profile") else set()
+        ):
             public_drained(profile)
         if args.owner == "mcp":
-            if not args.project or not args.profile:
+            if not args.profile or (args.scope == "project" and not args.project):
                 raise OwnershipError(
                     "MCP handoff requires project and attached public profile"
                 )
-            project = str(canonical_path(args.project, strict=True))
-            config = read(Path(args.profile) / "capture-profile.json")
-            if config.get("project") != project:
-                raise OwnershipError("profile project does not match handoff project")
+            config = public_profile(args.profile)
+            if args.scope == "user":
+                if args.project or config.get("scope") != "user":
+                    raise OwnershipError(
+                        "user handoff requires a user-scope profile without project"
+                    )
+            else:
+                project = str(canonical_path(args.project, strict=True))
+                if (
+                    config.get("scope", "project") != "project"
+                    or config.get("project") != project
+                ):
+                    raise OwnershipError(
+                        "profile project does not match handoff project"
+                    )
             public_drained(args.profile)
-            profiles[project] = args.profile
+            if args.scope == "user":
+                current["default_profile"] = args.profile
+            else:
+                profiles[project] = args.profile
+        if args.clear_exclusions or args.exclude_project:
+            exclusions = (
+                []
+                if args.clear_exclusions
+                else list(current.get("excluded_projects", []))
+            )
+            for value in args.exclude_project:
+                path = canonical_path(value, strict=True)
+                if not Path(value).is_absolute() or not path.is_dir():
+                    raise OwnershipError(
+                        "capture exclusion must be an absolute directory"
+                    )
+                if str(path) not in exclusions:
+                    exclusions.append(str(path))
+            current["excluded_projects"] = exclusions
         current.update(
             owner=args.owner,
             phase="stable",
@@ -995,6 +1064,14 @@ def capture_profile(current, cwd, deadline):
     directory = canonical_path(cwd, strict=True)
     if not directory.is_dir():
         raise OwnershipError("hook project identity unavailable")
+    for excluded in current.get("excluded_projects", []):
+        path = Path(excluded)
+        if not path.is_absolute() or str(canonical_path(path)) != excluded:
+            raise OwnershipError("invalid canonical capture exclusion")
+        if directory.is_relative_to(path):
+            raise CaptureUnavailable(
+                "Obsidian capture excluded for this workspace; no write or legacy fallback"
+            )
     registrations = {}
     for registered, profile in current["profiles"].items():
         project = Path(registered)
@@ -1010,13 +1087,20 @@ def capture_profile(current, cwd, deadline):
         project for project in registrations if directory.is_relative_to(project)
     ]
     if not matches:
-        raise OwnershipError(
+        if current.get("default_profile"):
+            profile = current["default_profile"]
+            if public_profile(profile).get("scope") != "user":
+                raise OwnershipError("default capture profile must have user scope")
+            return profile
+        raise CaptureUnavailable(
             "no MCP capture profile for this project; no legacy fallback"
         )
     project = max(matches, key=lambda candidate: len(candidate.parts))
     profile = registrations[project]
     config = public_profile(profile)
-    if config.get("project") != str(project):
+    if config.get("scope", "project") != "project" or config.get("project") != str(
+        project
+    ):
         raise OwnershipError(
             "public capture profile does not match its project registration"
         )
@@ -1108,6 +1192,9 @@ def main():
     )
     parser.add_argument("--owner", choices=("legacy", "mcp", "disabled"))
     parser.add_argument("--profile")
+    parser.add_argument("--scope", choices=("project", "user"), default="project")
+    parser.add_argument("--exclude-project", action="append", default=[])
+    parser.add_argument("--clear-exclusions", action="store_true")
     parser.add_argument("--project")
     parser.add_argument("--verification")
     parser.add_argument("--event")
@@ -1188,9 +1275,7 @@ if __name__ == "__main__":
                     and HOOK_INPUT.get("stop_hook_active")
                     else dict(decision="block", reason=message)
                 )
-            elif event == "UserPromptSubmit":
-                result = dict(decision="block", reason=message)
-            elif event == "PreToolUse":
+            elif event == "PreToolUse" and HOOK_INPUT.get("tool_name") != "Bash":
                 result = dict(
                     hookSpecificOutput=dict(
                         hookEventName=event,
@@ -1201,9 +1286,13 @@ if __name__ == "__main__":
             else:
                 result = dict(
                     hookSpecificOutput=dict(
-                        hookEventName=event, additionalContext=message
+                        hookEventName=event,
+                        additionalContext="Obsidian capture unavailable; ordinary work may continue. "
+                        + message,
                     )
                 )
+            if event == "Stop" and isinstance(error, CaptureUnavailable):
+                result = dict(systemMessage=message)
             print(json.dumps(result))
             sys.exit(0)
         sys.exit(2)

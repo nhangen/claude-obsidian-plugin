@@ -69,11 +69,36 @@ capture. Existing profiles without `projectMode` retain Git behavior; malformed
 or unsupported modes fail closed. Capability negotiation and hook execution
 share the existing bounded hook budget.
 
+Automatic MCP capture can be configured once for the user, not once per workspace.
+With a public client advertising `captureScopes["claude-plugin"]` containing
+`user`, attach a private default without a project:
+
+```bash
+python3 /absolute/public-client/current/bin/obsidian-mcp-native attach \
+  --host claude-plugin --scope user --home /absolute/new-user-capture-profile \
+  --folder <authorized-inbox-folder> --daily-folder <server-daily-folder> \
+  --release-sha256 <verified-release-json-sha256>
+```
+
+This is explicit user-wide capture opt-in. It does not scan or upload workspace
+files. The public runtime automatically isolates capture state for new Git and
+non-Git workspaces outside the workspace; Git work supports commit capture and
+plain directories support sessions only. The configured fallback folder is used
+without inventing a taxonomy. Existing project profiles remain optional
+most-specific overrides, not enrollment requirements.
+
 An intentional handoff requires stopping older plugin clients and all competing
-writers, inspecting their history, attaching a verified public profile for each
-project, then invoking `handoff --owner mcp --project /absolute/project
---profile /absolute/profile --verification
-legacy-writers-stopped-and-history-inspected`. Use `--owner legacy` for rollback
+writers, inspecting their history, then invoking `handoff --owner mcp --scope user
+--profile /absolute/new-user-capture-profile --verification
+legacy-writers-stopped-and-history-inspected`. To exclude private directories,
+add repeatable `--exclude-project /absolute/private-directory` during handoff;
+exclusions cover descendants and win over both overrides and the default.
+`--clear-exclusions` explicitly resets the retained exclusions. To add a project
+override instead, retain `--project /absolute/project --profile /absolute/profile`
+with the default `--scope project`. Invalid overrides never silently send content
+through the default. Existing profiles and their pending evidence are retained
+and drained before any transition, including all automatic default workspaces.
+Older public runtimes cannot activate user-scope capture. Use `--owner legacy` for rollback
 or `--owner disabled` to stop all captures. This is host-local ownership, not a
 cross-machine fence. It does not stop another machine, uninstall maintenance,
 remove credentials, or change a running client's loaded plugin version.
@@ -107,7 +132,10 @@ an earlier operator resolution. The internal `has-commit-heading` core command
 is read-only; the existing append/insert write primitives are unchanged.
 Historical successful legacy process exits with acknowledged input
 are terminal process evidence only, never saved-note proof or MCP acceptance.
-Unmapped projects under MCP ownership refuse capture. Routine note, session,
+Without a user default, unmapped projects refuse capture but do not block ordinary
+prompts or shell work. Missing configuration and runtime failures emit a warning;
+they never authorize an unsafe capture write, invoke legacy fallback or claim a
+successful save. Existing pending captures remain recoverable. Routine note, session,
 daily and commit paths use MCP; local scaffolding, chapter splitting, moves and
 reorganization are explicitly unsupported remote-maintenance operations.
 

@@ -526,8 +526,14 @@ class OwnershipTests(unittest.TestCase):
                                     ),
                                     "deny",
                                 )
-                            else:
+                            elif event == "Stop":
                                 self.assertEqual(value.get("decision"), "block")
+                            else:
+                                self.assertNotIn("decision", value)
+                                self.assertIn(
+                                    "unavailable",
+                                    value["hookSpecificOutput"]["additionalContext"],
+                                )
 
     def test_history_requires_explicit_content_bound_resolution_in_both_packages(self):
         path = self.evidence(
@@ -1293,9 +1299,208 @@ class OwnershipTests(unittest.TestCase):
             payload=json.dumps(dict(cwd=str(self.case))),
         )
         self.assertEqual(result.returncode, 0)
-        self.assertEqual(json.loads(result.stdout)["decision"], "block")
+        self.assertNotIn("decision", json.loads(result.stdout))
         self.assertIn("no legacy fallback", result.stderr)
         self.assertFalse((self.base / "session-capture").exists())
+
+    def test_unmapped_capture_never_blocks_prompts_or_ordinary_shell_work(self):
+        self.register_profiles({})
+        for owner in OWNERS:
+            for event, extra in (
+                ("UserPromptSubmit", {}),
+                ("PreToolUse", {"tool_name": "Bash", "tool_input": {"command": "pwd"}}),
+                ("Stop", {}),
+            ):
+                with self.subTest(owner=owner, event=event):
+                    result = self.run_owner(
+                        "route",
+                        "--event",
+                        event,
+                        payload=json.dumps(dict(cwd=str(self.case), **extra)),
+                        owner=owner,
+                    )
+                    output = json.loads(result.stdout)
+                    self.assertNotIn("decision", output)
+                    self.assertNotIn(
+                        "permissionDecision", output.get("hookSpecificOutput", {})
+                    )
+                    self.assertIn("no legacy fallback", result.stdout)
+            result = self.run_owner(
+                "route",
+                "--event",
+                "PreToolUse",
+                payload=json.dumps(
+                    dict(
+                        cwd=str(self.case),
+                        tool_name="mcp__obsidian-write__obsidian_keeper_save",
+                    )
+                ),
+                owner=owner,
+            )
+            self.assertEqual(
+                json.loads(result.stdout)["hookSpecificOutput"]["permissionDecision"],
+                "deny",
+            )
+        self.assertFalse((self.base / "session-capture").exists())
+
+    def test_user_default_covers_new_workspaces_and_preserves_overrides(self):
+        first, second = self.case / "new-course", self.case / "new-code"
+        first.mkdir()
+        second.mkdir()
+        default = self.user_profile("default")
+        override = self.attached_profile(second, "override")
+        self.register_profiles({second: override}, default=default)
+        self.spy_on_git()
+        for owner in OWNERS:
+            for project, expected in ((first, "default"), (second, "override")):
+                result = self.run_owner(
+                    "route",
+                    "--event",
+                    "UserPromptSubmit",
+                    payload=json.dumps(dict(cwd=str(project))),
+                    owner=owner,
+                )
+                self.assertEqual(
+                    json.loads(result.stdout)["hookSpecificOutput"][
+                        "additionalContext"
+                    ],
+                    expected,
+                )
+        self.assertFalse((self.case / "git-probed").exists())
+
+    def test_explicit_exclusion_wins_over_default_and_project_override(self):
+        private = self.case / "private"
+        private.mkdir()
+        sibling = self.case / "private-other"
+        sibling.mkdir()
+        default = self.user_profile("default")
+        override = self.attached_profile(private, "private")
+        self.register_profiles({private: override}, default=default, excluded=[private])
+        for owner in OWNERS:
+            result = self.run_owner(
+                "route",
+                "--event",
+                "UserPromptSubmit",
+                payload=json.dumps(dict(cwd=str(private))),
+                owner=owner,
+            )
+            self.assertNotIn("decision", json.loads(result.stdout))
+            self.assertIn("excluded", result.stdout)
+            result = self.run_owner(
+                "route",
+                "--event",
+                "UserPromptSubmit",
+                payload=json.dumps(dict(cwd=str(sibling))),
+                owner=owner,
+            )
+            self.assertEqual(
+                json.loads(result.stdout)["hookSpecificOutput"]["additionalContext"],
+                "default",
+            )
+        self.assertFalse((self.case / "hook-private").exists())
+
+    def test_invalid_override_never_sends_content_to_default(self):
+        project = self.case / "project"
+        project.mkdir()
+        default = self.user_profile("default")
+        self.register_profiles(
+            {project: self.case / "missing-profile"}, default=default
+        )
+        for owner in OWNERS:
+            result = self.run_owner(
+                "route",
+                "--event",
+                "UserPromptSubmit",
+                payload=json.dumps(dict(cwd=str(project))),
+                owner=owner,
+            )
+            self.assertNotIn("decision", json.loads(result.stdout))
+            self.assertIn("capture", result.stdout)
+        self.assertFalse((self.case / "hook-default").exists())
+
+    def test_default_handoff_negotiates_capability_and_retains_existing_mapping(self):
+        project = self.case / "course"
+        project.mkdir()
+        existing = self.attached_profile(project, "course")
+        default = self.user_profile("default")
+        self.register_profiles({project: existing})
+        result = self.handoff("mcp", "--scope", "user", "--profile", str(default))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        record = json.loads(result.stdout)
+        self.assertEqual(record["default_profile"], str(default))
+        self.assertEqual(record["profiles"][str(project)], str(existing))
+        incompatible = self.user_profile("old-user", supported=False)
+        result = self.handoff("mcp", "--scope", "user", "--profile", str(incompatible))
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("user", result.stderr)
+        self.assertEqual(
+            json.loads((self.state / "owner.json").read_text())["default_profile"],
+            str(default),
+        )
+
+    def test_pending_default_blocks_handoff_without_discarding_ownership(self):
+        default = self.user_profile("default")
+        self.register_profiles({}, default=default)
+        config = json.loads((default / "capture-profile.json").read_text())
+        runtime = Path(config["bundle"]) / "bin/obsidian-mcp-native"
+        runtime.write_text(
+            runtime.read_text().replace(
+                "print('{\"quiescent\":true}')", "print('{\"quiescent\":false}')"
+            )
+        )
+        result = self.handoff("disabled")
+        self.assertNotEqual(result.returncode, 0)
+        current = json.loads((self.state / "owner.json").read_text())
+        self.assertEqual(current["owner"], "mcp")
+        self.assertEqual(current["default_profile"], str(default))
+        self.assertEqual(current["phase"], "draining")
+
+    def test_exclusion_handoff_is_explicit_and_reversible(self):
+        private = self.case / "private"
+        private.mkdir()
+        default = self.user_profile("default")
+        self.register_profiles({})
+        result = self.handoff(
+            "mcp",
+            "--scope",
+            "user",
+            "--profile",
+            str(default),
+            "--exclude-project",
+            str(private),
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout)["excluded_projects"], [str(private)])
+        result = self.handoff("mcp", "--scope", "user", "--profile", str(default))
+        self.assertEqual(json.loads(result.stdout)["excluded_projects"], [str(private)])
+        result = self.handoff(
+            "mcp", "--scope", "user", "--profile", str(default), "--clear-exclusions"
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout)["excluded_projects"], [])
+
+    def test_runtime_failure_does_not_block_shell_or_misreport_saved_capture(self):
+        self.mock_runtime("raise SystemExit(64)\n")
+        for owner in OWNERS:
+            result = self.run_owner(
+                "route",
+                "--event",
+                "PreToolUse",
+                payload=json.dumps(
+                    dict(
+                        cwd=str(self.case),
+                        tool_name="Bash",
+                        tool_input={"command": "pwd"},
+                    )
+                ),
+                owner=owner,
+            )
+            output = json.loads(result.stdout)
+            self.assertNotIn("permissionDecision", output["hookSpecificOutput"])
+            self.assertIn(
+                "unavailable", output["hookSpecificOutput"]["additionalContext"]
+            )
+            self.assertFalse((self.base / "session-capture").exists())
 
     def test_empty_state_home_and_symlink_record_refuse(self):
         self.env["XDG_STATE_HOME"] = ""
@@ -1349,7 +1554,25 @@ class OwnershipTests(unittest.TestCase):
         config.chmod(0o600)
         return profile
 
-    def register_profiles(self, mapping):
+    def user_profile(self, name, supported=True):
+        profile = self.attached_profile(self.case, name)
+        config = profile / "capture-profile.json"
+        value = json.loads(config.read_text())
+        value["scope"] = "user"
+        value.pop("project")
+        value.pop("projectMode")
+        config.write_text(json.dumps(value))
+        runtime = Path(value["bundle"]) / "bin/obsidian-mcp-native"
+        script = runtime.read_text()
+        if supported:
+            script = script.replace(
+                '"apiVersion": 1',
+                '"captureScopes": {"claude-plugin": ["project", "user"]}, "apiVersion": 1',
+            )
+        runtime.write_text(script)
+        return profile
+
+    def register_profiles(self, mapping, default=None, excluded=()):
         self.run_owner("status")
         self.evidence(
             "capture-ownership/owner.json",
@@ -1359,6 +1582,8 @@ class OwnershipTests(unittest.TestCase):
                 phase="stable",
                 generation=1,
                 profiles={str(root): str(profile) for root, profile in mapping.items()},
+                **({"default_profile": str(default)} if default else {}),
+                excluded_projects=[str(root) for root in excluded],
             ),
         )
 
@@ -1417,7 +1642,8 @@ class OwnershipTests(unittest.TestCase):
                     payload=json.dumps(dict(cwd=str(cwd))),
                     owner=owner,
                 )
-                self.assertEqual(json.loads(result.stdout).get("decision"), "block")
+                self.assertNotIn("decision", json.loads(result.stdout))
+                self.assertIn("no legacy fallback", result.stdout)
         self.assertFalse((self.case / "hook-plain").exists())
 
     def test_most_specific_directory_profile_is_independent_of_registration_order(self):
@@ -1464,7 +1690,7 @@ class OwnershipTests(unittest.TestCase):
                     payload=json.dumps(dict(cwd=str(project))),
                     owner=owner,
                 )
-                self.assertEqual(json.loads(result.stdout).get("decision"), "block")
+                self.assertNotIn("decision", json.loads(result.stdout))
                 self.assertIn("project mode", result.stderr)
         self.assertFalse((self.case / "hook-plain").exists())
 
@@ -1481,7 +1707,7 @@ class OwnershipTests(unittest.TestCase):
                 payload=json.dumps(dict(cwd=str(project))),
                 owner=owner,
             )
-            self.assertEqual(json.loads(result.stdout).get("decision"), "block")
+            self.assertNotIn("decision", json.loads(result.stdout))
             self.assertIn("does not advertise directory", result.stderr)
         self.assertFalse((self.case / "hook-old").exists())
 
@@ -1501,7 +1727,7 @@ class OwnershipTests(unittest.TestCase):
                     owner=owner,
                 )
                 self.assertEqual(result.returncode, 0, result.stderr)
-                self.assertEqual(json.loads(result.stdout).get("decision"), "block")
+                self.assertNotIn("decision", json.loads(result.stdout))
                 refused = self.run_owner(
                     "handoff",
                     "--owner",
@@ -1540,7 +1766,7 @@ class OwnershipTests(unittest.TestCase):
                     owner=owner,
                 )
                 self.assertEqual(result.returncode, 0, result.stderr)
-                self.assertEqual(json.loads(result.stdout).get("decision"), "block")
+                self.assertNotIn("decision", json.loads(result.stdout))
                 self.assertNotIn("Traceback", result.stderr)
 
     def test_capability_and_hook_share_one_execution_deadline(self):
@@ -1606,11 +1832,17 @@ class OwnershipTests(unittest.TestCase):
                 )
                 self.assertEqual(result.returncode, 0, result.stderr)
                 output = json.loads(result.stdout)
+                self.assertNotIn("decision", output)
                 if must_refuse:
-                    self.assertEqual(output.get("decision"), "block")
+                    self.assertIn(
+                        "unavailable", output["hookSpecificOutput"]["additionalContext"]
+                    )
                 else:
                     self.assertTrue(
-                        output.get("decision") == "block"
+                        "unavailable"
+                        in output.get("hookSpecificOutput", {}).get(
+                            "additionalContext", ""
+                        )
                         or output.get("hookSpecificOutput", {}).get("additionalContext")
                         == "plain"
                     )
@@ -1629,7 +1861,7 @@ class OwnershipTests(unittest.TestCase):
                 payload=json.dumps(dict(cwd=str(project))),
                 owner=owner,
             )
-            self.assertEqual(json.loads(result.stdout).get("decision"), "block")
+            self.assertNotIn("decision", json.loads(result.stdout))
             self.assertIn("canonical project registration", result.stderr)
 
     def test_nested_git_remains_directory_session_only_until_explicitly_mapped(self):
@@ -1722,7 +1954,7 @@ class OwnershipTests(unittest.TestCase):
                 )
                 self.assertEqual(result.returncode, 0, result.stderr)
                 output = json.loads(result.stdout)
-                if event in ("UserPromptSubmit", "Stop"):
+                if event == "Stop":
                     self.assertEqual(output["decision"], "block")
                 elif event == "PreToolUse":
                     self.assertEqual(
