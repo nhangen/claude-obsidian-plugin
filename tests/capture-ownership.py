@@ -527,7 +527,8 @@ class OwnershipTests(unittest.TestCase):
                                     "deny",
                                 )
                             elif event == "Stop":
-                                self.assertEqual(value.get("decision"), "block")
+                                self.assertNotIn("decision", value)
+                                self.assertIn("systemMessage", value)
                             else:
                                 self.assertNotIn("decision", value)
                                 self.assertIn(
@@ -1267,7 +1268,7 @@ class OwnershipTests(unittest.TestCase):
         self.assertNotEqual(absent.returncode, 0)
         self.assertFalse(missing.exists())
 
-    def test_stop_error_has_only_one_blocking_continuation(self):
+    def test_stop_admission_errors_never_force_continuation(self):
         self.run_owner("status")
         self.evidence(
             "capture-ownership/owner.json",
@@ -1279,7 +1280,8 @@ class OwnershipTests(unittest.TestCase):
         again = self.run_owner(
             "route", "--event", "Stop", payload='{"stop_hook_active":true}'
         )
-        self.assertEqual(json.loads(first.stdout)["decision"], "block")
+        self.assertNotIn("decision", json.loads(first.stdout))
+        self.assertIn("systemMessage", json.loads(first.stdout))
         self.assertNotIn("decision", json.loads(again.stdout))
         self.assertIn("systemMessage", json.loads(again.stdout))
 
@@ -1302,6 +1304,70 @@ class OwnershipTests(unittest.TestCase):
         self.assertNotIn("decision", json.loads(result.stdout))
         self.assertIn("no legacy fallback", result.stderr)
         self.assertFalse((self.base / "session-capture").exists())
+
+    def test_nonobject_hook_input_refuses_write_without_crashing(self):
+        for owner in OWNERS:
+            for value in ([], None, 5, "text"):
+                result = self.run_owner(
+                    "route",
+                    "--event",
+                    "PreToolUse",
+                    payload=json.dumps(value),
+                    owner=owner,
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(
+                    json.loads(result.stdout)["hookSpecificOutput"][
+                        "permissionDecision"
+                    ],
+                    "deny",
+                )
+                self.assertNotIn("Traceback", result.stderr)
+
+    def test_unavailable_user_default_never_blocks_stopping(self):
+        default = self.user_profile("default")
+        self.register_profiles({}, default=default)
+        (default / "capture-profile.json").unlink()
+        for owner in OWNERS:
+            result = self.run_owner(
+                "route",
+                "--event",
+                "Stop",
+                payload=json.dumps(dict(cwd=str(self.case))),
+                owner=owner,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertNotIn("decision", json.loads(result.stdout))
+            self.assertIn("systemMessage", json.loads(result.stdout))
+
+    def test_runtime_prompt_halt_is_advisory_but_pending_stop_is_preserved(self):
+        self.mock_runtime(
+            'print(\'{"continue":false,"stopReason":"capture unavailable"}\')\n'
+        )
+        for owner in OWNERS:
+            result = self.run_owner(
+                "route",
+                "--event",
+                "UserPromptSubmit",
+                payload=json.dumps(dict(cwd=str(self.case))),
+                owner=owner,
+            )
+            output = json.loads(result.stdout)
+            self.assertNotIn("continue", output)
+            self.assertIn("capture unavailable", json.dumps(output))
+        runtime = self.case / "mock-bundle/bin/obsidian-mcp-native"
+        runtime.write_text(
+            'print(\'{"decision":"block","reason":"pending capture"}\')\n'
+        )
+        for owner in OWNERS:
+            result = self.run_owner(
+                "route",
+                "--event",
+                "Stop",
+                payload=json.dumps(dict(cwd=str(self.case))),
+                owner=owner,
+            )
+            self.assertEqual(json.loads(result.stdout)["decision"], "block")
 
     def test_exclusions_survive_legacy_rollback_and_direct_admission(self):
         private = self.case / "private"
@@ -2037,7 +2103,8 @@ class OwnershipTests(unittest.TestCase):
                 self.assertEqual(result.returncode, 0, result.stderr)
                 output = json.loads(result.stdout)
                 if event == "Stop":
-                    self.assertEqual(output["decision"], "block")
+                    self.assertNotIn("decision", output)
+                    self.assertIn("systemMessage", output)
                 elif event == "PreToolUse":
                     self.assertEqual(
                         output["hookSpecificOutput"]["permissionDecision"], "deny"

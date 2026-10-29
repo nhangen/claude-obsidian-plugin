@@ -535,10 +535,17 @@ def public_hook(profile, descriptor, value, event, deadline):
         raise OwnershipError(
             "public capture runtime returned an invalid hook decision; no fallback"
         )
-    if event == "UserPromptSubmit" and output.get("decision") == "block":
+    if event == "UserPromptSubmit" and (
+        output.get("decision") == "block" or output.get("continue") is False
+    ):
         output = dict(
             hookSpecificOutput=dict(
-                hookEventName=event, additionalContext=output["reason"]
+                hookEventName=event,
+                additionalContext=str(
+                    output.get("reason")
+                    or output.get("stopReason")
+                    or "Obsidian capture unavailable; ordinary work may continue."
+                ),
             )
         )
     print(json.dumps(output))
@@ -1283,13 +1290,11 @@ if __name__ == "__main__":
                 else "Stop"
             )
             if event == "Stop":
-                result = (
-                    dict(systemMessage=message)
-                    if isinstance(HOOK_INPUT, dict)
-                    and HOOK_INPUT.get("stop_hook_active")
-                    else dict(decision="block", reason=message)
-                )
-            elif event == "PreToolUse" and HOOK_INPUT.get("tool_name") != "Bash":
+                result = dict(systemMessage=message)
+            elif event == "PreToolUse" and (
+                not isinstance(HOOK_INPUT, dict)
+                or HOOK_INPUT.get("tool_name") != "Bash"
+            ):
                 result = dict(
                     hookSpecificOutput=dict(
                         hookEventName=event,
@@ -1305,8 +1310,6 @@ if __name__ == "__main__":
                         + message,
                     )
                 )
-            if event == "Stop" and isinstance(error, CaptureUnavailable):
-                result = dict(systemMessage=message)
             print(json.dumps(result))
             sys.exit(0)
         sys.exit(2)
