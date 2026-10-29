@@ -84,17 +84,30 @@ Client 0.1.0 lacks this capability; stop without changing ownership if the probe
 fails. Use the public release's verified bytes, never copy a private runtime.
 Resolve a session folder from the server taxonomy and obtain the declared daily
 folder from server setup. Do not infer either from a local vault mount or assume
-`Daily` when the server uses another path. Attach a new private capture profile:
+`Daily` when the server uses another path. Default to one explicitly authorized
+user-scope capture profile, not per-workspace enrollment. Require capabilities
+`captureScopes["claude-plugin"]` containing `user`; an older client must not be
+treated as compatible. Explain that this opt-in captures meaningful sessions in
+new workspaces, with no workspace-file scan or upload. Existing project overrides
+are retained. Use the authorized session inbox as the default destination:
 
 ```bash
 python3 /absolute/public-client/current/bin/obsidian-mcp-native attach \
   --host claude-plugin --home /absolute/new-capture-profile \
-  --project /absolute/project --folder <authorized-session-folder> \
+  --scope user --folder <authorized-session-folder> \
   --daily-folder <declared-server-daily-folder> \
   --release-sha256 <independently-verified-release-json-sha256>
 ```
 
-The default project mode is `git` and requires the exact Git checkout root. For
+The public runtime creates isolated state automatically for new Git and non-Git
+workspaces outside their directories. No project registration is needed. User
+profiles do not accept `--project` or `--project-mode`. Existing overrides take
+precedence; exclusions win over both. Missing configuration must warn without
+blocking ordinary work, and must never fall back to a local writer.
+
+Only when a project-specific override is explicitly desired, omit `--scope user`
+and supply `--project /absolute/project`. The default project mode is `git` and
+requires the exact Git checkout root. For
 session capture in a plain directory, require the pinned runtime's capabilities
 to advertise `projectModes["claude-plugin"]` containing `directory`, then add
 `--project-mode directory` and supply that directory's canonical absolute path.
@@ -111,10 +124,14 @@ before the separately authorized handoff:
 
 ```bash
 python3 "${CLAUDE_PLUGIN_ROOT}/scripts/lib/capture-owner.py" handoff \
-  --owner mcp --project /absolute/project --profile /absolute/new-capture-profile \
+  --owner mcp --scope user --profile /absolute/new-capture-profile \
   --verification legacy-writers-stopped-and-history-inspected
 ```
 
+Use repeatable `--exclude-project /absolute/private-directory` during handoff for
+explicit no-capture directories; exclusions cover descendants and are retained
+until an explicit `--clear-exclusions`. For a project override instead, use
+`--project /absolute/project` and omit `--scope user` at handoff.
 Never supply that attestation unless it was actually established. Refused
 handoffs preserve evidence and leave admission closed; inspect `status`. Use
 `resume` only to cancel the incomplete transition and recover through the same

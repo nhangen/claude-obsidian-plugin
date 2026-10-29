@@ -145,7 +145,7 @@ if [ -z "$FILE_SIZE" ] || [ "$FILE_SIZE" -lt 200 ]; then
   exit 0
 fi
 
-if ! CAPTURE_REQUEST_ID=$(python3 "${SCRIPT_DIR}/lib/session-capture.py" --prepare "$VAULT_PATH" "$TRANSCRIPT_PATH" "$SESSION_ID"); then
+if ! CAPTURE_REQUEST_ID=$(python3 "${SCRIPT_DIR}/lib/session-capture.py" --prepare "$VAULT_PATH" "$TRANSCRIPT_PATH" "$SESSION_ID" "$CAPTURE_CWD"); then
   exit 0
 fi
 
