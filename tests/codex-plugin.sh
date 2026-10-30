@@ -23,7 +23,7 @@ marketplace_legacy = json.loads((root / ".claude-plugin/marketplace.json").read_
 assert codex["version"] == claude["version"] == marketplace_legacy["plugins"][0]["version"]
 assert codex["skills"] == "./skills/"
 assert "hooks" not in codex
-assert [p.name for p in (package / "skills").iterdir() if p.is_dir()] == ["commit-capture"]
+assert sorted(p.name for p in (package / "skills").iterdir() if p.is_dir()) == ["commit-capture", "setup"]
 assert (package / "README.md").is_file()
 
 skill_root = package / "skills/commit-capture"
@@ -125,6 +125,15 @@ PY
 INSTALLED="$CODEX_HOME_DIR/plugins/cache/nhangen-codex-plugins/obsidian/$VERSION"
 SKILL_ROOT="$INSTALLED/skills/commit-capture"
 [ -f "$SKILL_ROOT/SKILL.md" ] || fail "installed skill is missing"
+[ -f "$INSTALLED/skills/setup/SKILL.md" ] || fail "installed setup skill is missing"
+[ -f "$INSTALLED/skills/setup/scripts/client-v0.3.0.pin.json" ] || fail "installed runtime pins are missing"
+python3 -I -B "$INSTALLED/skills/setup/scripts/bootstrap-runtime.py" --help \
+  >"$TMP/setup-help.out" || fail "installed setup entrypoint failed"
+grep -q -- '--apply' "$TMP/setup-help.out" || fail "installed setup has no explicit apply option"
+CODEX_BOOTSTRAP_INSTALLED_SKILL="$INSTALLED/skills/setup" \
+  PYTHONDONTWRITEBYTECODE=1 python3 "$ROOT_DIR/tests/codex-runtime-bootstrap.test.py" \
+  BootstrapTest.test_installed_entrypoint_preview_does_not_write_persistent_state \
+  || fail "installed setup preview failed without checkout dependencies"
 [ ! -e "$INSTALLED/hooks/hooks.json" ] || fail "manual Codex package unexpectedly installed hooks"
 
 REPO="$TMP/repo"

@@ -1,7 +1,7 @@
 {
   "name": "obsidian",
   "version": "1.26.0",
-  "description": "Safe Obsidian commit-context capture for Codex.",
+  "description": "Obsidian commit-context capture, verified runtime setup, and guided MCP connection onboarding for Codex.",
   "author": {
     "name": "nhangen"
   },
@@ -11,9 +11,9 @@
   "keywords": ["obsidian", "notes", "vault", "commit-capture", "codex"],
   "skills": "./skills/",
   "interface": {
-    "displayName": "Obsidian Commit Capture",
-    "shortDescription": "Capture Codex commit context in Obsidian",
-    "longDescription": "Preserve the goal, investigation, decisions, and loose ends behind each successful Codex git commit in an Obsidian vault.",
+    "displayName": "Obsidian",
+    "shortDescription": "Capture commit context and set up Obsidian connections",
+    "longDescription": "Preserve Codex commit context, verify the public runtime, and guide separately authorized MCP registration through the Codex CLI with credential references. Existing approval policy is preserved; native capture, writer handoff, and hooks remain separate.",
     "developerName": "nhangen",
     "category": "Productivity",
     "capabilities": ["Write"],
