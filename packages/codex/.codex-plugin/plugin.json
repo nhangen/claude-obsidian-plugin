@@ -1,7 +1,7 @@
 {
   "name": "obsidian",
   "version": "1.26.0",
-  "description": "Obsidian commit-context capture and verified public runtime setup for Codex.",
+  "description": "Obsidian commit-context capture, verified runtime setup, and guided MCP connection onboarding for Codex.",
   "author": {
     "name": "nhangen"
   },
@@ -12,8 +12,8 @@
   "skills": "./skills/",
   "interface": {
     "displayName": "Obsidian",
-    "shortDescription": "Capture commit context and set up the public runtime",
-    "longDescription": "Preserve Codex commit context in Obsidian and preview or apply verified public runtime installation. Runtime setup does not register servers, activate native profiles, transfer capture ownership, or install hooks.",
+    "shortDescription": "Capture commit context and set up Obsidian connections",
+    "longDescription": "Preserve Codex commit context, verify the public runtime, and guide separately authorized MCP registration through the Codex CLI with credential references. Existing approval policy is preserved; native capture, writer handoff, and hooks remain separate.",
     "developerName": "nhangen",
     "category": "Productivity",
     "capabilities": ["Write"],

@@ -16,9 +16,26 @@ directory containing the pinned installer, release metadata, and archive.
 `--apply` is present. Reinstallation verifies/reuses immutable content and
 retains disabled state. Failed integrity or recovery checks stop setup.
 
-Runtime setup does not register an MCP server, configure credentials, activate
-a native Codex profile, transfer writer ownership, or install hooks. A
-successful runtime install alone does not enable MCP or automatic capture.
+Runtime lifecycle commands do not register MCP servers. After separately
+authorized connection setup, the `setup` skill guides the existing Codex CLI to
+register the verified public read/write launchers in the exact intended
+`CODEX_HOME`. Its examples use existing private credential-file references or
+macOS keychain identifiers, never raw tokens. The public runtime resolves them.
+
+Both server names are inspected before any addition and rechecked immediately
+before it. Matching registrations are reused; differing entries, inspection
+failures, and concurrent changes stop setup. Inspection prints only presence or
+a match verdict, never full registration JSON. These checks are not an atomic
+create-only guarantee; stop when another configuration writer is active.
+
+Existing approval policy is preserved. Routine-write host authorization is
+separate and is not silently granted for new entries. Reconnect and verify
+discovery plus a bounded read before calling the connection successful. No
+credentials, native capture profiles, ownership handoff, hooks, or local keeper
+fallback are installed by connection setup. Automatic capture stays unchanged.
+The connection examples are smoke-checked with actual Codex CLI 0.162.1 and 0.164.0 in an
+isolated HOME, CODEX_HOME, and working directory, using mock references without
+calling credential providers.
 
 Commit capture remains a legacy compatibility projection. Its keeper honors the shared
 host-local capture owner and refuses local writes under MCP, disabled or
