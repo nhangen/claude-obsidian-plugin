@@ -189,8 +189,13 @@ class BootstrapTest(unittest.TestCase):
     def test_existing_installer_is_never_executed_and_tamper_is_refused(self):
         self.run_setup("--apply")
         installed = self.prefix / "current/bin/obsidian-mcp-client-install"
-        installed.write_text("raise SystemExit('SECRET_SENTINEL')\n")
+        marker = self.home / "cached-installer-executed"
+        installed.write_text(
+            f"from pathlib import Path\nPath({str(marker)!r}).touch()\n"
+            "raise SystemExit('SECRET_SENTINEL')\n"
+        )
         result = self.run_setup("--reinstall", "--apply", ok=False)
+        self.assertFalse(marker.exists(), "cached installer was executed")
         self.assertNotIn("SECRET_SENTINEL", result.stderr)
         self.assertIn("installer", result.stderr)
 
