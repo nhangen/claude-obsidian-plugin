@@ -1,8 +1,26 @@
-# Obsidian Commit Capture for Codex
+# Obsidian for Codex
 
-This Codex package exposes one skill: `commit-capture`. After a successful Git commit, it obtains sanitized metadata through its bundled `commit-meta.sh`, writes 3-8 conversation-context bullets through its bundled keeper, and prevents duplicate appends with `--skip-if-hash`.
+This Codex package exposes `commit-capture` and `setup`. After a successful Git commit, `commit-capture` obtains sanitized metadata through its bundled `commit-meta.sh`, writes 3-8 conversation-context bullets through its bundled keeper, and prevents duplicate appends with `--skip-if-hash`.
 
-This remains a legacy compatibility projection. Its keeper honors the shared
+The `setup` skill verifies, installs, or reuses the public client runtime as a
+plugin implementation dependency. It resolves its helper from the installed
+skill, authenticates fixed `nhangen/obsidian-mcp` `client-v0.3.0` release pins,
+and delegates lifecycle to a freshly verified standalone public installer.
+It needs Python 3.11+ on macOS, Linux, or WSL, without a private tools checkout.
+
+Setup previews by default. Run the installed skill's
+`scripts/bootstrap-runtime.py` with `--apply` to apply an authorized change.
+`--prefix` selects the runtime prefix, and `--assets` selects an offline
+directory containing the pinned installer, release metadata, and archive.
+`--reinstall`, `--disable`, `--enable`, and `--rollback` also preview unless
+`--apply` is present. Reinstallation verifies/reuses immutable content and
+retains disabled state. Failed integrity or recovery checks stop setup.
+
+Runtime setup does not register an MCP server, configure credentials, activate
+a native Codex profile, transfer writer ownership, or install hooks. A
+successful runtime install alone does not enable MCP or automatic capture.
+
+Commit capture remains a legacy compatibility projection. Its keeper honors the shared
 host-local capture owner and refuses local writes under MCP, disabled or
 draining ownership. It does not infer MCP activation from connection setup or
 translate Claude plugin profiles into Codex profiles. MCP capture requires the
