@@ -8,6 +8,31 @@ Long agent sessions and the commits they produce hold context that's gone the mo
 
 ## How it works
 
+### Server and plugin client
+
+The Obsidian plugin is the user-facing client for supported AI hosts, including
+Claude Code and Codex. The independent [Obsidian MCP server](https://github.com/nhangen/obsidian-mcp)
+runs where the vault is accessible; remote users do not need a local vault or
+the private llm-tools harness. Compatibility depends on the host's integration,
+not the model it runs.
+
+The intended setup is **install the plugin, connect to the server, and configure
+capture once**. Public transport and capture helpers are implementation
+dependencies, not a third product users should have to install manually. Plugin
+setup should verify and manage a compatible runtime while preserving credentials,
+unrelated settings, pending captures and explicit writer ownership. Completing
+that unified onboarding is tracked in [#254](https://github.com/nhangen/claude-obsidian-plugin/issues/254);
+this documentation does not claim it is already available on every host.
+
+Today, Claude's remote setup can install/reuse the verified runtime, but automatic
+capture still requires its separate, explicit ownership handoff. The packaged
+Codex integration provides a legacy commit-capture skill; native MCP capture
+currently uses a separately configured and verified Codex profile. Installing the
+Codex plugin alone does not activate that profile or Claude's hooks. OpenCode
+supports direct MCP tools, not automatic capture parity. See the host guides
+below for the shipped boundaries. Standard MCP connections and advanced direct
+runtime setup remain supported without the plugin.
+
 Client capture entry points require Bash and Python 3.11+ with POSIX `fcntl`
 locking on macOS, Linux or WSL, including the guarded legacy keeper. Native
 Windows Python is not supported by this writer guard. Install these prerequisites
@@ -473,7 +498,7 @@ obsidian.local.md.example     Config template (real config lives at the stable p
 
 Claude Code supplies `${CLAUDE_PLUGIN_ROOT}`. The Codex skill resolves its bundled helpers relative to its installed `SKILL.md`; neither integration searches versioned cache paths. User config is resolved separately by `scripts/lib/resolve-config.sh` (stable path first, plugin root as legacy fallback), so updating the plugin never strands the config.
 
-## Standalone Obsidian MCP Client & Native Integrations
+## MCP connection and advanced runtime setup
 
 For a shared remote server, run `/obsidian:setup` and select remote MCP. The
 wizard reuses the verified public client and registers separate read/write tools
@@ -496,7 +521,13 @@ Obsidian MCP can be used completely independently of the Claude plugin, local va
   - Native capture orchestration (`bin/obsidian-mcp-native`) for host profiles.
   - Managed client installer (`bin/obsidian-mcp-client-install`) with cryptographic release verification, atomic transitions, disable/enable, and rollback.
 
-### Client Packaging & Installation
+### Advanced runtime packaging and installation
+
+These are low-level dependency/operator instructions, not an additional normal
+plugin installation step. The public runtime is maintained in
+[`nhangen/obsidian-mcp`](https://github.com/nhangen/obsidian-mcp/tree/master/packages/client);
+use its verified releases for plugin setup. The retained packaging recipe below
+is for development and compatibility work, not the public release pipeline.
 
 To pack and install the standalone client from public source:
 
