@@ -12,7 +12,7 @@ Run it with Python 3.11+ on macOS, Linux, or WSL. Use that exact installed
 helper path; do not search plugin caches or depend on a source checkout.
 
 Run the helper without `--apply` first. It authenticates the three pinned
-public `nhangen/obsidian-mcp` `client-v0.3.0` release assets, safely stages the
+public `nhangen/obsidian-mcp` `client-v0.3.1` release assets, safely stages the
 bundle, and asks the verified standalone public installer for a dry run.
 Report the before/after runtime slots. If installation is already authorized,
 continue with `--apply`; otherwise obtain approval for the displayed change.

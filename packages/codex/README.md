@@ -4,7 +4,7 @@ This Codex package exposes `commit-capture` and `setup`. After a successful Git 
 
 The `setup` skill verifies, installs, or reuses the public client runtime as a
 plugin implementation dependency. It resolves its helper from the installed
-skill, authenticates fixed `nhangen/obsidian-mcp` `client-v0.3.0` release pins,
+skill, authenticates fixed `nhangen/obsidian-mcp` `client-v0.3.1` release pins,
 and delegates lifecycle to a freshly verified standalone public installer.
 It needs Python 3.11+ on macOS, Linux, or WSL, without a private tools checkout.
 
