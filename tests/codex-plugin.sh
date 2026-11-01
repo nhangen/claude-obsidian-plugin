@@ -126,7 +126,7 @@ INSTALLED="$CODEX_HOME_DIR/plugins/cache/nhangen-codex-plugins/obsidian/$VERSION
 SKILL_ROOT="$INSTALLED/skills/commit-capture"
 [ -f "$SKILL_ROOT/SKILL.md" ] || fail "installed skill is missing"
 [ -f "$INSTALLED/skills/setup/SKILL.md" ] || fail "installed setup skill is missing"
-[ -f "$INSTALLED/skills/setup/scripts/client-v0.3.0.pin.json" ] || fail "installed runtime pins are missing"
+[ -f "$INSTALLED/skills/setup/scripts/client-v0.3.1.pin.json" ] || fail "installed runtime pins are missing"
 python3 -I -B "$INSTALLED/skills/setup/scripts/bootstrap-runtime.py" --help \
   >"$TMP/setup-help.out" || fail "installed setup entrypoint failed"
 grep -q -- '--apply' "$TMP/setup-help.out" || fail "installed setup has no explicit apply option"

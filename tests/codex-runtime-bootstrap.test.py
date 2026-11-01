@@ -69,7 +69,7 @@ class BootstrapTest(unittest.TestCase):
             self.skill,
         )
         self.script = self.skill / "scripts/bootstrap-runtime.py"
-        self.pin_path = self.skill / "scripts/client-v0.3.0.pin.json"
+        self.pin_path = self.skill / "scripts/client-v0.3.1.pin.json"
         self.pin = json.loads(self.pin_path.read_bytes())
         self.assets = self.root / "assets"
         self.assets.mkdir()
@@ -311,7 +311,7 @@ class Response(io.BytesIO):
 class Opener:
     def open(self, request, timeout):
         assert 0 < timeout <= 10
-        assert request.full_url.startswith('https://github.com/nhangen/obsidian-mcp/releases/download/client-v0.3.0/')
+        assert request.full_url.startswith('https://github.com/nhangen/obsidian-mcp/releases/download/client-v0.3.1/')
         name = request.full_url.rsplit('/', 1)[-1]
         data = (assets / name).read_bytes()
         behavior = {behavior!r}
@@ -608,7 +608,7 @@ class PublicReleaseTest(unittest.TestCase):
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
                 if not args:
                     self.assertTrue(json.loads(result.stdout)["dryRun"])
-            pin = json.loads((skill / "scripts/client-v0.3.0.pin.json").read_bytes())
+            pin = json.loads((skill / "scripts/client-v0.3.1.pin.json").read_bytes())
             self.assertEqual((prefix / "current").resolve().name, pin["releaseId"])
             self.assertFalse((home / ".config").exists())
 

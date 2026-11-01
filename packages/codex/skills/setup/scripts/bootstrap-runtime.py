@@ -25,7 +25,7 @@ import urllib.request
 
 
 REPOSITORY = "nhangen/obsidian-mcp"
-TAG = "client-v0.3.0"
+TAG = "client-v0.3.1"
 INSTALLER = "obsidian-mcp-client-install"
 METADATA = "obsidian-mcp-client.release.json"
 ARCHIVE = "obsidian-mcp-client.tgz"
