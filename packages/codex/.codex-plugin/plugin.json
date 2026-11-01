@@ -1,6 +1,6 @@
 {
   "name": "obsidian",
-  "version": "1.26.0",
+  "version": "1.27.0",
   "description": "Obsidian commit-context capture, verified runtime setup, and guided MCP connection onboarding for Codex.",
   "author": {
     "name": "nhangen"
