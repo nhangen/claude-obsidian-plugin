@@ -11,4 +11,6 @@ library = (
     / "skills/commit-capture/scripts/lib/capture-owner.py"
 )
 runtime = runpy.run_path(str(library))
+if sys.argv[1:2] == ["codex-execute"]:
+    sys.exit(runtime["codex_execute_main"](sys.argv[2:]))
 sys.exit(runtime["codex_main"]())

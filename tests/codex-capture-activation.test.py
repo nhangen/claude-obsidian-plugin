@@ -5,6 +5,9 @@ import fcntl
 import hashlib
 import json
 import os
+import runpy
+import signal
+import time
 from pathlib import Path
 import shutil
 import shlex
@@ -145,7 +148,11 @@ class ActivationTest(unittest.TestCase):
         return json.loads(result.stdout or "{}")
 
     def states(self):
-        return list((self.profile / "workspaces").glob("*/capture-state/*.json"))
+        return [
+            path
+            for path in (self.profile / "workspaces").glob("*/capture-state/*.json")
+            if path.name != "active.json"
+        ]
 
     def snapshot(self, directory=None):
         return {
@@ -533,6 +540,691 @@ print(json.dumps(results))
             ],
             ["deny", None, "deny"],
         )
+
+    def guarded_fixture(self, commit=False, commit_command="git commit -m fixture"):
+        runtime = self.directory / "executor-runtime"
+        shutil.copytree(self.bundle, runtime)
+        result = self.activation(bundle=str(runtime))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.env.update(
+            GIT_AUTHOR_NAME="Fixture",
+            GIT_AUTHOR_EMAIL="fixture@example.invalid",
+            GIT_COMMITTER_NAME="Fixture",
+            GIT_COMMITTER_EMAIL="fixture@example.invalid",
+        )
+        for arguments in (
+            ("config", "commit.gpgsign", "false"),
+            ("config", "core.hooksPath", str(self.directory / "no-hooks")),
+            ("remote", "add", "origin", "https://github.com/nhangen/guard-fixture.git"),
+        ):
+            subprocess.run(
+                ["git", "-C", str(self.project), *arguments],
+                env=self.env,
+                check=True,
+                capture_output=True,
+            )
+        prompt = self.event("UserPromptSubmit", prompt="Guarded fixture work")
+        if not commit:
+            text = prompt["hookSpecificOutput"]["additionalContext"]
+            return runtime, text.split("acknowledge explicitly with ", 1)[1].split(
+                " (or user_requested_no_capture)", 1
+            )[0]
+        (self.project / "file.txt").write_text("Fixture work\n")
+        subprocess.run(
+            ["git", "-C", str(self.project), "add", "file.txt"],
+            env=self.env,
+            check=True,
+            capture_output=True,
+        )
+        output = self.event(
+            "PreToolUse",
+            tool_name="Bash",
+            tool_use_id="guard-commit",
+            tool_input={"command": commit_command},
+        )
+        return runtime, output["hookSpecificOutput"]["updatedInput"]["command"]
+
+    def run_emitted(self, command, payload=None):
+        return subprocess.run(
+            shlex.split(command),
+            input=payload,
+            env=self.env,
+            cwd=self.project,
+            capture_output=True,
+            text=True,
+            timeout=40,
+        )
+
+    def run_emitted_open_stdin(self, command, timeout=8):
+        process = subprocess.Popen(
+            shlex.split(command),
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            env=self.env,
+            cwd=self.project,
+            start_new_session=True,
+        )
+        try:
+            process.wait(timeout=timeout)
+            self.assertFalse(process.stdin.closed)
+            return subprocess.CompletedProcess(
+                process.args,
+                process.returncode,
+                process.stdout.read().decode(),
+                process.stderr.read().decode(),
+            )
+        finally:
+            if process.poll() is None:
+                process.terminate()
+                process.wait(timeout=5)
+            process.stdin.close()
+            process.stdout.close()
+            process.stderr.close()
+
+    def guarded_prepare_fixture(self):
+        _, command = self.guarded_fixture(commit=True)
+        result = self.run_emitted(command)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        output = self.event(
+            "PostToolUse",
+            tool_name="Bash",
+            tool_use_id="guard-commit",
+            tool_input={"command": command},
+            tool_response=result.stdout,
+        )
+        return (
+            output["hookSpecificOutput"]["additionalContext"]
+            .split(" to ", 1)[1]
+            .split(", then call", 1)[0]
+        )
+
+    def test_guarded_executor_completes_with_stdin_producer_still_open(self):
+        _, command = self.guarded_fixture(commit=True)
+        result = self.run_emitted_open_stdin(command)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("fixture", result.stdout)
+        self.assertEqual(
+            subprocess.check_output(
+                ["git", "-C", str(self.project), "log", "-1", "--format=%s"],
+                env=self.env,
+                text=True,
+            ).strip(),
+            "fixture",
+        )
+
+    def test_guarded_recovery_completes_with_stdin_producer_still_open(self):
+        _, command = self.guarded_fixture()
+        result = self.run_emitted_open_stdin(command)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        state = json.loads(self.states()[0].read_bytes())
+        self.assertEqual(state["disposition"], "skipped_by_policy")
+
+    def test_guarded_executor_preserves_git_stdin(self):
+        _, command = self.guarded_fixture(commit=True, commit_command="git commit -F -")
+        result = self.run_emitted(command, "Message from executor stdin\n")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            subprocess.check_output(
+                ["git", "-C", str(self.project), "log", "-1", "--format=%s"],
+                env=self.env,
+                text=True,
+            ).strip(),
+            "Message from executor stdin",
+        )
+
+    def test_guarded_prepare_bounds_open_producer_time_and_input_bytes(self):
+        command = self.guarded_prepare_fixture()
+        before = self.snapshot(self.profile)
+        started = time.monotonic()
+        result = self.run_emitted_open_stdin(command)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("input timed out", result.stderr)
+        self.assertLess(time.monotonic() - started, 8)
+        self.assertEqual(self.snapshot(self.profile), before)
+        result = self.run_emitted(command, "x" * 262145)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("input exceeds", result.stderr)
+        self.assertEqual(self.snapshot(self.profile), before)
+
+    def test_emitted_executor_rechecks_runtime_before_execution(self):
+        runtime, command = self.guarded_fixture(commit=True)
+        marker = self.directory / "executor-unverified"
+        (runtime / "bin/obsidian-mcp-native").write_text(
+            "from pathlib import Path\nPath(" + repr(str(marker)) + ").touch()\n"
+        )
+        before = self.snapshot(self.profile)
+        result = self.run_emitted(command)
+        self.assertFalse(marker.exists(), "emitted executor ran unverified native code")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(self.snapshot(self.profile), before)
+
+    def test_emitted_recovery_rechecks_runtime_before_execution(self):
+        runtime, command = self.guarded_fixture()
+        marker = self.directory / "recovery-unverified"
+        (runtime / "bin/obsidian-mcp-native").write_text(
+            "from pathlib import Path\nPath(" + repr(str(marker)) + ").touch()\n"
+        )
+        before = self.snapshot(self.profile)
+        result = self.run_emitted(command)
+        self.assertFalse(marker.exists(), "emitted recovery ran unverified native code")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(self.snapshot(self.profile), before)
+
+    def test_guarded_commit_roundtrip_preparation_and_receipt(self):
+        _, command = self.guarded_fixture(commit=True)
+        self.assertIn("codex-execute", command)
+        self.assertIn("-I", shlex.split(command))
+        result = self.run_emitted(command)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("fixture", result.stdout)
+        repeated = self.run_emitted(command)
+        self.assertEqual(repeated.returncode, 0, repeated.stderr)
+        count = subprocess.check_output(
+            ["git", "-C", str(self.project), "rev-list", "--count", "HEAD"],
+            env=self.env,
+            text=True,
+        ).strip()
+        self.assertEqual(count, "1")
+        output = self.event(
+            "PostToolUse",
+            tool_name="Bash",
+            tool_use_id="guard-commit",
+            tool_input={"command": command},
+            tool_response=result.stdout,
+        )
+        state_path = self.states()[0]
+        state = json.loads(state_path.read_bytes())
+        self.assertEqual(len(state["commits"]), 1)
+        self.assertEqual(state["snapshots"], {})
+        guidance = output["hookSpecificOutput"]["additionalContext"]
+        prepare = guidance.split(" to ", 1)[1].split(", then call", 1)[0]
+        self.assertIn("codex-execute", prepare)
+        prepared = self.run_emitted(prepare, json.dumps({"context": ["Fixture fact"]}))
+        self.assertEqual(prepared.returncode, 0, prepared.stderr)
+        arguments = json.loads(prepared.stdout)["arguments"]
+        tool = dict(
+            tool_name="mcp__obsidian_write__obsidian_daily_append",
+            tool_use_id="guard-receipt",
+            tool_input=arguments,
+        )
+        self.assertEqual(self.event("PreToolUse", **tool), {})
+        receipt = dict(
+            status="committed",
+            request_id="fixture",
+            idempotency_key=arguments["idempotency_key"],
+            path=arguments["target_path"],
+            affected_paths=[arguments["target_path"]],
+            warnings=[],
+            recovery=dict(required=False, action=""),
+            error_code=None,
+            retryable=False,
+        )
+        self.event("PostToolUse", **tool, tool_response={"structuredContent": receipt})
+        state = json.loads(state_path.read_bytes())
+        self.assertEqual(next(iter(state["commits"].values()))["status"], "committed")
+
+    def test_guarded_failed_commit_preserves_exit_and_stderr(self):
+        _, command = self.guarded_fixture(commit=True)
+        hooks = self.directory / "no-hooks"
+        hooks.mkdir()
+        hook = hooks / "pre-commit"
+        hook.write_text("#!/bin/sh\nprintf 'fixture-rejection\\n' >&2\nexit 7\n")
+        hook.chmod(0o700)
+        result = self.run_emitted(command)
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertIn("fixture-rejection", result.stderr)
+        self.event(
+            "PostToolUse",
+            tool_name="Bash",
+            tool_use_id="guard-commit",
+            tool_input={"command": command},
+            tool_response=result.stderr,
+        )
+        state = json.loads(self.states()[0].read_bytes())
+        self.assertEqual(state["snapshots"], {})
+        self.assertEqual(state["commits"], {})
+
+    def test_guarded_recovery_skip_and_late_admission_changes(self):
+        _, command = self.guarded_fixture()
+        record_path = self.record_path()
+        original = record_path.read_bytes()
+        before = self.snapshot(self.profile)
+        for failure in (
+            "disabled",
+            "draining",
+            "generation",
+            "delivery",
+            "global",
+            "global-generation",
+            "excluded",
+            "binding",
+        ):
+            with self.subTest(failure=failure):
+                record = json.loads(original)
+                if failure == "disabled":
+                    record["owner"] = "disabled"
+                elif failure == "draining":
+                    record["phase"] = "draining"
+                elif failure == "generation":
+                    record["generation"] += 1
+                elif failure == "delivery":
+                    record["delivery"] = "managed"
+                elif failure == "binding":
+                    record["profile"] = str(self.directory / "retargeted")
+                    record["retained_profiles"].append(
+                        {
+                            key: record[key]
+                            for key in (
+                                "profile",
+                                "bundle",
+                                "externalReleaseSha256",
+                                "releaseId",
+                                "python",
+                            )
+                        }
+                    )
+                elif failure == "global":
+                    self.global_owner(owner="disabled")
+                elif failure == "global-generation":
+                    self.global_owner()
+                elif failure == "excluded":
+                    self.global_owner(
+                        generation=0, excluded_projects=[str(self.project)]
+                    )
+                record_path.write_text(json.dumps(record))
+                result = self.run_emitted(command)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(self.snapshot(self.profile), before)
+                record_path.write_bytes(original)
+                (self.state / "capture-ownership/owner.json").unlink(missing_ok=True)
+        result = self.run_emitted(command)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            json.loads(self.states()[0].read_bytes())["disposition"],
+            "skipped_by_policy",
+        )
+
+    def test_guarded_session_retry_and_request_keep_frozen_arguments(self):
+        _, command = self.guarded_fixture()
+        path = self.states()[0]
+        plan = json.loads(path.read_bytes())["session_save"]
+        arguments = dict(
+            title=plan["title"],
+            folder_hint=plan["folder"],
+            body=json.dumps(
+                {
+                    "reason": "Frozen facts with request --home and quoted JSON",
+                    "wrapped": shlex.join(
+                        [
+                            str(Path(sys.executable).resolve()),
+                            str(
+                                self.directory
+                                / "executor-runtime/bin/obsidian-mcp-native"
+                            ),
+                            "request",
+                        ]
+                    ),
+                }
+            ),
+            resolved=True,
+            session_link_date=plan["date"],
+            idempotency_key=plan["idempotency_key"],
+        )
+        tool = dict(
+            tool_name="mcp__obsidian_write__obsidian_keeper_save",
+            tool_use_id="guard-session",
+            tool_input=arguments,
+        )
+        self.event("PreToolUse", **tool)
+        receipt = dict(
+            status="partial",
+            request_id="fixture",
+            idempotency_key=plan["idempotency_key"],
+            path=plan["path"],
+            affected_paths=[plan["path"]],
+            warnings=[],
+            recovery=dict(required=True, action="inspect fixture"),
+            error_code="PARTIAL",
+            retryable=True,
+        )
+        self.event("PostToolUse", **tool, tool_response={"structuredContent": receipt})
+        output = self.event("Stop", stop_hook_active=True)
+        text = output["systemMessage"]
+        retry = text.split("authorize an exact retry with ", 1)[1].split(
+            ". Use the returned arguments", 1
+        )[0]
+        self.assertIn("codex-execute", retry)
+        retried = self.run_emitted(retry)
+        self.assertEqual(retried.returncode, 0, retried.stderr)
+        self.assertEqual(json.loads(retried.stdout), arguments)
+        output = self.event("Stop", stop_hook_active=True)
+        request = (
+            output["systemMessage"]
+            .split("Retrieve the frozen keeper save arguments with ", 1)[1]
+            .split("; call ", 1)[0]
+        )
+        requested = self.run_emitted(request)
+        self.assertEqual(requested.returncode, 0, requested.stderr)
+        self.assertEqual(json.loads(requested.stdout), arguments)
+        self.assertEqual(json.loads(path.read_bytes())["disposition"], "pending")
+
+    def test_guard_rejects_unknown_duplicate_and_retargeted_native_arguments(self):
+        _, command = self.guarded_fixture()
+        words = shlex.split(command)
+        boundary = words.index("--")
+        prefix, native = words[: boundary + 1], words[boundary + 1 :]
+        before = self.snapshot(self.profile)
+        malformed = [
+            ["run", *native[1:]],
+            [*native, "--bundle", str(self.bundle)],
+            [*native, "--reason", "no_meaningful_work"],
+            [*native[:-1], "no_meaningful_work; touch fixture-marker"],
+            [*native, ";", "touch", "fixture-marker"],
+            [native[0], "--home", str(self.directory), *native[3:]],
+            [native[0], *native[1:3], "--session", "f" * 64, *native[5:]],
+        ]
+        for arguments in malformed:
+            with self.subTest(arguments=arguments):
+                result = self.run_emitted(shlex.join([*prefix, *arguments]))
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(self.snapshot(self.profile), before)
+                self.assertFalse((self.project / "fixture-marker").exists())
+
+    def test_guard_rejects_profile_and_verifier_changes_after_emission(self):
+        _, command = self.guarded_fixture()
+        before = self.snapshot(self.profile)
+        profile = self.profile / "capture-profile.json"
+        descriptor = profile.read_bytes()
+        value = json.loads(descriptor)
+        value["python"] = "/untrusted/python"
+        profile.write_text(json.dumps(value))
+        result = self.run_emitted(command)
+        self.assertNotEqual(result.returncode, 0)
+        profile.write_bytes(descriptor)
+        verifier = (
+            self.installed
+            / "skills/commit-capture/scripts/lib/obsidian-mcp-client-install"
+        )
+        marker = self.directory / "verifier-executed"
+        verifier.write_text(
+            "from pathlib import Path\nPath(" + repr(str(marker)) + ").touch()\n"
+        )
+        result = self.run_emitted(command)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse(marker.exists())
+        self.assertEqual(self.snapshot(self.profile), before)
+
+    def test_guard_refuses_after_failed_disable_and_global_handoff(self):
+        _, command = self.guarded_fixture(commit=True)
+        before = self.snapshot(self.profile)
+        result = self.cli("codex-disable", "--apply", "--verification", VERIFICATION)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(
+            json.loads(self.record_path().read_bytes())["phase"], "draining"
+        )
+        result = self.run_emitted(command)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(self.snapshot(self.profile), before)
+        result = self.handoff()
+        self.assertNotEqual(result.returncode, 0)
+        result = self.run_emitted(command)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(self.snapshot(self.profile), before)
+
+    def test_guard_holds_shared_lease_during_long_native_commit(self):
+        _, command = self.guarded_fixture(commit=True)
+        hooks = self.directory / "no-hooks"
+        hooks.mkdir()
+        captured = self.directory / "admission-attempt.txt"
+        library = self.installed / "skills/commit-capture/scripts/lib/capture-owner.py"
+        attempt = shlex.join(
+            [
+                "/usr/bin/python3",
+                "-I",
+                "-B",
+                str(library),
+                "handoff",
+                "--owner",
+                "disabled",
+                "--verification",
+                VERIFICATION,
+            ]
+        )
+        hook = hooks / "pre-commit"
+        hook.write_text(
+            "#!/bin/sh\n"
+            + attempt
+            + " >"
+            + shlex.quote(str(captured))
+            + ' 2>&1\nresult=$?\n[ "$result" -ne 0 ] || exit 71\n/usr/bin/grep -q busy '
+            + shlex.quote(str(captured))
+            + " || exit 72\n/bin/sleep 31\nprintf 'long-fixture-check\\n' >&2\n"
+        )
+        hook.chmod(0o700)
+        result = self.run_emitted(command)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("long-fixture-check", result.stderr)
+        self.assertIn("busy", captured.read_text())
+
+    def test_guard_sigterm_stops_owned_executor_before_releasing_lease(self):
+        _, command = self.guarded_fixture(commit=True)
+        hooks = self.directory / "no-hooks"
+        hooks.mkdir()
+        started = self.directory / "owned-group"
+        marker = self.directory / "orphan-continued"
+        hook = hooks / "pre-commit"
+        hook.write_text(
+            "#!/bin/sh\n/bin/ps -o pgid= -p $$ > "
+            + shlex.quote(str(started))
+            + "\n/bin/sleep 2\ntouch "
+            + shlex.quote(str(marker))
+            + "\n/bin/sleep 8\n"
+        )
+        hook.chmod(0o700)
+        process = subprocess.Popen(
+            shlex.split(command),
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            env=self.env,
+            cwd=self.project,
+            start_new_session=True,
+        )
+        group = None
+        try:
+            deadline = time.monotonic() + 10
+            while (
+                not started.exists()
+                and process.poll() is None
+                and time.monotonic() < deadline
+            ):
+                time.sleep(0.02)
+            self.assertTrue(
+                started.exists(), "owned native executor did not reach the fixture hook"
+            )
+            group = int(started.read_text().strip())
+            self.assertNotIn(group, (os.getpgrp(), process.pid))
+            process.terminate()
+            process.wait(timeout=5)
+            lock_available = True
+            with (self.state / "capture-ownership/admission.lock").open("r+") as lock:
+                try:
+                    fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except BlockingIOError:
+                    lock_available = False
+            time.sleep(2.2)
+            self.assertFalse(
+                marker.exists(), "executor continued after its guard was terminated"
+            )
+            self.assertTrue(
+                lock_available, "terminated guard left an executor holding admission"
+            )
+            self.assertEqual(process.returncode, 143)
+            state = json.loads(self.states()[0].read_bytes())
+            self.assertTrue(state["snapshots"])
+            self.assertEqual(state["commits"], {})
+        finally:
+            if group is not None:
+                try:
+                    os.killpg(group, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+            if process.poll() is None:
+                process.kill()
+            process.communicate(timeout=5)
+
+    def test_guarded_status_takeover_and_snapshot_resolution_guidance(self):
+        _, command = self.guarded_fixture(commit=True)
+        words = shlex.split(command)
+        boundary = words.index("--")
+        prefix, native = words[: boundary + 1], words[boundary + 1 :]
+        output = self.event("Stop", stop_hook_active=True)
+        self.assertIn(
+            shlex.join([*prefix, "resolve-snapshot"]), output["systemMessage"]
+        )
+        self.event(
+            "UserPromptSubmit",
+            session_id="competing-session",
+            turn_id="competing-turn",
+            prompt="Competing fixture work",
+        )
+        output = self.event(
+            "PreToolUse",
+            session_id="competing-session",
+            turn_id="competing-turn",
+            tool_name="Bash",
+            tool_use_id="competing-commit",
+            tool_input={"command": "git commit -m competing"},
+        )
+        text = output["hookSpecificOutput"]["permissionDecisionReason"]
+        status = text.split("Inspect it with ", 1)[1].split(", then rescue", 1)[0]
+        takeover = text.split("then rescue interrupted ownership with ", 1)[
+            1
+        ].removesuffix(".")
+        inspected = self.run_emitted(status)
+        self.assertEqual(inspected.returncode, 0, inspected.stderr)
+        self.assertTrue(json.loads(inspected.stdout)["snapshots"])
+        for snapshot in json.loads(inspected.stdout)["snapshots"].values():
+            self.assertIn("codex-execute", snapshot["wrapped"])
+        resolved = self.run_emitted(
+            shlex.join(
+                [
+                    *prefix,
+                    "resolve-snapshot",
+                    *native[1:],
+                    "--verification",
+                    "command-stopped-and-history-inspected",
+                ]
+            )
+        )
+        self.assertEqual(resolved.returncode, 0, resolved.stderr)
+        self.assertEqual(json.loads(resolved.stdout)["status"], "not_captured")
+        self.event(
+            "PreToolUse",
+            tool_name="Bash",
+            tool_use_id="guard-commit-again",
+            tool_input={"command": "git commit -m fixture"},
+        )
+        recovered = self.run_emitted(takeover)
+        self.assertEqual(recovered.returncode, 0, recovered.stderr)
+        self.assertEqual(json.loads(recovered.stdout)["status"], "recovered")
+        original = next(
+            path
+            for path in self.states()
+            if path.stem == hashlib.sha256(b"native-session").hexdigest()
+        )
+        state = json.loads(original.read_bytes())
+        self.assertEqual(state["commits"], {})
+        self.assertEqual(state["snapshots"], {})
+        self.assertTrue(state["snapshot_resolutions"])
+
+    def test_guard_guidance_rewrite_preserves_quoted_json_and_payload_fields(self):
+        _, guarded = self.guarded_fixture()
+        words = shlex.split(guarded)
+        token = words[words.index("--authorization") + 1]
+        native_arguments = words[words.index("--") + 1 :]
+        library = self.installed / "skills/commit-capture/scripts/lib/capture-owner.py"
+        runtime = runpy.run_path(str(library))
+        binding = runtime["codex_decode_authorization"](token)["binding"]
+        native = shlex.join(
+            [
+                binding["python"],
+                str(Path(binding["bundle"]) / "bin/obsidian-mcp-native"),
+                *native_arguments,
+            ]
+        )
+        frozen = {
+            "body": "acknowledge explicitly with "
+            + native
+            + " (or user_requested_no_capture)",
+            "wrapped": native,
+            "reason": native,
+        }
+        opaque = json.dumps(frozen, ensure_ascii=False, separators=(",", ":"))
+        output = {
+            "hookSpecificOutput": {
+                "additionalContext": opaque
+                + "\nOnly for no meaningful work, acknowledge explicitly with "
+                + native
+                + " (or user_requested_no_capture)."
+            },
+            "arguments": frozen,
+            "body": opaque,
+        }
+        rewritten = runtime["codex_guard_output"](output, token, binding)
+        text = rewritten["hookSpecificOutput"]["additionalContext"]
+        self.assertEqual(text.split("\n", 1)[0], opaque)
+        self.assertIn("codex-execute", text.split("\n", 1)[1])
+        self.assertEqual(rewritten["arguments"], frozen)
+        self.assertEqual(rewritten["body"], opaque)
+
+    def test_guard_bounds_output_without_discarding_pending_state(self):
+        _, command = self.guarded_fixture(commit=True)
+        hooks = self.directory / "no-hooks"
+        hooks.mkdir()
+        hook = hooks / "pre-commit"
+        hook.write_text(
+            "#!/bin/sh\n/usr/bin/head -c 1100000 /dev/zero\n/bin/sleep 10\n"
+        )
+        hook.chmod(0o700)
+        result = self.run_emitted(command)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("output exceeds", result.stderr)
+        state = json.loads(self.states()[0].read_bytes())
+        self.assertTrue(state["snapshots"])
+        self.assertEqual(state["commits"], {})
+        with (self.state / "capture-ownership/admission.lock").open("r+") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+    def test_guard_rechecks_physical_home_ambiguity(self):
+        _, command = self.guarded_fixture()
+        alias = self.case_alias(self.home)
+        value = json.loads(self.record_path().read_bytes())
+        value["codex_home"] = str(alias)
+        duplicate = self.record_path().with_name(
+            hashlib.sha256(str(alias).encode()).hexdigest() + ".json"
+        )
+        duplicate.write_text(json.dumps(value))
+        duplicate.chmod(0o600)
+        before = self.snapshot(self.profile)
+        result = self.run_emitted(command)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("multiple", result.stderr)
+        self.assertEqual(self.snapshot(self.profile), before)
+
+    def test_guard_native_execution_ignores_pythonpath(self):
+        _, command = self.guarded_fixture()
+        marker = self.directory / "pythonpath-executed"
+        modules = self.directory / "untrusted-modules"
+        modules.mkdir()
+        (modules / "sitecustomize.py").write_text(
+            "from pathlib import Path\nPath(" + repr(str(marker)) + ").touch()\n"
+        )
+        self.env["PYTHONPATH"] = str(modules)
+        result = self.run_emitted(command)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse(marker.exists())
 
     def test_pending_disable_and_reapply_retain_closed_evidence(self):
         self.activate()

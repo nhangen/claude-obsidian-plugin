@@ -2,6 +2,7 @@
 """Host-local writer admission and delegation to the public capture runtime."""
 
 import argparse
+import base64
 import contextlib
 import fcntl
 import hashlib
@@ -10,6 +11,9 @@ import math
 import os
 from pathlib import Path
 import re
+import selectors
+import shlex
+import signal
 import stat
 import subprocess
 import sys
@@ -1685,6 +1689,598 @@ def codex_hook_input():
     return value
 
 
+CODEX_EXEC_OPTIONS = {
+    "execute-commit": ({"home", "session", "snapshot"}, set()),
+    "prepare": ({"home", "session", "commit"}, set()),
+    "request": ({"home", "session"}, set()),
+    "status": ({"home", "session"}, set()),
+    "retry": ({"home", "session", "payload-sha256", "verification"}, {"commit"}),
+    "skip": ({"home", "session", "turn", "reason"}, set()),
+    "takeover": ({"home", "session", "verification"}, set()),
+    "resolve-snapshot": ({"home", "session", "snapshot", "verification"}, set()),
+}
+
+
+def codex_entrypoint():
+    library = Path(__file__).resolve()
+    package = (
+        library.parents[4]
+        if library.parents[2].name == "commit-capture"
+        else library.parents[2] / "packages/codex"
+    )
+    return str(package / "scripts/capture.py")
+
+
+def codex_authorization(home, record, current, cwd):
+    value = dict(
+        home=home,
+        generation=record["generation"],
+        global_generation=current["generation"],
+        delivery=record["delivery"],
+        binding={key: record[key] for key in CODEX_BINDING_KEYS},
+        cwd=str(canonical_path(cwd, strict=True)),
+    )
+    return base64.urlsafe_b64encode(
+        json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
+    ).decode()
+
+
+def codex_decode_authorization(token):
+    if (
+        not isinstance(token, str)
+        or len(token) > 16384
+        or not re.fullmatch(r"[A-Za-z0-9_-]+={0,2}", token)
+    ):
+        raise OwnershipError("invalid guarded command authorization")
+    value = decode_json(base64.b64decode(token, altchars=b"-_", validate=True))
+    if not isinstance(value, dict) or set(value) != {
+        "home",
+        "generation",
+        "global_generation",
+        "delivery",
+        "binding",
+        "cwd",
+    }:
+        raise OwnershipError("invalid guarded command authorization")
+    for key in ("home", "cwd"):
+        if (
+            not isinstance(value[key], str)
+            or not Path(value[key]).is_absolute()
+            or str(canonical_path(value[key])) != value[key]
+        ):
+            raise OwnershipError("invalid guarded command path")
+    if any(
+        type(value[key]) is not int or value[key] < 0
+        for key in ("generation", "global_generation")
+    ) or value["delivery"] not in ("plugin", "managed"):
+        raise OwnershipError("invalid guarded command generation or delivery")
+    codex_binding(value["binding"])
+    return value
+
+
+def codex_guard_prefix(token):
+    return [
+        "/usr/bin/python3",
+        "-I",
+        "-B",
+        codex_entrypoint(),
+        "codex-execute",
+        "--authorization",
+        token,
+        "--",
+    ]
+
+
+def codex_parse_executor(words):
+    if (
+        not words
+        or words[0] not in CODEX_EXEC_OPTIONS
+        or len(words) > 20
+        or sum(len(word.encode()) for word in words) > 16384
+        or len(words) % 2 != 1
+    ):
+        raise OwnershipError("unsupported guarded native command")
+    operation = words[0]
+    required, optional = CODEX_EXEC_OPTIONS[operation]
+    options = {}
+    for key, value in zip(words[1::2], words[2::2]):
+        if (
+            not key.startswith("--")
+            or key[2:] not in required | optional
+            or key[2:] in options
+        ):
+            raise OwnershipError("invalid or duplicate guarded native option")
+        options[key[2:]] = value
+    if not required <= set(options):
+        raise OwnershipError("missing guarded native option")
+    for key in ("session", "snapshot", "commit", "payload-sha256"):
+        if key in options and not re.fullmatch(r"[0-9a-f]{64}", options[key]):
+            raise OwnershipError("invalid guarded native identity")
+    if "turn" in options and (
+        not 1 <= len(options["turn"]) <= 200
+        or any(ord(char) < 32 for char in options["turn"])
+    ):
+        raise OwnershipError("invalid guarded native turn")
+    if "reason" in options and options["reason"] not in (
+        "no_meaningful_work",
+        "user_requested_no_capture",
+    ):
+        raise OwnershipError("invalid guarded native skip reason")
+    if "verification" in options and options["verification"] != (
+        "authoritative-path-inspected"
+        if operation == "retry"
+        else "command-stopped-and-history-inspected"
+    ):
+        raise OwnershipError("invalid guarded native verification")
+    return operation, options
+
+
+def codex_executor_home(binding, options, cwd):
+    home = Path(options["home"])
+    parent = Path(binding["profile"])
+    if (
+        not home.is_absolute()
+        or str(canonical_path(home, strict=True)) != str(home)
+        or home.parent != parent / "workspaces"
+        or not re.fullmatch(r"[0-9a-f]{64}", home.name)
+    ):
+        raise OwnershipError("guarded native home is outside the selected profile")
+    for path in (parent / "workspaces", home):
+        if not existing_directory(path):
+            raise OwnershipError("guarded native workspace unavailable")
+    child = read(home / "capture-profile.json")
+    if not isinstance(child, dict) or any(
+        child.get(key) != value
+        for key, value in dict(
+            host="codex",
+            profileMode="attached",
+            parentHome=str(parent),
+            bundle=binding["bundle"],
+            releaseSha256=binding["externalReleaseSha256"],
+            releaseId=binding["releaseId"],
+            python=binding["python"],
+            active=True,
+        ).items()
+    ):
+        raise OwnershipError("guarded native workspace binding changed")
+    project = child.get("project")
+    if (
+        not isinstance(project, str)
+        or not Path(project).is_absolute()
+        or not canonical_path(cwd, strict=True).is_relative_to(
+            canonical_path(project, strict=True)
+        )
+    ):
+        raise OwnershipError("guarded native workspace does not match the command")
+    session = read(parent / "bindings" / (options["session"] + ".json"))
+    if not isinstance(session, dict) or any(
+        session.get(key) != value
+        for key, value in dict(
+            session=options["session"], workspace=home.name, project=project
+        ).items()
+    ):
+        raise OwnershipError("guarded native session does not belong to this workspace")
+
+
+def codex_guard_text(text, token, binding):
+    decoder = json.JSONDecoder(object_pairs_hook=unique_fields)
+    opaque = []
+    cursor = 0
+    while cursor < len(text):
+        if text[cursor] in "{[":
+            try:
+                _, end = decoder.raw_decode(text, cursor)
+            except ValueError:
+                pass
+            else:
+                opaque.append((cursor, end))
+                cursor = end
+                continue
+        cursor += 1
+    replacements = []
+
+    def protected(position):
+        return any(start <= position < end for start, end in opaque)
+
+    for start_marker, end_marker, operation in (
+        ("acknowledge explicitly with ", " (or user_requested_no_capture)", "skip"),
+        ("authorize an exact retry with ", ". Use the returned arguments", "retry"),
+        ("Retrieve the frozen keeper save arguments with ", "; call ", "request"),
+        (
+            "Prepare the pending commit before another commit: pipe JSON ",
+            ", then call ",
+            "prepare",
+        ),
+    ):
+        position = 0
+        while (position := text.find(start_marker, position)) >= 0:
+            start = position + len(start_marker)
+            if protected(position):
+                position = start
+                continue
+            if operation == "prepare":
+                separator = text.find(" to ", start)
+                if separator < 0:
+                    raise OwnershipError("unrecognized native preparation guidance")
+                start = separator + 4
+            end = text.find(end_marker, start)
+            if end < 0:
+                raise OwnershipError("unrecognized native recovery guidance")
+            words = shlex.split(text[start:end])
+            if words[:2] != [
+                binding["python"],
+                str(Path(binding["bundle"]) / "bin/obsidian-mcp-native"),
+            ]:
+                raise OwnershipError("unrecognized native guidance launcher")
+            parsed, _ = codex_parse_executor(words[2:])
+            if parsed != operation:
+                raise OwnershipError("native guidance operation mismatch")
+            replacements.append(
+                (start, end, shlex.join([*codex_guard_prefix(token), *words[2:]]))
+            )
+            position = end + len(end_marker)
+    for marker, operation, ending in (
+        (
+            "Inspect it with status --home ",
+            "status",
+            ", then rescue interrupted ownership with ",
+        ),
+        (
+            "Clear it with takeover --home ",
+            "takeover",
+            " --verification command-stopped-and-history-inspected",
+        ),
+        (
+            "then rescue interrupted ownership with takeover --home ",
+            "takeover",
+            " --verification command-stopped-and-history-inspected",
+        ),
+    ):
+        position = 0
+        while (position := text.find(marker, position)) >= 0:
+            start = position + len(marker)
+            if protected(position) or any(
+                left <= position < right for left, right, _ in replacements
+            ):
+                position = start
+                continue
+            end = text.rfind(ending, start)
+            while end >= 0 and protected(end):
+                end = text.rfind(ending, start, end)
+            if end < 0:
+                raise OwnershipError("unrecognized native ownership guidance")
+            home, separator, session = text[start:end].rpartition(" --session ")
+            if not separator:
+                raise OwnershipError(
+                    "native ownership guidance is missing session identity"
+                )
+            words = [operation, "--home", home, "--session", session]
+            command_start = start - len(operation + " --home ")
+            if operation == "takeover":
+                words.extend(
+                    ("--verification", "command-stopped-and-history-inspected")
+                )
+                end += len(ending)
+            codex_parse_executor(words)
+            replacements.append(
+                (command_start, end, shlex.join([*codex_guard_prefix(token), *words]))
+            )
+            position = end
+    marker = "use resolve-snapshot with"
+    position = 0
+    while (position := text.find(marker, position)) >= 0:
+        if not protected(position):
+            replacements.append(
+                (
+                    position,
+                    position + len(marker),
+                    "use "
+                    + shlex.join([*codex_guard_prefix(token), "resolve-snapshot"])
+                    + " with",
+                )
+            )
+        position += len(marker)
+    native = str(Path(binding["bundle"]) / "bin/obsidian-mcp-native")
+    position = 0
+    while (position := text.find(native, position)) >= 0:
+        if not protected(position) and not any(
+            start <= position < end for start, end, _ in replacements
+        ):
+            raise OwnershipError(
+                "unrecognized executable runtime guidance; pending evidence retained"
+            )
+        position += len(native)
+    for start, end, replacement in sorted(replacements, reverse=True):
+        text = text[:start] + replacement + text[end:]
+    return text
+
+
+def codex_guard_output(output, token, binding):
+    if not isinstance(output, dict):
+        return output
+    output = dict(output)
+    for key in (
+        "systemMessage",
+        "reason",
+        "stopReason",
+        "note",
+        "additionalContext",
+        "permissionDecisionReason",
+    ):
+        if isinstance(output.get(key), str):
+            output[key] = codex_guard_text(output[key], token, binding)
+    if isinstance(output.get("hookSpecificOutput"), dict):
+        output["hookSpecificOutput"] = codex_guard_output(
+            output["hookSpecificOutput"], token, binding
+        )
+    if isinstance(output.get("wrapped"), str):
+        words = shlex.split(output["wrapped"])
+        if words[:2] != [
+            binding["python"],
+            str(Path(binding["bundle"]) / "bin/obsidian-mcp-native"),
+        ]:
+            raise OwnershipError("unrecognized snapshot executor")
+        codex_parse_executor(words[2:])
+        output["wrapped"] = shlex.join([*codex_guard_prefix(token), *words[2:]])
+    for key in ("snapshots", "before"):
+        if isinstance(output.get(key), dict):
+            output[key] = (
+                {
+                    name: codex_guard_output(value, token, binding)
+                    if isinstance(value, dict)
+                    else value
+                    for name, value in output[key].items()
+                }
+                if key == "snapshots"
+                else codex_guard_output(output[key], token, binding)
+            )
+    if isinstance(output.get("snapshot_resolutions"), list):
+        output["snapshot_resolutions"] = [
+            codex_guard_output(value, token, binding)
+            for value in output["snapshot_resolutions"]
+        ]
+    return output
+
+
+def codex_unwrap_executor(value, home, record, current):
+    if value.get("tool_name") != "Bash" or not isinstance(
+        value.get("tool_input"), dict
+    ):
+        return value
+    command = value["tool_input"].get("command")
+    if not isinstance(command, str) or "codex-execute" not in command:
+        return value
+    words = shlex.split(command)
+    if len(words) < 9 or words[:6] != codex_guard_prefix("")[:6] or words[7] != "--":
+        raise OwnershipError("invalid packaged executor command")
+    ticket = codex_decode_authorization(words[6])
+    codex_check_authorization(ticket, home, record, current)
+    operation, options = codex_parse_executor(words[8:])
+    if operation != "execute-commit":
+        return value
+    codex_executor_home(ticket["binding"], options, ticket["cwd"])
+    original = shlex.join(
+        [
+            record["python"],
+            str(Path(record["bundle"]) / "bin/obsidian-mcp-native"),
+            *words[8:],
+        ]
+    )
+    return dict(value, tool_input=dict(value["tool_input"], command=original))
+
+
+def codex_check_authorization(ticket, home, record, current):
+    if (
+        record is None
+        or ticket["home"] != home
+        or record["owner"] != "mcp"
+        or record["phase"] != "stable"
+        or ticket["generation"] != record["generation"]
+        or ticket["global_generation"] != current["generation"]
+        or ticket["delivery"] != record["delivery"]
+        or ticket["binding"] != {key: record[key] for key in CODEX_BINDING_KEYS}
+    ):
+        raise OwnershipError(
+            "stale or closed guarded command admission; pending evidence retained"
+        )
+    check_exclusion(current, ticket["cwd"])
+
+
+class GuardInterrupted(OwnershipError):
+    def __init__(self, signum):
+        super().__init__("guarded execution interrupted; pending evidence retained")
+        self.signum = signum
+
+
+@contextlib.contextmanager
+def codex_execution_signals():
+    interrupted = [None]
+    previous = {}
+
+    def interrupt(signum, _frame):
+        interrupted[0] = signum
+
+    for signum in (signal.SIGINT, signal.SIGTERM):
+        previous[signum] = signal.signal(signum, interrupt)
+    try:
+        yield interrupted
+    finally:
+        for signum, handler in previous.items():
+            signal.signal(signum, handler)
+
+
+def codex_execute_stream(binding, words, descriptor, payload):
+    codex_verify(binding)
+    command = [
+        binding["python"],
+        "-I",
+        "-B",
+        str(Path(binding["bundle"]) / "bin/obsidian-mcp-native"),
+        *words,
+    ]
+    execute = words[0] == "execute-commit"
+    deadline = time.monotonic() + (360 if execute else 30)
+    output = bytearray()
+    with (
+        tempfile.TemporaryFile() as source,
+        selectors.DefaultSelector() as selector,
+        codex_execution_signals() as interrupted,
+    ):
+        if payload is not None:
+            source.write(payload)
+            source.seek(0)
+        if interrupted[0] is not None:
+            raise GuardInterrupted(interrupted[0])
+        process = subprocess.Popen(
+            command,
+            stdin=source if payload is not None else None,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            env=dict(
+                os.environ,
+                PYTHONDONTWRITEBYTECODE="1",
+                OBSIDIAN_CAPTURE_LEASE_FD=str(descriptor),
+            ),
+            pass_fds=(descriptor,),
+            start_new_session=True,
+        )
+        completed = False
+        try:
+            selector.register(process.stdout, selectors.EVENT_READ, "stdout")
+            selector.register(process.stderr, selectors.EVENT_READ, "stderr")
+            total = 0
+            while selector.get_map():
+                if interrupted[0] is not None:
+                    raise GuardInterrupted(interrupted[0])
+                if time.monotonic() >= deadline:
+                    raise OwnershipError(
+                        "guarded native command exceeded its execution budget; pending evidence retained"
+                    )
+                for key, _ in selector.select(
+                    max(0, min(1, deadline - time.monotonic()))
+                ):
+                    chunk = os.read(key.fileobj.fileno(), 8192)
+                    if not chunk:
+                        selector.unregister(key.fileobj)
+                        continue
+                    total += len(chunk)
+                    if total > 1048576:
+                        raise OwnershipError(
+                            "guarded native output exceeds limit; pending evidence retained"
+                        )
+                    if key.data == "stdout" and not execute:
+                        output.extend(chunk)
+                    else:
+                        stream = (
+                            sys.stdout.buffer
+                            if key.data == "stdout"
+                            else sys.stderr.buffer
+                        )
+                        stream.write(chunk)
+                        stream.flush()
+            while process.poll() is None:
+                if interrupted[0] is not None:
+                    raise GuardInterrupted(interrupted[0])
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise OwnershipError(
+                        "guarded native execution timed out; pending evidence retained"
+                    )
+                try:
+                    process.wait(timeout=min(1, remaining))
+                except subprocess.TimeoutExpired:
+                    continue
+            if interrupted[0] is not None:
+                raise GuardInterrupted(interrupted[0])
+            result = process.returncode
+            completed = True
+            return result if result >= 0 else 128 - result, bytes(output)
+        finally:
+            if not completed:
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                process.wait()
+            process.stdout.close()
+            process.stderr.close()
+
+
+def codex_prepare_input():
+    deadline = time.monotonic() + 5
+    payload = bytearray()
+    with selectors.SelectSelector() as selector:
+        selector.register(sys.stdin.buffer, selectors.EVENT_READ)
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0 or not selector.select(remaining):
+                raise OwnershipError("guarded native input timed out")
+            chunk = os.read(sys.stdin.fileno(), 262145 - len(payload))
+            if not chunk:
+                return bytes(payload)
+            payload.extend(chunk)
+            if len(payload) > 262144:
+                raise OwnershipError("guarded native input exceeds limit")
+
+
+def codex_execute_main(arguments):
+    parser = argparse.ArgumentParser(
+        description="Execute an allowlisted capture operation under writer admission"
+    )
+    parser.add_argument("--authorization", required=True)
+    parser.add_argument("native", nargs=argparse.REMAINDER)
+    args = parser.parse_args(arguments)
+    words = args.native[1:] if args.native[:1] == ["--"] else args.native
+    try:
+        ticket = codex_decode_authorization(args.authorization)
+        operation, options = codex_parse_executor(words)
+        payload = codex_prepare_input() if operation == "prepare" else None
+        with admission() as descriptor:
+            home = codex_home(ticket["home"])
+            record = codex_record(home)
+            current = codex_require_global()
+            codex_check_authorization(ticket, home, record, current)
+            binding = ticket["binding"]
+            codex_capabilities(binding)
+            codex_profile(binding)
+            codex_executor_home(binding, options, ticket["cwd"])
+            result, output = codex_execute_stream(binding, words, descriptor, payload)
+            if output:
+                if result or words[0] in ("prepare", "request", "retry", "skip"):
+                    sys.stdout.buffer.write(output)
+                else:
+                    value = decode_json(output)
+                    print(
+                        json.dumps(
+                            codex_guard_output(value, args.authorization, binding)
+                        )
+                    )
+            return result
+    except GuardInterrupted as error:
+        print("capture executor: " + str(error), file=sys.stderr)
+        return 128 + error.signum
+    except (
+        OwnershipError,
+        OSError,
+        ValueError,
+        TypeError,
+        KeyError,
+        AttributeError,
+        RecursionError,
+        subprocess.SubprocessError,
+    ) as error:
+        print(
+            "capture executor: "
+            + (
+                str(error)
+                if isinstance(error, OwnershipError)
+                else "guarded operation unavailable; pending evidence retained"
+            ),
+            file=sys.stderr,
+        )
+        return 2
+
+
 def codex_route(args, home, value):
     if value.get("hook_event_name", args.event) != args.event:
         raise OwnershipError("Codex hook event mismatch")
@@ -1710,6 +2306,8 @@ def codex_route(args, home, value):
         deadline = time.monotonic() + 8
         codex_capabilities(binding, deadline)
         codex_profile(binding, deadline)
+        token = codex_authorization(home, record, current, value.get("cwd"))
+        value = codex_unwrap_executor(value, home, record, current)
         value["hook_event_name"] = args.event
         output = codex_native(
             binding,
@@ -1736,6 +2334,23 @@ def codex_route(args, home, value):
             or specific.get("hookEventName") != args.event
         ):
             raise OwnershipError("invalid Codex hook output event")
+        output = codex_guard_output(output, token, binding)
+        specific = output.get("hookSpecificOutput", {})
+        if isinstance(specific.get("updatedInput"), dict):
+            command = specific["updatedInput"].get("command")
+            if isinstance(command, str):
+                words = shlex.split(command)
+                if words[:2] != [
+                    binding["python"],
+                    str(Path(binding["bundle"]) / "bin/obsidian-mcp-native"),
+                ]:
+                    raise OwnershipError(
+                        "unrecognized native executor command; pending evidence retained"
+                    )
+                codex_parse_executor(words[2:])
+                specific["updatedInput"]["command"] = shlex.join(
+                    [*codex_guard_prefix(token), *words[2:]]
+                )
         return output
 
 

@@ -82,6 +82,11 @@ profile operations or hooks. Installed releases and standalone bundles retain
 their respective inventory checks. Runtime verification is local; hooks do not
 download dependencies or obtain credentials.
 
+Generated commit and recovery commands re-enter the packaged guard. It checks
+the selected profile, delivery, ownership generations and runtime integrity at
+execution time, holding admission until the child finishes. Keep those commands
+intact; replacing them with a direct runtime invocation bypasses this guard.
+
 The private Codex record selects a single delivery source. Plugin hooks and the
 future managed adapter share admission; an unselected adapter does not delegate.
 Administrator-managed activation is refused until a validated administrator
