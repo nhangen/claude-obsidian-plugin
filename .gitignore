@@ -10,3 +10,4 @@ obsidian.local.md
 # Python bytecode
 __pycache__/
 *.pyc
+.test-deps/

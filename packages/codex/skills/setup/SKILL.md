@@ -1,6 +1,6 @@
 ---
 name: setup
-description: Set up the Codex plugin's verified public runtime and guide separately authorized MCP connection registration through the Codex CLI. Runtime lifecycle previews by default; capture activation remains separate.
+description: Set up the Codex plugin's verified public runtime, guide MCP registration, and preview separately authorized user-wide capture activation. Runtime, connection, capture and hook trust remain separate gates.
 ---
 
 # Set up Obsidian for Codex
@@ -178,6 +178,73 @@ repeated per-write approval as that authorization.
 Reconnect the intended host and verify discovery plus a bounded read before
 claiming connection success. Registration is not a connection or write receipt.
 Do not make a verification write unless requested. Connection setup installs no
-hooks, creates no native capture profile, changes no writer ownership, and never
-falls back to local keeper. Automatic capture remains unchanged and requires a
-separately verified handoff; do not invoke `obsidian-mcp-native create/attach`.
+native capture profile, changes no writer ownership, and never falls back to
+local keeper. The package's native hooks remain dormant. Connection registration
+alone does not authorize the separate capture handoff below; do not invoke
+`obsidian-mcp-native create/attach` as part of connection setup.
+
+## Separate user-wide capture activation
+
+Resolve `../../scripts/capture.py` relative to this installed skill directory.
+Use that installed helper with Python 3.11+, not a source checkout or a searched
+cache path. Preserve the intended canonical `CODEX_HOME` throughout.
+
+Inspect `codex-status` first. A missing record is dormant, not evidence of a
+working connection or capture. Keep existing Claude ownership and profiles;
+Codex has a separate admission record and does not need workspace enrollment.
+
+The selected public runtime must advertise attached user-wide Codex capture and
+native turn identity. The published bootstrap pin remains `client-v0.3.1`, which
+does not support this new capability. Do not fabricate a release pin, execute
+an unverified candidate, silently select an isolated profile, or call source
+fixtures a published installation. Stop with an unsupported-capability result
+until an independently authenticated compatible bundle is available.
+
+For an authorized compatible bundle, obtain its release-metadata SHA-256 from
+the trusted distribution, not from the candidate as its own authority. Preview:
+
+```bash
+python3 "<installed plugin>/scripts/capture.py" codex-activate \
+  --codex-home "<intended canonical CODEX_HOME>" \
+  --bundle "<verified compatible runtime release>" \
+  --release-sha256 "<externally pinned release metadata SHA-256>" \
+  --profile "<new private capture profile>" --create-profile \
+  --folder "<authorized vault-relative folder>" --daily-folder "Daily"
+```
+
+Omit `--create-profile` to select an existing verified attached user-wide Codex
+profile. For creation, select an existing server-authorized destination once;
+defaults are `Sessions` and `Daily`, not proof those folders are allowed by the
+server. Never use the actual Codex home as the capture profile. Preview must
+not write state. Profile creation and admission changes require separate capture
+authorization; runtime installation or MCP registration is not that approval.
+
+Initial adoption refuses a profile whose interpreter differs from the running
+trusted launcher. Do not execute an interpreter path read from an untrusted
+profile as a workaround. Existing registered profiles retain their pinned launcher.
+
+Before apply, stop older Codex sessions and cached writers, upgrade their guards,
+inspect legacy history, and resolve pending captures through their original
+recovery route. Do not delete or reclassify evidence to obtain a clear drain.
+Only after those checks and explicit handoff authorization, rerun the same plan
+with `--apply --verification legacy-writers-stopped-and-history-inspected`.
+The attestation is a prerequisite, not proof that the checks actually happened.
+
+Global disabled or draining ownership blocks both hosts. A failed handoff can
+leave Codex admission draining; inspect it, resolve pending evidence and reapply
+the same verified plan. Do not resume the legacy keeper or alter Claude's owner
+to recover Codex. The helper verifies the runtime locally before native calls
+and must not resolve credentials or change existing MCP approval policy.
+
+Plugin delivery remains subject to Codex's normal hook-review flow. Direct the
+user to review the installed definitions with `/hooks`; do not approve them or
+edit the trust store for the user. A selected plugin/managed delivery gate
+prevents double delegation, but administrator-managed activation is refused
+until a validated administrator installation exists. This setup does not
+install `requirements.toml`, force hooks on or suppress unrelated hooks.
+
+`codex-disable` previews by default; authorized `--apply` requires the same
+verification flag and a clear drain. It preserves disabled admission and
+retained profiles, never restores legacy automatically or deletes capture
+history. Verify actual native events, matching write receipts and a quiescent
+drain separately before claiming installed-host capture success.

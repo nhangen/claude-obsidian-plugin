@@ -1,0 +1,61 @@
+{
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/usr/bin/python3 -I -B \"${PLUGIN_ROOT}/scripts/capture.py\" codex-route --delivery plugin --event UserPromptSubmit",
+            "timeout": 15
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "^(Bash|mcp__obsidian_write__obsidian_keeper_save|mcp__obsidian_write__obsidian_daily_append)$",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/usr/bin/python3 -I -B \"${PLUGIN_ROOT}/scripts/capture.py\" codex-route --delivery plugin --event PreToolUse",
+            "timeout": 15
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "^(Bash|mcp__obsidian_write__obsidian_keeper_save|mcp__obsidian_write__obsidian_daily_append)$",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/usr/bin/python3 -I -B \"${PLUGIN_ROOT}/scripts/capture.py\" codex-route --delivery plugin --event PostToolUse",
+            "timeout": 15
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/usr/bin/python3 -I -B \"${PLUGIN_ROOT}/scripts/capture.py\" codex-route --delivery plugin --event Stop",
+            "timeout": 15
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/usr/bin/python3 -I -B \"${PLUGIN_ROOT}/scripts/capture.py\" codex-route --delivery plugin --event SessionStart",
+            "timeout": 15
+          }
+        ]
+      }
+    ]
+  }
+}

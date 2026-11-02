@@ -1,6 +1,9 @@
 # Obsidian for Codex
 
-This Codex package exposes `commit-capture` and `setup`. After a successful Git commit, `commit-capture` obtains sanitized metadata through its bundled `commit-meta.sh`, writes 3-8 conversation-context bullets through its bundled keeper, and prevents duplicate appends with `--skip-if-hash`.
+This Codex package exposes `commit-capture`, `setup`, and dormant native capture
+hooks. The legacy skill obtains sanitized commit metadata and writes conversation
+context through its guarded keeper. Native capture uses a separately activated,
+verified public runtime; installing the plugin alone does not activate it.
 
 The `setup` skill verifies, installs, or reuses the public client runtime as a
 plugin implementation dependency. It resolves its helper from the installed
@@ -37,11 +40,9 @@ The connection examples are smoke-checked with actual Codex CLI 0.162.1 and 0.16
 isolated HOME, CODEX_HOME, and working directory, using mock references without
 calling credential providers.
 
-Commit capture remains a legacy compatibility projection. Its keeper honors the shared
-host-local capture owner and refuses local writes under MCP, disabled or
-draining ownership. It does not infer MCP activation from connection setup or
-translate Claude plugin profiles into Codex profiles. MCP capture requires the
-public client's separately verified native Codex profile. The server uses the
+The legacy commit skill's keeper honors shared and Codex-specific admission and
+refuses local writes under MCP, disabled or draining ownership. Connection setup
+does not activate capture or translate Claude profiles into Codex profiles. The server uses the
 unguarded keeper primitive on the authoritative vault host, not this client
 entry point.
 
@@ -57,6 +58,64 @@ codex plugin marketplace add nhangen/claude-obsidian-plugin
 codex plugin add obsidian@nhangen-codex-plugins
 ```
 
-Configure `vault_path` in `$OBSIDIAN_LOCAL_MD` or `${XDG_CONFIG_HOME:-$HOME/.config}/claude-obsidian/obsidian.local.md`, then start a new Codex session.
+For legacy local capture, configure `vault_path` in `$OBSIDIAN_LOCAL_MD` or
+`${XDG_CONFIG_HOME:-$HOME/.config}/claude-obsidian/obsidian.local.md`.
+For remote capture, use `setup` for runtime and connection setup, then follow the
+separate activation contract below. No client-side vault mount is required.
 
-Codex CLI 0.135.0 did not execute this plugin's bundled tool hooks in a forward test, so the package intentionally contains no hooks. The skill is invoked by the agent after a successful commit. It does not depend on a Claude plugin installation or a versioned cache path.
+## Native capture activation
+
+Activation is once per canonical `CODEX_HOME`, not per workspace. The private
+record also recognizes physical home aliases, including case aliases on
+case-insensitive filesystems; ambiguous or corrupt inventory closes admission.
+The public runtime must advertise attached user-wide Codex capture, native turn identities,
+and the required recovery operations. Its new attached-profile capability was
+merged in public source `f511884950777179de8e5bc47a2a5dd2bca52b7c`.
+The published bootstrap remains pinned to `client-v0.3.1`, which does not provide
+that capability. Source support is not a newer published release: activation
+must refuse an unsupported runtime, not silently substitute an isolated profile.
+
+An explicitly supplied release-metadata SHA-256 is the trust input. The plugin
+authenticates its vendored standalone verifier against the published 0.3.1
+installer pin, then verifies the selected runtime before executing capabilities,
+profile operations or hooks. Installed releases and standalone bundles retain
+their respective inventory checks. Runtime verification is local; hooks do not
+download dependencies or obtain credentials.
+
+The private Codex record selects a single delivery source. Plugin hooks and the
+future managed adapter share admission; an unselected adapter does not delegate.
+Administrator-managed activation is refused until a validated administrator
+installation exists. This source change does not install system policy or make
+plugin hooks automatically trusted. Codex requires review of non-managed hook
+definitions and runs matching sources concurrently; see the
+[official hook contract](https://learn.chatgpt.com/docs/hooks).
+
+Before an authorized handoff, stop older Codex sessions and cached writers,
+upgrade their guards, and inspect retained history. Preview is read-only; apply
+requires explicit attestation and checks both previous and selected profile
+drains under exclusive admission. Claude's owner and profile mappings remain
+unchanged. Global disabled/draining ownership closes both hosts, and global
+handoff includes retained Codex profiles in its drain inventory.
+
+Missing activation leaves hooks dormant. Invalid, disabled, draining or
+unavailable activated state never restores the legacy keeper. Interrupted
+transitions preserve closed admission and pending evidence; recovery must
+reverify and drain before reopening. Disabling capture retains the record and
+profile evidence rather than deleting them or enabling legacy capture.
+
+## Source verification
+
+The new activation fixture suite requires `OBSIDIAN_PUBLIC_CLIENT_SOURCE` to
+point to a checkout at the exact public source revision above. It packs that
+source into a temporary bundle and invokes the installed-package adapters in
+disposable homes with mock MCP receipts. CI supplies the pinned public checkout;
+a missing dependency is a test failure, not a skipped acceptance check. These
+fixtures do not establish real-provider capture, installed-host trust or managed
+deployment acceptance.
+
+```bash
+OBSIDIAN_PUBLIC_CLIENT_SOURCE=/path/to/pinned/obsidian-mcp \
+  bash tests/codex-capture-activation.sh
+OBSIDIAN_PUBLIC_CLIENT_SOURCE=/path/to/pinned/obsidian-mcp \
+  bash tests/run-all.sh
+```

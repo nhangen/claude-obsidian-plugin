@@ -42,7 +42,22 @@ Other servers and unconfigured write tools retain standard approval prompts.
 
 ## Integration Modes
 
-### 1. Isolated Native Capture (`obsidian-mcp-native`)
+### 1. Plugin-managed user-wide capture
+
+The packaged plugin includes dormant native hooks and a separate explicit
+activation path for a verified attached user-wide Codex profile. Activation is
+scoped to the canonical `CODEX_HOME`, not each repository. Git roots,
+subdirectories and non-Git session-only workspaces use the public runtime's
+private routing state. Claude ownership and normal-home configuration are not
+replaced. See [the package activation contract](../../packages/codex/README.md#native-capture-activation).
+
+This source capability depends on public runtime support merged at
+`f511884950777179de8e5bc47a2a5dd2bca52b7c`; the published bootstrap pin remains
+`client-v0.3.1` and is not sufficient. Installation, hook trust and capture
+activation are separate gates. Administrator-managed activation is not shipped
+by this slice, and unselected managed delivery cannot duplicate plugin events.
+
+### 2. Advanced isolated capture (`obsidian-mcp-native`)
 
 For automated session and commit capture without relying on the Claude plugin:
 
@@ -82,7 +97,7 @@ For automated session and commit capture without relying on the Claude plugin:
    - A pending event locks commit capture for that session; other sessions in the profile are denied until resolved.
    - Bounded recovery: `obsidian-mcp-native takeover` safely releases an interrupted owner's lock without reconstructing git history.
 
-### 2. Skill-Driven Capture (`obsidian-mcp` skill)
+### 3. Skill-Driven Capture (`obsidian-mcp` skill)
 
 If running Codex in an existing profile without native hooks:
 - Register the servers as shown above.
@@ -104,4 +119,6 @@ If running Codex in an existing profile without native hooks:
   ```bash
   /prefix/current/bin/obsidian-mcp-native disable --home <profile>
   ```
-  Disable removes owned profile config/hooks while retaining capture evidence.
+  This isolated-profile operation removes its owned config/hooks while retaining
+  evidence. Do not use it on an attached plugin profile; use the plugin's
+  separate disable operation, which retains closed admission and pending state.

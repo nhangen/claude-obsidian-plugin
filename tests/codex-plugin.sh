@@ -2,6 +2,7 @@
 # Installs the Codex package in an isolated CODEX_HOME and exercises the manual
 # metadata-to-keeper path from the cached installation.
 set -euo pipefail
+export PYTHONDONTWRITEBYTECODE=1
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/codex-plugin-XXXXXX")"
@@ -22,7 +23,14 @@ claude = json.loads((root / ".claude-plugin/plugin.json").read_text())
 marketplace_legacy = json.loads((root / ".claude-plugin/marketplace.json").read_text())
 assert codex["version"] == claude["version"] == marketplace_legacy["plugins"][0]["version"]
 assert codex["skills"] == "./skills/"
-assert "hooks" not in codex
+assert codex["hooks"] == "./hooks/hooks.json"
+hooks = json.loads((package / "hooks/hooks.json").read_bytes())["hooks"]
+assert set(hooks) == {"UserPromptSubmit", "PreToolUse", "PostToolUse", "Stop", "SessionStart"}
+for event, entries in hooks.items():
+    command = entries[0]["hooks"][0]["command"]
+    assert command.startswith('/usr/bin/python3 -I -B "${PLUGIN_ROOT}/scripts/capture.py"')
+    assert "--delivery plugin --event " + event in command
+    assert "CLAUDE_PLUGIN_ROOT" not in command
 assert sorted(p.name for p in (package / "skills").iterdir() if p.is_dir()) == ["commit-capture", "setup"]
 assert (package / "README.md").is_file()
 
@@ -51,9 +59,9 @@ assert entry["source"] == {"source": "local", "path": "./packages/codex"}
 drift = os.environ.get("CODEX_PLUGIN_TEST_VENDOR_DRIFT")
 for relative in (
     "commit-meta.sh",
-    "keeper",
     "keeper-core",
     "lib/capture-owner.py",
+    "lib/obsidian-mcp-client-install",
     "lib/commit-capture-parse.sh",
     "lib/note-hash.sh",
     "lib/resolve-config.sh",
@@ -67,6 +75,13 @@ for relative in (
     if packaged_bytes != canonical.read_bytes():
         print(f"vendor parity mismatch: {relative}", file=sys.stderr)
         sys.exit(1)
+
+canonical_keeper = (root / "scripts/keeper").read_bytes()
+assert (skill_root / "scripts/keeper").read_bytes() == canonical_keeper.replace(b"legacy -- bash", b"legacy --host codex -- bash")
+import hashlib
+verifier = (skill_root / "scripts/lib/obsidian-mcp-client-install").read_bytes()
+assert len(verifier) == 38431
+assert hashlib.sha256(verifier).hexdigest() == "d3f1e9bb467587294431c7e41665b8a3fa987036cf7ca207a79ae1c4f4243e16"
 
 mcp_helpers = root / "packages/mcp-server/helpers"
 mcp_drift = os.environ.get("MCP_SERVER_TEST_VENDOR_DRIFT")
@@ -134,7 +149,10 @@ CODEX_BOOTSTRAP_INSTALLED_SKILL="$INSTALLED/skills/setup" \
   PYTHONDONTWRITEBYTECODE=1 python3 "$ROOT_DIR/tests/codex-runtime-bootstrap.test.py" \
   BootstrapTest.test_installed_entrypoint_preview_does_not_write_persistent_state \
   || fail "installed setup preview failed without checkout dependencies"
-[ ! -e "$INSTALLED/hooks/hooks.json" ] || fail "manual Codex package unexpectedly installed hooks"
+[ -f "$INSTALLED/hooks/hooks.json" ] || fail "Codex capture hook definitions are missing"
+CODEX_HOME="$CODEX_HOME_DIR" python3 -I -B "$INSTALLED/scripts/capture.py" codex-status \
+  >"$TMP/capture-status.out" || fail "installed activation entrypoint failed"
+grep -q '"status": "dormant"' "$TMP/capture-status.out" || fail "plugin install activated capture"
 
 REPO="$TMP/repo"
 VAULT="$TMP/vault"
