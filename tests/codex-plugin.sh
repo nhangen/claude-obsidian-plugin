@@ -27,10 +27,16 @@ assert codex["hooks"] == "./hooks/hooks.json"
 hooks = json.loads((package / "hooks/hooks.json").read_bytes())["hooks"]
 assert set(hooks) == {"UserPromptSubmit", "PreToolUse", "PostToolUse", "Stop", "SessionStart"}
 for event, entries in hooks.items():
-    command = entries[0]["hooks"][0]["command"]
-    assert command.startswith('/usr/bin/python3 -I -B "${PLUGIN_ROOT}/scripts/capture.py"')
-    assert "--delivery plugin --event " + event in command
-    assert "CLAUDE_PLUGIN_ROOT" not in command
+    for entry in entries:
+        command = entry["hooks"][0]["command"]
+        assert command.startswith('/usr/bin/python3 -I -B "${PLUGIN_ROOT}/scripts/capture.py"')
+        assert "--delivery plugin --event " + event in command
+        assert "CLAUDE_PLUGIN_ROOT" not in command
+import re
+for tool, kind in (("Bash", "ordinary"), ("mcp__obsidian_write__obsidian_keeper_save", "owned-write"), ("mcp__obsidian_write__obsidian_daily_append", "owned-write")):
+    selected = [entry for entry in hooks["PreToolUse"] if re.fullmatch(entry["matcher"], tool)]
+    assert len(selected) == 1
+    assert "--tool-class " + kind in selected[0]["hooks"][0]["command"]
 assert sorted(p.name for p in (package / "skills").iterdir() if p.is_dir()) == ["commit-capture", "setup"]
 assert (package / "README.md").is_file()
 

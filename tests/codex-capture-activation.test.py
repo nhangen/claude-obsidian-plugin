@@ -290,6 +290,250 @@ class ActivationTest(unittest.TestCase):
             self.assertNotEqual(self.activation().returncode, 0)
         self.assertEqual(self.states(), [])
 
+    def installed_hook(self, event, raw, tool=None, environment=None):
+        import re
+
+        groups = json.loads((self.installed / "hooks/hooks.json").read_bytes())[
+            "hooks"
+        ][event]
+        if tool is not None:
+            groups = [
+                group
+                for group in groups
+                if re.fullmatch(group.get("matcher", ".*"), tool)
+            ]
+        self.assertEqual(len(groups), 1)
+        command = groups[0]["hooks"][0]["command"]
+        env = dict(self.env, PLUGIN_ROOT=str(self.installed))
+        for key, value in (environment or {}).items():
+            if value is None:
+                env.pop(key, None)
+            else:
+                env[key] = value
+        result = subprocess.run(
+            ["/bin/sh", "-c", command],
+            input=raw,
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+        return json.loads(result.stdout)
+
+    def test_corrupt_record_denies_actual_owned_pretool_before_home_lookup(self):
+        self.activate()
+        self.record_path().write_text("{}")
+        for tool in (
+            "mcp__obsidian_write__obsidian_keeper_save",
+            "mcp__obsidian_write__obsidian_daily_append",
+        ):
+            with self.subTest(tool=tool):
+                output = self.installed_hook(
+                    "PreToolUse",
+                    json.dumps(
+                        dict(
+                            hook_event_name="PreToolUse",
+                            tool_name=tool,
+                            cwd=str(self.project),
+                        )
+                    ),
+                    tool=tool,
+                )
+                self.assertEqual(
+                    output.get("hookSpecificOutput", {}).get("permissionDecision"),
+                    "deny",
+                )
+        output = self.installed_hook(
+            "PreToolUse",
+            json.dumps(
+                dict(
+                    hook_event_name="PreToolUse",
+                    tool_name="Bash",
+                    cwd=str(self.project),
+                )
+            ),
+            tool="Bash",
+        )
+        self.assertNotIn("permissionDecision", output.get("hookSpecificOutput", {}))
+
+    def test_list_hook_payload_never_raises_in_error_handler(self):
+        self.activate()
+        output = self.installed_hook(
+            "PreToolUse", "[]", tool="mcp__obsidian_write__obsidian_keeper_save"
+        )
+        self.assertEqual(
+            output.get("hookSpecificOutput", {}).get("permissionDecision"), "deny"
+        )
+
+    def test_admission_failures_deny_owned_writes_and_preserve_ordinary_work(self):
+        self.activate()
+        record = self.record_path()
+        original = record.read_bytes()
+        private = self.directory / "saved-activation.json"
+        private.write_bytes(original)
+        private.chmod(0o600)
+        for failure in (
+            "symlink",
+            "permissions",
+            "global-disabled",
+            "global-draining",
+            "xdg-invalid",
+            "home-invalid",
+            "default-home-invalid",
+            "alias-inventory",
+            "runtime",
+        ):
+            with self.subTest(failure=failure):
+                environment = {}
+                if failure == "symlink":
+                    record.rename(self.directory / "removed-record.json")
+                    record.symlink_to(private)
+                elif failure == "permissions":
+                    record.chmod(0o644)
+                elif failure == "global-disabled":
+                    self.global_owner(owner="disabled")
+                elif failure == "global-draining":
+                    self.global_owner(phase="draining")
+                elif failure == "xdg-invalid":
+                    environment["XDG_STATE_HOME"] = ""
+                elif failure == "home-invalid":
+                    environment["CODEX_HOME"] = ""
+                elif failure == "default-home-invalid":
+                    environment.update(HOME="", CODEX_HOME=None, XDG_STATE_HOME=None)
+                elif failure == "alias-inventory":
+                    environment["CODEX_HOME"] = str(
+                        self.directory / "unregistered-home"
+                    )
+                    corrupt = record.with_name("invalid.json")
+                    corrupt.write_text("{}")
+                    corrupt.chmod(0o600)
+                elif failure == "runtime":
+                    descriptor = self.profile / "capture-profile.json"
+                    profile_bytes = descriptor.read_bytes()
+                    descriptor.write_text("{}")
+                for tool in ("mcp__obsidian_write__obsidian_keeper_save", "Bash"):
+                    payload = json.dumps(
+                        dict(
+                            hook_event_name="PreToolUse",
+                            tool_name=tool,
+                            cwd=str(self.project),
+                        )
+                    )
+                    output = self.installed_hook(
+                        "PreToolUse", payload, tool=tool, environment=environment
+                    )
+                    decision = output.get("hookSpecificOutput", {}).get(
+                        "permissionDecision"
+                    )
+                    self.assertEqual(
+                        decision, "deny" if tool.startswith("mcp__") else None
+                    )
+                for event in ("UserPromptSubmit", "Stop"):
+                    output = self.installed_hook(
+                        event,
+                        json.dumps(
+                            dict(
+                                hook_event_name=event,
+                                prompt="ordinary work",
+                                cwd=str(self.project),
+                            )
+                        ),
+                        environment=environment,
+                    )
+                    self.assertNotIn("decision", output)
+                    self.assertNotEqual(output.get("continue"), False)
+                if failure == "symlink":
+                    record.unlink()
+                    (self.directory / "removed-record.json").rename(record)
+                elif failure == "permissions":
+                    record.chmod(0o600)
+                elif failure.startswith("global-"):
+                    self.global_owner()
+                elif failure == "alias-inventory":
+                    corrupt.unlink()
+                elif failure == "runtime":
+                    descriptor.write_bytes(profile_bytes)
+
+    def test_malformed_owned_inputs_deny_and_ordinary_handlers_stay_advisory(self):
+        self.activate()
+        for raw in (
+            "[]",
+            "null",
+            "false",
+            '"text"',
+            "{",
+            '{"tool_name":"Bash","tool_name":"mcp__obsidian_write__obsidian_keeper_save"}',
+            "[" * 2000 + "]" * 2000,
+            json.dumps(
+                dict(
+                    tool_name="mcp__obsidian_write__obsidian_keeper_save",
+                    tool_input="x" * 262145,
+                )
+            ),
+        ):
+            with self.subTest(raw=raw[:80]):
+                owned = self.installed_hook(
+                    "PreToolUse", raw, tool="mcp__obsidian_write__obsidian_keeper_save"
+                )
+                self.assertEqual(
+                    owned.get("hookSpecificOutput", {}).get("permissionDecision"),
+                    "deny",
+                )
+                ordinary = self.installed_hook("PreToolUse", raw, tool="Bash")
+                self.assertNotIn(
+                    "permissionDecision", ordinary.get("hookSpecificOutput", {})
+                )
+                for event in ("UserPromptSubmit", "Stop"):
+                    output = self.installed_hook(event, raw)
+                    self.assertNotIn("decision", output)
+                    self.assertNotEqual(output.get("continue"), False)
+
+    def test_hook_error_identity_resets_between_calls_and_unknown_input_denies(self):
+        self.activate()
+        self.record_path().write_text("{}")
+        program = """
+from contextlib import redirect_stdout
+import io, json, runpy, sys
+library = sys.argv[1]
+main = runpy.run_path(library)['codex_main']
+results = []
+for value in ({'tool_name': 'mcp__obsidian_write__obsidian_keeper_save'}, {'tool_name': 'Bash'}, []):
+    sys.argv = [library, 'codex-route', '--event', 'PreToolUse']
+    sys.stdin = io.TextIOWrapper(io.BytesIO(json.dumps(value).encode()))
+    output = io.StringIO()
+    with redirect_stdout(output):
+        assert main() == 0
+    results.append(json.loads(output.getvalue()))
+print(json.dumps(results))
+"""
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-B",
+                "-c",
+                program,
+                str(
+                    self.installed
+                    / "skills/commit-capture/scripts/lib/capture-owner.py"
+                ),
+            ],
+            env=self.env,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        outputs = json.loads(result.stdout)
+        self.assertEqual(
+            [
+                output.get("hookSpecificOutput", {}).get("permissionDecision")
+                for output in outputs
+            ],
+            ["deny", None, "deny"],
+        )
+
     def test_pending_disable_and_reapply_retain_closed_evidence(self):
         self.activate()
         self.event("UserPromptSubmit", prompt="Retain me")

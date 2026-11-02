@@ -13,11 +13,21 @@
     ],
     "PreToolUse": [
       {
-        "matcher": "^(Bash|mcp__obsidian_write__obsidian_keeper_save|mcp__obsidian_write__obsidian_daily_append)$",
+        "matcher": "^Bash$",
         "hooks": [
           {
             "type": "command",
-            "command": "/usr/bin/python3 -I -B \"${PLUGIN_ROOT}/scripts/capture.py\" codex-route --delivery plugin --event PreToolUse",
+            "command": "/usr/bin/python3 -I -B \"${PLUGIN_ROOT}/scripts/capture.py\" codex-route --delivery plugin --event PreToolUse --tool-class ordinary",
+            "timeout": 15
+          }
+        ]
+      },
+      {
+        "matcher": "^(mcp__obsidian_write__obsidian_keeper_save|mcp__obsidian_write__obsidian_daily_append)$",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/usr/bin/python3 -I -B \"${PLUGIN_ROOT}/scripts/capture.py\" codex-route --delivery plugin --event PreToolUse --tool-class owned-write",
             "timeout": 15
           }
         ]

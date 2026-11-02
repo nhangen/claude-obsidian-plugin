@@ -1677,21 +1677,22 @@ def codex_transition(args, home):
         return record
 
 
-def codex_route(args, home):
-    global CODEX_HOOK_INPUT
-    initial = codex_record(home)
-    if initial is None or initial["delivery"] != args.delivery:
-        return {}
+def codex_hook_input():
     payload = sys.stdin.buffer.read(262145)
-    CODEX_HOOK_INPUT = payload
     if len(payload) > 262144:
         raise OwnershipError("Codex hook payload exceeds bounded input")
     value = decode_json(payload)
-    if (
-        not isinstance(value, dict)
-        or value.get("hook_event_name", args.event) != args.event
-    ):
+    if not isinstance(value, dict):
+        raise OwnershipError("Codex hook input must be a JSON object")
+    return value
+
+
+def codex_route(args, home, value):
+    if value.get("hook_event_name", args.event) != args.event:
         raise OwnershipError("Codex hook event mismatch")
+    initial = codex_record(home)
+    if initial is None or initial["delivery"] != args.delivery:
+        return {}
     with admission() as descriptor:
         record = codex_record(home)
         if record["delivery"] != args.delivery:
@@ -1739,6 +1740,24 @@ def codex_route(args, home):
         return output
 
 
+def codex_hook_failure(args, value, message):
+    tool = value.get("tool_name") if isinstance(value, dict) else None
+    unknown = not isinstance(tool, str) or not tool
+    if args.event == "PreToolUse" and (
+        tool in CODEX_WRITES
+        or args.tool_class == "owned-write"
+        or (unknown and args.tool_class != "ordinary")
+    ):
+        return dict(
+            hookSpecificOutput=dict(
+                hookEventName=args.event,
+                permissionDecision="deny",
+                permissionDecisionReason=message,
+            )
+        )
+    return dict(systemMessage=message)
+
+
 def codex_main():
     parser = argparse.ArgumentParser(
         description="Verified Codex capture activation; preview unless --apply"
@@ -1753,18 +1772,32 @@ def codex_main():
     parser.add_argument("--profile")
     parser.add_argument("--delivery", choices=("plugin", "managed"), default="plugin")
     parser.add_argument("--event", choices=CODEX_EVENTS)
+    parser.add_argument("--tool-class", choices=("owned-write", "ordinary"))
     parser.add_argument("--create-profile", action="store_true")
     parser.add_argument("--folder", default="Sessions")
     parser.add_argument("--daily-folder", default="Daily")
     parser.add_argument("--verification")
     parser.add_argument("--apply", action="store_true")
     args = parser.parse_args()
+    value = None
     try:
+        if args.operation == "codex-route":
+            value = codex_hook_input()
+            if args.event == "PreToolUse":
+                tool = value.get("tool_name")
+                if not isinstance(tool, str) or not tool:
+                    raise OwnershipError("Codex tool identity unavailable")
+                if (args.tool_class == "owned-write" and tool not in CODEX_WRITES) or (
+                    args.tool_class == "ordinary" and tool in CODEX_WRITES
+                ):
+                    raise OwnershipError(
+                        "Codex trusted handler class does not match tool identity"
+                    )
         home = codex_home(args.codex_home)
         if args.operation == "codex-route":
             if args.event is None:
                 raise OwnershipError("Codex hook event required")
-            result = codex_route(args, home)
+            result = codex_route(args, home, value)
         elif args.operation == "codex-status":
             record = codex_record(home)
             result = dict(
@@ -1782,6 +1815,7 @@ def codex_main():
         TypeError,
         KeyError,
         AttributeError,
+        RecursionError,
         subprocess.SubprocessError,
     ) as error:
         message = (
@@ -1792,28 +1826,7 @@ def codex_main():
         if args.operation != "codex-route":
             print("capture: " + message, file=sys.stderr)
             return 2
-        # Only the owned write tools can be denied; capture failure never stops ordinary work.
-        if args.event == "PreToolUse":
-            try:
-                value = (
-                    decode_json(payload)
-                    if (payload := globals().get("CODEX_HOOK_INPUT"))
-                    else {}
-                )
-            except ValueError:
-                value = {}
-            if value.get("tool_name") in CODEX_WRITES:
-                result = dict(
-                    hookSpecificOutput=dict(
-                        hookEventName=args.event,
-                        permissionDecision="deny",
-                        permissionDecisionReason=message,
-                    )
-                )
-            else:
-                result = dict(systemMessage=message)
-        else:
-            result = dict(systemMessage=message)
+        result = codex_hook_failure(args, value, message)
     print(json.dumps(result, sort_keys=True))
     return 0
 
