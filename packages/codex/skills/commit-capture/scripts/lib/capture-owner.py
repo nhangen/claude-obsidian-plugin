@@ -1235,8 +1235,6 @@ def codex_home(value=None):
     if not value or not Path(value).is_absolute():
         raise OwnershipError("CODEX_HOME must be a nonempty absolute path")
     home = str(canonical_path(value))
-    if codex_record(home) is not None:
-        return home
     matches = []
     for record in codex_inventory():
         try:
@@ -1694,6 +1692,7 @@ def codex_route(args, home, value):
     if initial is None or initial["delivery"] != args.delivery:
         return {}
     with admission() as descriptor:
+        home = codex_home(home)
         record = codex_record(home)
         if record["delivery"] != args.delivery:
             return {}

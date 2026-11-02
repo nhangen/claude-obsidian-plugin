@@ -840,6 +840,195 @@ print(json.dumps(results))
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("multiple", result.stderr)
 
+    def test_both_exact_duplicate_home_records_close_all_admission(self):
+        alias = self.case_alias(self.home)
+        self.activate()
+        second_profile = self.directory / "duplicate-profile"
+        self.native(
+            "attach",
+            "--host",
+            "codex",
+            "--scope",
+            "user",
+            "--home",
+            str(second_profile),
+            "--folder",
+            "Sessions",
+            "--release-sha256",
+            self.digest,
+        )
+        original = json.loads(self.record_path().read_bytes())
+        binding = dict(original["retained_profiles"][0], profile=str(second_profile))
+        duplicate = dict(
+            original, **binding, codex_home=str(alias), retained_profiles=[binding]
+        )
+        duplicate_path = self.record_path().with_name(
+            hashlib.sha256(str(alias).encode()).hexdigest() + ".json"
+        )
+        duplicate_path.write_text(json.dumps(duplicate))
+        duplicate_path.chmod(0o600)
+        before = {
+            profile: self.snapshot(profile)
+            for profile in (self.profile, second_profile)
+        }
+        for spelling in (self.home, alias):
+            self.env["CODEX_HOME"] = str(spelling)
+            with self.subTest(spelling=spelling.name, entry="status"):
+                result = self.cli("codex-status")
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("multiple", result.stderr)
+            for tool in (
+                "mcp__obsidian_write__obsidian_keeper_save",
+                "mcp__obsidian_write__obsidian_daily_append",
+            ):
+                with self.subTest(spelling=spelling.name, entry=tool):
+                    output = self.installed_hook(
+                        "PreToolUse",
+                        json.dumps(
+                            dict(
+                                hook_event_name="PreToolUse",
+                                session_id="duplicate-session",
+                                turn_id="duplicate-turn",
+                                cwd=str(self.project),
+                                tool_name=tool,
+                            )
+                        ),
+                        tool=tool,
+                    )
+                    self.assertEqual(
+                        output.get("hookSpecificOutput", {}).get("permissionDecision"),
+                        "deny",
+                    )
+                    self.assertIn("multiple", json.dumps(output))
+            for event in ("UserPromptSubmit", "Stop"):
+                with self.subTest(spelling=spelling.name, entry=event):
+                    output = self.installed_hook(
+                        event,
+                        json.dumps(
+                            dict(
+                                hook_event_name=event,
+                                session_id="duplicate-session",
+                                turn_id="duplicate-turn",
+                                cwd=str(self.project),
+                                prompt="Do not enroll ambiguous writers",
+                            )
+                        ),
+                    )
+                    self.assertIn("multiple", json.dumps(output))
+                    self.assertNotIn("decision", output)
+            with self.subTest(spelling=spelling.name, entry="legacy"):
+                result = self.cli(
+                    "legacy",
+                    "--host",
+                    "codex",
+                    "--",
+                    "/usr/bin/true",
+                    helper=self.installed
+                    / "skills/commit-capture/scripts/lib/capture-owner.py",
+                )
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("multiple", result.stderr)
+            with self.subTest(spelling=spelling.name, entry="no capture evidence"):
+                self.assertEqual(
+                    {profile: self.snapshot(profile) for profile in before}, before
+                )
+
+    def test_exact_home_lookup_also_validates_corrupt_inventory(self):
+        self.activate()
+        corrupt = self.record_path().with_name("invalid.json")
+        corrupt.write_text("{}")
+        corrupt.chmod(0o600)
+        result = self.cli("codex-status")
+        self.assertNotEqual(result.returncode, 0)
+        output = self.installed_hook(
+            "PreToolUse",
+            json.dumps(
+                dict(
+                    hook_event_name="PreToolUse",
+                    tool_name="mcp__obsidian_write__obsidian_keeper_save",
+                )
+            ),
+            tool="mcp__obsidian_write__obsidian_keeper_save",
+        )
+        self.assertEqual(
+            output.get("hookSpecificOutput", {}).get("permissionDecision"), "deny"
+        )
+        self.assertIn("inventory", json.dumps(output))
+
+    def test_hook_rechecks_duplicate_identity_under_admission_lock(self):
+        alias = self.case_alias(self.home)
+        self.activate()
+        record = json.loads(self.record_path().read_bytes())
+        record["codex_home"] = str(alias)
+        saved = self.directory / "concurrently-published.json"
+        saved.write_text(json.dumps(record))
+        saved.chmod(0o600)
+        target = self.record_path().with_name(
+            hashlib.sha256(str(alias).encode()).hexdigest() + ".json"
+        )
+        before = self.snapshot(self.profile)
+        program = """
+from contextlib import contextmanager
+import runpy, shutil, sys
+library, saved, target = sys.argv[1:]
+main = runpy.run_path(library)['codex_main']
+namespace = main.__globals__
+admission = namespace['admission']
+@contextmanager
+def published_before_admission(exclusive=False):
+    with admission(exclusive=exclusive) as descriptor:
+        shutil.copy2(saved, target)
+        yield descriptor
+namespace['admission'] = published_before_admission
+sys.argv = [library, 'codex-route', '--event', 'PreToolUse', '--tool-class', 'owned-write']
+sys.exit(main())
+"""
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-B",
+                "-c",
+                program,
+                str(
+                    self.installed
+                    / "skills/commit-capture/scripts/lib/capture-owner.py"
+                ),
+                str(saved),
+                str(target),
+            ],
+            input=json.dumps(
+                dict(
+                    hook_event_name="PreToolUse",
+                    tool_name="mcp__obsidian_write__obsidian_keeper_save",
+                    cwd=str(self.project),
+                )
+            ),
+            env=self.env,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        output = json.loads(result.stdout)
+        self.assertEqual(output["hookSpecificOutput"]["permissionDecision"], "deny")
+        self.assertIn("multiple", json.dumps(output))
+        self.assertEqual(self.snapshot(self.profile), before)
+
+    def test_recorded_missing_home_preserves_textual_identity(self):
+        missing = self.directory / "missing-home"
+        self.home = missing
+        self.activate()
+        self.assertFalse(missing.exists())
+        result = self.cli("codex-status", "--codex-home", str(missing))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout)["status"], "configured")
+        self.assertEqual(json.loads(result.stdout)["codex_home"], str(missing))
+        result = self.cli(
+            "codex-status", "--codex-home", str(missing.with_name(missing.name.upper()))
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout)["status"], "dormant")
+
     def test_alias_lookup_bounds_total_inventory_bytes(self):
         self.activate()
         original = json.loads(self.record_path().read_bytes())
