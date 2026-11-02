@@ -1,6 +1,10 @@
 # Codex Commit Capture
 
-After every successful `git commit`, use the installed `obsidian:commit-capture` skill to save the conversation context to Obsidian. Current Codex CLI sessions load the skill but do not deliver this plugin's bundled `PreToolUse`/`PostToolUse` hooks, so this path is agent-invoked after the commit.
+The installed `obsidian:commit-capture` skill is the guarded legacy route after a
+successful Git commit. The package also contains setup and dormant native hooks.
+An explicitly activated public Codex capture profile owns its native session and
+commit flow; do not invoke the legacy route for those events. See the
+[package activation contract](../../packages/codex/README.md#native-capture-activation).
 
 ## Install
 
@@ -17,11 +21,19 @@ vault_path: /absolute/path/to/your/vault
 ---
 ```
 
-The Codex package contains one skill and no hooks, session watcher, or unrelated Claude-specific skills.
+Installing the package does not activate capture or trust its hooks. Legacy
+local capture needs the vault configuration above; MCP capture does not need a
+client-side vault mount. Claude's watcher and unrelated skills are not installed.
 
 ## Runtime flow
 
-1. Trigger only after `git commit` exits successfully. Failed commits, dry runs, and non-commit Git commands do not qualify.
+1. Before metadata, inspect global ownership with the installed skill's
+   `scripts/lib/capture-owner.py status` and Codex admission with the installed
+   plugin's `scripts/capture.py codex-status`, preserving the intended
+   `CODEX_HOME`. Continue only for stable global legacy ownership and dormant
+   Codex status. Existing activation, disabled/draining state or inspection
+   failure never authorizes legacy fallback. Then require a successful Git
+   commit; failed commits, dry runs and non-commit commands do not qualify.
 2. Resolve helpers relative to the installed skill and run its bundled `scripts/commit-meta.sh -C <repository>`.
 3. If metadata resolution fails, report the error and stop. Never rebuild the record with `git rev-parse`, `git log`, or `git remote get-url`; the helper strips remote userinfo before it can reach a synced note.
 4. Route exactly once:
