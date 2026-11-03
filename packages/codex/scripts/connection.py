@@ -149,7 +149,13 @@ def validate(value):
         fail("both explicit credential profiles required")
     for reference in value["credentials"].values():
         credential(reference)
-    if value["credentials"]["read"] == value["credentials"]["write"]:
+    read, write = (value["credentials"][profile] for profile in ("read", "write"))
+    same_reference = read == write
+    if read["provider"] == write["provider"] == "file":
+        same_reference = os.path.samestat(
+            Path(read["path"]).lstat(), Path(write["path"]).lstat()
+        )
+    if same_reference:
         fail("read and write require distinct scoped credential references")
     return value
 

@@ -237,6 +237,9 @@ class LoaderTest(unittest.TestCase):
         elif name == "credential-read":
             before = '        path = absolute(value["path"])'
             after = before + "\n        path.read_bytes()"
+        elif name == "credential-identity":
+            before = '    if read["provider"] == write["provider"] == "file":'
+            after = "    if False:"
         else:
             raise AssertionError("unknown fixture mutation")
         self.assertIn(before, text)
@@ -666,6 +669,43 @@ class LoaderTest(unittest.TestCase):
         self.assertFalse(self.prefix.exists())
         self.assertFalse((self.codex_home / "obsidian-connection.json").exists())
         self.assertEqual(self.config.read_bytes(), original)
+        self.assert_unchanged_capture()
+
+    def test_setup_rejects_same_file_path_alias(self):
+        self.runtime()
+        self.install()
+        alias = str(self.tokens[0].parent) + "/./" + self.tokens[0].name
+        self.assertNotEqual(alias, str(self.tokens[0]))
+        original = self.config.read_bytes()
+        self.configure(
+            "--apply",
+            "--authorize-routine-tools",
+            "--write-token-file",
+            alias,
+            expected=64,
+            installed=True,
+        )
+        self.assertFalse((self.codex_home / "obsidian-connection.json").exists())
+        self.assertEqual(self.config.read_bytes(), original)
+        self.assert_unchanged_capture()
+
+    def test_startup_rejects_manually_configured_same_file_alias(self):
+        self.runtime()
+        self.install()
+        self.configure("--apply", installed=True)
+        record = self.codex_home / "obsidian-connection.json"
+        value = json.loads(record.read_bytes())
+        alias = str(self.tokens[0].parent) + "/./" + self.tokens[0].name
+        value["credentials"]["write"]["path"] = alias
+        self.assertNotEqual(value["credentials"]["read"], value["credentials"]["write"])
+        record.write_text(json.dumps(value))
+        before = record.read_bytes()
+        _, _, data = self.inventory()
+        self.assertEqual(set(data), {"obsidian", "obsidian-write"})
+        self.assertEqual(data["obsidian"]["runtimeStatus"], "failed")
+        self.assertEqual(data["obsidian-write"]["runtimeStatus"], "failed")
+        self.assertTrue(all(not item["tools"] for item in data.values()))
+        self.assertEqual(record.read_bytes(), before)
         self.assert_unchanged_capture()
 
     def test_setup_conflicts_and_idempotence_preserve_policy(self):
