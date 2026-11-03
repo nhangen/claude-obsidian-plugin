@@ -175,6 +175,10 @@ class LoaderTest(unittest.TestCase):
         shutil.copytree(ROOT / "packages/codex", self.checkout / "packages/codex")
         shutil.copytree(ROOT / ".agents", self.checkout / ".agents")
         self.package = self.checkout / "packages/codex"
+        manifest = self.package / ".codex-plugin/plugin.json"
+        fixture_manifest = json.loads(manifest.read_bytes())
+        fixture_manifest["version"] = "0.0.0-connection-fixture"
+        manifest.write_text(json.dumps(fixture_manifest))
         mutation = os.environ.get("CODEX_BUNDLED_TEST_MUTATION")
         if mutation:
             self.mutate(mutation)
@@ -278,15 +282,16 @@ class LoaderTest(unittest.TestCase):
             path.chmod(0o600)
             self.tokens.append(path)
 
-    def configure(self, *arguments, expected=0, installed=False):
+    def installed_package(self):
         version = json.loads((self.package / ".codex-plugin/plugin.json").read_bytes())[
             "version"
         ]
-        package = (
+        return (
             self.codex_home / "plugins/cache/nhangen-codex-plugins/obsidian" / version
-            if installed
-            else self.package
         )
+
+    def configure(self, *arguments, expected=0, installed=False):
+        package = self.installed_package() if installed else self.package
         result = subprocess.run(
             [
                 sys.executable,
@@ -415,10 +420,7 @@ class LoaderTest(unittest.TestCase):
             )
         )
         self.install()
-        installed_mock = (
-            self.codex_home
-            / "plugins/cache/nhangen-codex-plugins/obsidian/1.27.0/mock.py"
-        )
+        installed_mock = self.installed_package() / "mock.py"
         self.assertTrue(installed_mock.is_file(), "installed mock absent")
         server, thread = self.start()
         data = self.catalog(server, thread)
@@ -527,9 +529,7 @@ class LoaderTest(unittest.TestCase):
         self.runtime()
         self.configure("--apply")
         self.install()
-        installed = (
-            self.codex_home / "plugins/cache/nhangen-codex-plugins/obsidian/1.27.0"
-        )
+        installed = self.installed_package()
         for relative in (
             "skills/commit-capture/scripts/lib/obsidian-mcp-client-install",
             "skills/setup/scripts/client-v0.3.1.pin.json",
@@ -847,10 +847,7 @@ runpy.run_path(script, run_name="__main__")
                 "pluginName": "obsidian",
             },
         )
-        installed = (
-            self.codex_home
-            / "plugins/cache/nhangen-codex-plugins/obsidian/1.27.1-fixture"
-        )
+        installed = self.installed_package()
         self.assertTrue(
             (installed / ".mcp.json").is_file(),
             "supported install did not materialize the candidate",
