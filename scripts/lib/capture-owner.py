@@ -2144,7 +2144,6 @@ def codex_execute_stream(binding, words, descriptor, payload):
             pass_fds=(descriptor,),
             start_new_session=True,
         )
-        completed = False
         try:
             selector.register(process.stdout, selectors.EVENT_READ, "stdout")
             selector.register(process.stderr, selectors.EVENT_READ, "stderr")
@@ -2193,15 +2192,13 @@ def codex_execute_stream(binding, words, descriptor, payload):
             if interrupted[0] is not None:
                 raise GuardInterrupted(interrupted[0])
             result = process.returncode
-            completed = True
             return result if result >= 0 else 128 - result, bytes(output)
         finally:
-            if not completed:
-                try:
-                    os.killpg(process.pid, signal.SIGKILL)
-                except ProcessLookupError:
-                    pass
-                process.wait()
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            process.wait()
             process.stdout.close()
             process.stderr.close()
 

@@ -1007,6 +1007,63 @@ print(json.dumps(results))
         self.assertIn("long-fixture-check", result.stderr)
         self.assertIn("busy", captured.read_text())
 
+    def assert_guarded_exit_stops_descendants(self, hook_exit):
+        _, command = self.guarded_fixture(commit=True)
+        hooks = self.directory / "no-hooks"
+        hooks.mkdir()
+        started = self.directory / "background-group"
+        release = self.directory / "release-background"
+        marker = self.directory / "background-continued"
+        hook = hooks / "pre-commit"
+        hook.write_text(
+            "#!/bin/sh\n(\n/bin/ps -o pgid= -p $$ > "
+            + shlex.quote(str(started))
+            + "\nwhile [ ! -e "
+            + shlex.quote(str(release))
+            + " ]; do /bin/sleep 0.02; done\n/usr/bin/touch "
+            + shlex.quote(str(marker))
+            + "\n) </dev/null >/dev/null 2>&1 &\nwhile [ ! -s "
+            + shlex.quote(str(started))
+            + " ]; do /bin/sleep 0.02; done\nprintf 'background-fixture\\n' >&2\nexit "
+            + str(hook_exit)
+            + "\n"
+        )
+        hook.chmod(0o700)
+        group = None
+        try:
+            result = self.run_emitted(command)
+            self.assertTrue(started.exists())
+            group = int(started.read_text().strip())
+            self.assertNotEqual(group, os.getpgrp())
+            self.assertEqual(
+                result.returncode, 0 if hook_exit == 0 else 1, result.stderr
+            )
+            self.assertIn("background-fixture", result.stderr)
+            if hook_exit == 0:
+                self.assertIn("fixture", result.stdout)
+            with (self.state / "capture-ownership/admission.lock").open("r+") as lock:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                release.touch()
+                deadline = time.monotonic() + 1
+                while not marker.exists() and time.monotonic() < deadline:
+                    time.sleep(0.02)
+                self.assertFalse(
+                    marker.exists(),
+                    "owned descendant continued after admission was released",
+                )
+        finally:
+            if group is not None:
+                try:
+                    os.killpg(group, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+
+    def test_guard_success_stops_background_descendants_before_releasing_lease(self):
+        self.assert_guarded_exit_stops_descendants(0)
+
+    def test_guard_nonzero_stops_background_descendants_before_releasing_lease(self):
+        self.assert_guarded_exit_stops_descendants(7)
+
     def test_guard_sigterm_stops_owned_executor_before_releasing_lease(self):
         _, command = self.guarded_fixture(commit=True)
         hooks = self.directory / "no-hooks"
