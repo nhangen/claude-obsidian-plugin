@@ -6,6 +6,13 @@ The legacy skill obtains sanitized commit metadata and writes conversation
 context through its guarded keeper. Native capture uses a separately activated,
 verified public runtime; installing the plugin alone does not activate it.
 
+The manifest declares `requires_local_executor: true` because these skills use
+local Git, Python, runtime launchers, and host configuration. This is a local
+execution requirement, not a bundled MCP connection. It does not make a hosted
+chat inherit the Mac's MCP configuration or prove that its vault tools are
+available. Verify discovery and a bounded read in the intended chat after
+connection setup; do not use another chat's success as its acceptance evidence.
+
 The `setup` skill verifies, installs, or reuses the public client runtime as a
 plugin implementation dependency. It resolves its helper from the installed
 skill, authenticates fixed `nhangen/obsidian-mcp` `client-v0.3.1` release pins,
