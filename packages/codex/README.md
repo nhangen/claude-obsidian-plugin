@@ -2,6 +2,13 @@
 
 This Codex package exposes `commit-capture` and `setup`. After a successful Git commit, `commit-capture` obtains sanitized metadata through its bundled `commit-meta.sh`, writes 3-8 conversation-context bullets through its bundled keeper, and prevents duplicate appends with `--skip-if-hash`.
 
+The manifest declares `requires_local_executor: true` because these skills use
+local Git, Python, runtime launchers, and host configuration. This is a local
+execution requirement, not a bundled MCP connection. It does not make a hosted
+chat inherit the Mac's MCP configuration or prove that its vault tools are
+available. Verify discovery and a bounded read in the intended chat after
+connection setup; do not use another chat's success as its acceptance evidence.
+
 The `setup` skill verifies, installs, or reuses the public client runtime as a
 plugin implementation dependency. It resolves its helper from the installed
 skill, authenticates fixed `nhangen/obsidian-mcp` `client-v0.3.1` release pins,

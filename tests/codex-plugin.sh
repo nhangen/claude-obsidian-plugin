@@ -124,6 +124,16 @@ PY
 )"
 INSTALLED="$CODEX_HOME_DIR/plugins/cache/nhangen-codex-plugins/obsidian/$VERSION"
 SKILL_ROOT="$INSTALLED/skills/commit-capture"
+python3 -I -B - "$INSTALLED/.codex-plugin/plugin.json" <<'PY' \
+  || fail "installed plugin did not declare its local execution requirement"
+import json
+import pathlib
+import sys
+
+manifest = json.loads(pathlib.Path(sys.argv[1]).read_text())
+if manifest.get("requires_local_executor") is not True:
+    raise SystemExit("local Git and runtime skills require a local executor")
+PY
 [ -f "$SKILL_ROOT/SKILL.md" ] || fail "installed skill is missing"
 [ -f "$INSTALLED/skills/setup/SKILL.md" ] || fail "installed setup skill is missing"
 [ -f "$INSTALLED/skills/setup/scripts/client-v0.3.1.pin.json" ] || fail "installed runtime pins are missing"

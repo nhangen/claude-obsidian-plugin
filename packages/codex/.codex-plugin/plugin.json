@@ -8,6 +8,7 @@
   "homepage": "https://github.com/nhangen/claude-obsidian-plugin",
   "repository": "https://github.com/nhangen/claude-obsidian-plugin",
   "license": "MIT",
+  "requires_local_executor": true,
   "keywords": ["obsidian", "notes", "vault", "commit-capture", "codex"],
   "skills": "./skills/",
   "interface": {
