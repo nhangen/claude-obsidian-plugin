@@ -641,6 +641,20 @@ print(json.dumps(results))
             .split(", then call", 1)[0]
         )
 
+    def test_commit_message_with_executor_name_is_intercepted(self):
+        _, command = self.guarded_fixture(
+            commit=True, commit_command="git commit -m fix-codex-execute"
+        )
+        self.assertTrue(json.loads(self.states()[0].read_bytes())["snapshots"])
+        result = self.run_emitted(command)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        subject = subprocess.check_output(
+            ["git", "-C", str(self.project), "log", "-1", "--format=%s"],
+            env=self.env,
+            text=True,
+        ).strip()
+        self.assertEqual(subject, "fix-codex-execute")
+
     def test_guarded_executor_completes_with_stdin_producer_still_open(self):
         _, command = self.guarded_fixture(commit=True)
         result = self.run_emitted_open_stdin(command)

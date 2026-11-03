@@ -2048,10 +2048,16 @@ def codex_unwrap_executor(value, home, record, current):
     ):
         return value
     command = value["tool_input"].get("command")
-    if not isinstance(command, str) or "codex-execute" not in command:
+    if not isinstance(command, str):
         return value
-    words = shlex.split(command)
-    if len(words) < 9 or words[:6] != codex_guard_prefix("")[:6] or words[7] != "--":
+    try:
+        words = shlex.split(command)
+    except ValueError:
+        return value
+    prefix = codex_guard_prefix("")
+    if words[:5] != prefix[:5]:
+        return value
+    if len(words) < 9 or words[:6] != prefix[:6] or words[7] != "--":
         raise OwnershipError("invalid packaged executor command")
     ticket = codex_decode_authorization(words[6])
     codex_check_authorization(ticket, home, record, current)
