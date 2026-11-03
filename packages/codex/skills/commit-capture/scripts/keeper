@@ -1,4 +1,4 @@
 #!/usr/bin/env bash
 set -euo pipefail
 KEEPER_DIR="$(cd "$(dirname "$0")" && pwd -P)"
-exec python3 "$KEEPER_DIR/lib/capture-owner.py" legacy -- bash "$KEEPER_DIR/keeper-core" "$@"
+exec python3 "$KEEPER_DIR/lib/capture-owner.py" legacy --host codex -- bash "$KEEPER_DIR/keeper-core" "$@"

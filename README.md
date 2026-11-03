@@ -1,10 +1,10 @@
 # obsidian
 
-**Obsidian vault integration for Claude Code and Codex — auto-save Claude sessions, capture git commit context, and create/recall notes from the CLI.**
+**Obsidian vault integration for Claude Code and Codex: capture sessions and commit context, and create or recall notes from the CLI.**
 
 ## Why
 
-Long agent sessions and the commits they produce hold context that's gone the moment the session ends: why a decision was made, what was investigated and rejected, loose ends flagged for later. Pasting that into Obsidian by hand is the kind of chore that doesn't get done. This plugin captures Claude Code sessions on stop, captures commit context automatically in Claude Code and through an installed post-commit skill in Codex, and routes notes to the right folder by domain.
+Long agent sessions and the commits they produce hold context that's gone the moment the session ends: why a decision was made, what was investigated and rejected, loose ends flagged for later. Pasting that into Obsidian by hand is the kind of chore that doesn't get done. This plugin captures Claude Code sessions and commit context, supports separately activated native Codex capture or its guarded legacy post-commit skill, and routes notes to the right folder.
 
 ## How it works
 
@@ -26,9 +26,9 @@ this documentation does not claim it is already available on every host.
 
 Today, Claude's remote setup can install/reuse the verified runtime, but automatic
 capture still requires its separate, explicit ownership handoff. The packaged
-Codex integration provides a legacy commit-capture skill; native MCP capture
-currently uses a separately configured and verified Codex profile. Installing the
-Codex plugin alone does not activate that profile or Claude's hooks. OpenCode
+Codex integration preserves the legacy commit-capture skill and includes dormant
+native hooks for an explicitly activated, verified user-wide Codex profile.
+Installing the Codex plugin alone does not activate capture or trust its hooks. OpenCode
 supports direct MCP tools, not automatic capture parity. See the host guides
 below for the shipped boundaries. Standard MCP connections and advanced direct
 runtime setup remain supported without the plugin.
@@ -53,8 +53,9 @@ The plugin dispatches hooks through `scripts/capture-hook.sh`. Generic capture
 planning, commit execution, receipts, retry and recovery remain in the verified
 public client. The plugin owns only host-local writer admission and delegation.
 Manual skills honor the same owner. MCP failure never falls back to a vault
-mount or local keeper. Codex's instruction-driven plugin projection remains a
-legacy compatibility route; this attachment does not migrate Codex clients.
+mount or local keeper. Codex activation has its own record for each canonical
+`CODEX_HOME`; it does not replace Claude's default profile or project mappings.
+The legacy Codex skill remains available only when its writer admission permits it.
 
 Inspect ownership without changing clients:
 
@@ -128,8 +129,11 @@ or `--owner disabled` to stop all captures. This is host-local ownership, not a
 cross-machine fence. It does not stop another machine, uninstall maintenance,
 remove credentials, or change a running client's loaded plugin version.
 
-The shared admission lock covers worker launch and descendants, including when
-their supervisor is killed. A durable launch intent exists before spawning;
+The shared admission lock covers capture-worker launch and descendants retaining
+its lease, including when their supervisor is killed. Codex execution cleans up
+its managed initial process group, not independently detached user Git-hook
+daemons. Unleased capture re-entry must reacquire admission; this is not an OS
+sandbox. A durable launch intent exists before spawning;
 missing workers and busy requests for a newer boundary stay unresolved until
 that exact boundary is observed or its evidence is deliberately reconciled.
 An observed launch is not a successful-write receipt. Handoff refuses active workers, unresolved legacy
@@ -388,14 +392,19 @@ paths, and independent autosave/scheduler choices, then writes
 `obsidian.local.md` to the stable config location (see below). MCP-only clients
 use [the MCP server guide](packages/mcp-server/README.md) instead.
 
-For Codex commit capture:
+For Codex:
 
 ```bash
 codex plugin marketplace add nhangen/claude-obsidian-plugin
 codex plugin add obsidian@nhangen-codex-plugins
 ```
 
-Start a new session and configure `vault_path` in the stable config file described below. The Codex package exposes only the post-commit capture skill; it does not load the Claude session-end watcher, hooks, or other Claude-specific skills. See `integrations/codex/commit-capture.md` for the runtime contract.
+Start a new session and use the packaged `setup` skill for verified runtime and
+connection setup. Native capture activation is a separate explicit operation;
+the hooks are dormant before it, and ordinary work does not require workspace
+enrollment. See [the Codex package](packages/codex/README.md) for capability,
+trust and ownership requirements. Legacy local commit capture still requires
+the stable `vault_path` configuration described below.
 
 ## Configuration
 
@@ -480,7 +489,7 @@ and explicit model/usage accounting remain in place.
 commands/*.md                 Slash command entry points
 skills/*/SKILL.md             Skill logic (save, find, recall, setup, …)
 hooks/hooks.json              Stop + Pre/PostToolUse hook registration
-packages/codex/               Self-contained Codex package with only manual commit capture
+packages/codex/               Codex setup, guarded legacy capture and dormant native hooks
 scripts/                      Hook executables (commit-capture, session-save, …)
 scripts/lib/commit-capture-parse.sh Payload decoding + repo resolution shared by the commit-capture hook pair
 scripts/lib/resolve-config.sh Version-independent config-path resolver
