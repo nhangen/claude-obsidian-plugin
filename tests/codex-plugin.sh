@@ -24,6 +24,13 @@ marketplace_legacy = json.loads((root / ".claude-plugin/marketplace.json").read_
 assert codex["version"] == claude["version"] == marketplace_legacy["plugins"][0]["version"]
 assert codex["skills"] == "./skills/"
 assert codex["hooks"] == "./hooks/hooks.json"
+assert codex["mcpServers"] == "./.mcp.json"
+mcp = json.loads((package / ".mcp.json").read_bytes())["mcpServers"]
+assert set(mcp) == {"obsidian", "obsidian-write"}
+for name, profile in (("obsidian", "read"), ("obsidian-write", "write")):
+    assert mcp[name]["cwd"] == "."
+    assert mcp[name]["args"] == ["-I", "-B", "scripts/connection.py", profile]
+assert (package / "scripts/connection.py").is_file()
 hooks = json.loads((package / "hooks/hooks.json").read_bytes())["hooks"]
 assert set(hooks) == {"UserPromptSubmit", "PreToolUse", "PostToolUse", "Stop", "SessionStart"}
 for event, entries in hooks.items():

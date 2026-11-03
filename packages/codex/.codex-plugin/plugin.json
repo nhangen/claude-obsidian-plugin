@@ -10,6 +10,7 @@
   "license": "MIT",
   "keywords": ["obsidian", "notes", "vault", "commit-capture", "codex"],
   "skills": "./skills/",
+  "mcpServers": "./.mcp.json",
   "hooks": "./hooks/hooks.json",
   "interface": {
     "displayName": "Obsidian",

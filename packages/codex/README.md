@@ -1,7 +1,8 @@
 # Obsidian for Codex
 
-This Codex package exposes `commit-capture`, `setup`, and dormant native capture
-hooks. The legacy skill obtains sanitized commit metadata and writes conversation
+This Codex package exposes `commit-capture`, `setup`, the canonical bundled
+`obsidian`/`obsidian-write` stdio connections, and dormant native capture hooks.
+The legacy skill obtains sanitized commit metadata and writes conversation
 context through its guarded keeper. Native capture uses a separately activated,
 verified public runtime; installing the plugin alone does not activate it.
 
@@ -19,26 +20,64 @@ directory containing the pinned installer, release metadata, and archive.
 `--apply` is present. Reinstallation verifies/reuses immutable content and
 retains disabled state. Failed integrity or recovery checks stop setup.
 
-Runtime lifecycle commands do not register MCP servers. After separately
-authorized connection setup, the `setup` skill guides the existing Codex CLI to
-register the verified public read/write launchers in the exact intended
-`CODEX_HOME`. Its examples use existing private credential-file references or
-macOS keychain identifiers, never raw tokens. The public runtime resolves them.
+Runtime lifecycle commands do not configure MCP connections. After separately
+authorized connection setup, the installed `scripts/connection.py setup`
+previews nonsecret runtime-prefix, endpoint, and credential references in the
+exact intended `CODEX_HOME`. Only `--apply` writes the owned 0600 connection
+record. Files must already be private 0400/0600; macOS keychain identifiers are
+also supported. Setup does not read tokens. The verified public launchers resolve
+them when connected. Existing global registrations remain effective winners,
+including disabled servers; setup does not overwrite them or create aliases.
 
-Both server names are inspected before any addition and rechecked immediately
-before it. Matching registrations are reused; differing entries, inspection
-failures, and concurrent changes stop setup. Inspection prints only presence or
-a match verdict, never full registration JSON. These checks are not an atomic
-create-only guarantee; stop when another configuration writer is active.
+Startup checks live enabled/current/disabled slots under the installer lock,
+refuses unfinished transitions, and reuses the authenticated capture verifier
+and fixed bootstrap release pins. It never downloads, installs, enables, or
+falls back to global wrappers, retained capture bindings, or a local keeper.
+The supported CLI 0.166.0 legacy declaration uses plugin-rooted `cwd: "."`
+and a relative launcher argument. `${PLUGIN_ROOT}` in legacy MCP args is not
+expanded by that CLI; hook placeholder behavior is a separate contract.
 
-Existing approval policy is preserved. Routine-write host authorization is
-separate and is not silently granted for new entries. Reconnect and verify
-discovery plus a bounded read before calling the connection successful. No
+The setup skill retains an advanced, separately authorized global-registration
+path. That path inspects both server names before any addition and rechecks
+immediately before it. Matching registrations are reused; differing entries,
+inspection failures, and concurrent changes stop that path. Inspection prints
+only presence or a match verdict, never full registration JSON. These checks
+are not an atomic create-only guarantee; stop competing configuration writers.
+
+Existing approval policy is preserved. Explicit `--authorize-routine-tools`
+can add automatic approval only to the plugin's two server policy tables,
+without global overrides or conflicting disabled/prompt/tool-filter policy.
+Profile-specific policy requires separate review. Without the flag, no approval
+change occurs. Stop competing config writers before applying: individual files
+are atomic, not a cross-file transaction. Re-preview a failed or interrupted
+apply; it may leave the connection record without the requested approval change.
+Reconnect and verify discovery plus a bounded read before calling the connection
+successful. No
 credentials, native capture profiles, ownership handoff, hooks, or local keeper
 fallback are installed by connection setup. Automatic capture stays unchanged.
 The connection examples are smoke-checked with actual Codex CLI 0.162.1 and 0.164.0 in an
 isolated HOME, CODEX_HOME, and working directory, using mock references without
 calling credential providers.
+The bundled connection suite additionally installs the package and uses actual
+CLI 0.166.0 app-server discovery and read calls with temporary mock servers,
+covering global precedence, disabled/filter policy, prefix admission, and setup
+without credential reads. These are fixture results, not deployed desktop,
+hosted-chat, real-provider, or original-incident acceptance.
+
+The CLI 0.166.0 app-server fixture also configures one user home for two different
+workspace roots without enrollment, then refreshes an already-started fixture
+chat via the schema-supported `config/mcpServer/reload` RPC (null parameters)
+and successfully repeats discovery/read on that same chat. Setup does not send
+this RPC itself. A separate bounded fixture starts a skills-only package with
+zero MCP declarations, uses the supported `plugin/install` RPC against an
+updated local marketplace candidate, configures that installed candidate, and
+reloads discovery/read on the same existing fixture chat without rewriting its
+cache. Its candidate version is fixture-only, not a release or deployment.
+Use the host's supported MCP reconnect/reload if exposed;
+otherwise a fresh chat after plugin update/configuration is the unverified-host
+fallback. The fixture does not establish that the desktop UI exposes this
+refresh, that a hosted executor inherits local configuration, or that the
+original existing chat has been repaired.
 
 The legacy commit skill's keeper honors shared and Codex-specific admission and
 refuses local writes under MCP, disabled or draining ownership. Connection setup
@@ -122,6 +161,7 @@ fixtures do not establish real-provider capture, installed-host trust or managed
 deployment acceptance.
 
 ```bash
+bash tests/codex-bundled-mcp.sh
 OBSIDIAN_PUBLIC_CLIENT_SOURCE=/path/to/pinned/obsidian-mcp \
   bash tests/codex-capture-activation.sh
 OBSIDIAN_PUBLIC_CLIENT_SOURCE=/path/to/pinned/obsidian-mcp \

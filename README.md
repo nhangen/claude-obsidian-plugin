@@ -400,7 +400,11 @@ codex plugin add obsidian@nhangen-codex-plugins
 ```
 
 Start a new session and use the packaged `setup` skill for verified runtime and
-connection setup. Native capture activation is a separate explicit operation;
+connection setup. Bundled stdio servers use canonical `obsidian` and
+`obsidian-write` names and an explicit user-wide nonsecret connection record;
+existing global registrations and disabled/tool-approval policy take precedence.
+Connection setup previews by default and never activates capture or trusts hooks.
+Native capture activation is a separate explicit operation;
 the hooks are dormant before it, and ordinary work does not require workspace
 enrollment. See [the Codex package](packages/codex/README.md) for capability,
 trust and ownership requirements. Legacy local commit capture still requires
@@ -489,7 +493,7 @@ and explicit model/usage accounting remain in place.
 commands/*.md                 Slash command entry points
 skills/*/SKILL.md             Skill logic (save, find, recall, setup, …)
 hooks/hooks.json              Stop + Pre/PostToolUse hook registration
-packages/codex/               Codex setup, guarded legacy capture and dormant native hooks
+packages/codex/               Codex bundled MCP, setup, guarded legacy capture and dormant native hooks
 scripts/                      Hook executables (commit-capture, session-save, …)
 scripts/lib/commit-capture-parse.sh Payload decoding + repo resolution shared by the commit-capture hook pair
 scripts/lib/resolve-config.sh Version-independent config-path resolver
