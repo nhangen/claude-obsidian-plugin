@@ -1345,10 +1345,7 @@ def codex_inventory():
     return records
 
 
-def codex_verify(binding):
-    bundle = Path(binding["bundle"])
-    if not re.fullmatch(r"[0-9a-f]{64}", binding.get("externalReleaseSha256", "")):
-        raise OwnershipError("external release SHA-256 required")
+def codex_verifier():
     verifier = Path(__file__).resolve().with_name("obsidian-mcp-client-install")
     descriptor = os.open(verifier, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     with os.fdopen(descriptor, "rb") as stream:
@@ -1363,6 +1360,14 @@ def codex_verify(binding):
     # Execute the authenticated bytes, so replacement after the read cannot change the verifier.
     namespace = {"__name__": "obsidian_published_verifier", "__file__": str(verifier)}
     exec(compile(data, str(verifier), "exec"), namespace)
+    return namespace
+
+
+def codex_verify(binding):
+    bundle = Path(binding["bundle"])
+    if not re.fullmatch(r"[0-9a-f]{64}", binding.get("externalReleaseSha256", "")):
+        raise OwnershipError("external release SHA-256 required")
+    namespace = codex_verifier()
     try:
         if (bundle / ".trust.json").exists() or (bundle / ".trust.json").is_symlink():
             if bundle.parent.name != "releases":

@@ -44,7 +44,7 @@ jobs:
         run: npm ci
 
       - name: Install Codex CLI for the plugin smoke test
-        run: npm install --global @openai/codex@0.162.1
+        run: npm install --global @openai/codex@0.166.0
 
       - name: Run all shell and MCP suites
         run: bash tests/run-all.sh

@@ -1,6 +1,6 @@
 ---
 name: setup
-description: Set up the Codex plugin's verified public runtime, guide MCP registration, and preview separately authorized user-wide capture activation. Runtime, connection, capture and hook trust remain separate gates.
+description: Set up Obsidian for Codex with a verified public runtime and bundled MCP connections, or preview separately authorized user-wide capture activation. Runtime, connection, capture and hook trust remain separate gates.
 ---
 
 # Set up Obsidian for Codex
@@ -34,7 +34,74 @@ lifecycle operation; it does not authorize or perform connection registration.
 Do not follow disable/rollback with registration or silently enable a disabled
 runtime. Connection setup below requires an enabled, verified runtime.
 
-## Authorized connection follow-through
+## Bundled connections (default)
+
+The plugin contributes the canonical `obsidian` read and `obsidian-write` write
+servers. Resolve `../../scripts/connection.py` relative to this installed
+`SKILL.md`; do not use global wrapper names or search versioned caches.
+Keep the exact intended nonempty absolute `CODEX_HOME` (default `$HOME/.codex`).
+Connection configuration is user-wide for that home, not per workspace.
+
+After the runtime is enabled and connection setup is authorized, preview:
+
+```bash
+python3 -I -B /absolute/installed/plugin/scripts/connection.py setup \
+  --runtime-prefix /absolute/managed/runtime \
+  --endpoint https://actual-server.example/mcp \
+  --read-token-file /absolute/private/read-reference \
+  --write-token-file /absolute/private/write-reference
+```
+
+Substitute the resolved installed helper and actual nonsecret references.
+macOS keychain alternatives are `--read-keychain-service` plus
+`--read-keychain-account`, and the corresponding `--write-*` flags. Do not read
+tokens or invoke credential providers during setup. Files must already be
+owned, single-link, 0400/0600; read/write references must be distinct. Unknown
+providers, malformed configuration, or a differing existing connection record
+stop setup rather than falling back. HTTP requires explicit `--allow-http`
+for loopback, plus `--allow-tailnet-http` for tailnet addresses.
+
+Add `--apply` only for the authorized config change. It writes nonsecret
+references to `CODEX_HOME/obsidian-connection.json` (0600). Add
+`--authorize-routine-tools` only when scoped routine read/write approval was
+explicitly authorized. This adds `default_tools_approval_mode = "auto"` under
+`plugins."obsidian@nhangen-codex-plugins".mcp_servers.<canonical-server>` only
+for servers without global registrations and without conflicting plugin
+policy. It refuses to relax existing disabled, prompt, or tool-filter policy;
+profile-specific policy needs separate review. Without this flag, approvals
+remain unchanged. Stop competing config writers before apply; files are
+individually atomic, not a transaction across both config files. An interrupted
+apply can leave connection config without the requested approval change;
+report failure and re-preview rather than claiming completion.
+
+Global registrations, including disabled ones, win over plugin declarations.
+Do not remove or replace them to make the bundled connection win. Existing
+host/project/managed restrictions still apply. Setup neither changes capture
+ownership nor activates profiles or grants hook trust. No local keeper fallback
+is authorized when MCP owns writes.
+
+Reconnect and verify actual discovery plus a bounded read before reporting a
+working connection. Use a supported host reconnect/reload if available; do not
+invent a shell RPC or bypass the UI/trust boundary. CLI 0.166.0 fixture coverage
+includes schema-supported `config/mcpServer/reload` with null parameters on an
+already-started fixture chat and one configured home shared across two workspace
+roots. A separate CLI fixture starts with a package lacking declarations, then
+covers supported `plugin/install` of a local candidate and setup/reload on the
+same chat. These fixtures neither publish a version nor update any user's
+installed cache, and do not establish that the desktop UI exposes the same
+refresh. If the host cannot reload, a fresh chat after updating plugin/config is a
+fallback, not proof that the original existing chat is fixed.
+Startup rechecks the live prefix's current/disabled state,
+pending transitions, and fixed release pins using the authenticated verifier.
+It never installs, enables, repairs, or selects a retained capture binding.
+CLI 0.166.0 legacy MCP args do not expand `${PLUGIN_ROOT}`: declarations use
+plugin-rooted `cwd: "."` with a relative helper path, verified by the real loader.
+
+## Advanced: separately authorized global registrations
+
+Use this path only when global registration is explicitly wanted instead of
+the bundled connection; it takes precedence over bundled declarations. Do not
+run it automatically after bundled setup.
 
 Use the existing Codex CLI (stdio `mcp add --env KEY=VALUE`, `mcp list --json`,
 and `mcp get --json`; smoke-checked with 0.162.1 and 0.164.0). No runtime capture command,
