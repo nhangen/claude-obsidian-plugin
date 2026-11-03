@@ -1069,10 +1069,15 @@ print(json.dumps(results))
         hooks = self.directory / "no-hooks"
         hooks.mkdir()
         started = self.directory / "owned-group"
+        unpublished = self.directory / "owned-group.tmp"
         marker = self.directory / "orphan-continued"
         hook = hooks / "pre-commit"
         hook.write_text(
             "#!/bin/sh\n/bin/ps -o pgid= -p $$ > "
+            + shlex.quote(str(unpublished))
+            + "\n/bin/mv "
+            + shlex.quote(str(unpublished))
+            + " "
             + shlex.quote(str(started))
             + "\n/bin/sleep 2\ntouch "
             + shlex.quote(str(marker))
