@@ -7,6 +7,7 @@ import hashlib
 import json
 import os
 import runpy
+import select
 import signal
 import time
 from pathlib import Path
@@ -1217,6 +1218,10 @@ print(json.dumps(results))
                 + "\nexit 0\n"
             )
             hook.chmod(0o700)
+            self.assertTrue(
+                os.access(hook, os.X_OK),
+                "backpressure fixture requires executable temporary storage",
+            )
         elif kind == "json":
             words = shlex.split(command)
             boundary = words.index("--") + 1
@@ -1236,21 +1241,16 @@ print(json.dumps(results))
         reader, writer = os.pipe()
         os.write(writer, b"x")
         original_flags = fcntl.fcntl(writer, fcntl.F_GETFL)
-        probe_reader, probe_writer = os.pipe() if stream_case else (reader, writer)
-        probe_flags = fcntl.fcntl(probe_writer, fcntl.F_GETFL)
-        capacity = 0
-        try:
-            os.set_blocking(probe_writer, False)
-            while True:
-                try:
-                    capacity += os.write(probe_writer, b"x" * 8192)
-                except BlockingIOError:
-                    break
-        finally:
-            fcntl.fcntl(probe_writer, fcntl.F_SETFL, probe_flags)
-            if stream_case:
-                os.close(probe_writer)
-                os.close(probe_reader)
+        if not stream_case:
+            try:
+                os.set_blocking(writer, False)
+                while True:
+                    try:
+                        os.write(writer, b"x" * 8192)
+                    except BlockingIOError:
+                        break
+            finally:
+                fcntl.fcntl(writer, fcntl.F_SETFL, original_flags)
         blocked_stderr = kind in ("stderr", "diagnostic", "parser-error")
         process = subprocess.Popen(
             shlex.split(command),
@@ -1273,12 +1273,13 @@ print(json.dumps(results))
                 self.assertNotIn(group, (os.getpgrp(), process.pid))
                 available = array.array("i", [0])
                 while time.monotonic() < deadline:
-                    self.assertIsNone(process.poll())
                     fcntl.ioctl(reader, termios.FIONREAD, available, True)
-                    if available[0] >= capacity:
+                    self.assertIsNone(process.poll())
+                    if available[0] > 1 and not select.select([], [writer], [], 0)[1]:
                         break
                     time.sleep(0.02)
-                self.assertGreaterEqual(available[0], capacity)
+                self.assertGreater(available[0], 1)
+                self.assertFalse(select.select([], [writer], [], 0)[1])
             if kind in ("stdout", "stderr"):
                 process.terminate()
                 process.wait(timeout=3)
