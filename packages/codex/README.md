@@ -84,8 +84,11 @@ download dependencies or obtain credentials.
 
 Generated commit and recovery commands re-enter the packaged guard. It checks
 the selected profile, delivery, ownership generations and runtime integrity at
-execution time, holding admission until the child finishes. Keep those commands
-intact; replacing them with a direct runtime invocation bypasses this guard.
+execution time, holding admission through managed execution and initial
+process-group cleanup. This is not an OS sandbox: independently detached user
+Git-hook daemons can outlive that group, but Git does not inherit the capture
+lease. Unleased capture re-entry must reacquire admission. Keep generated
+commands intact; replacing them with a direct runtime invocation bypasses this guard.
 
 The private Codex record selects a single delivery source. Plugin hooks and the
 future managed adapter share admission; an unselected adapter does not delegate.

@@ -129,8 +129,11 @@ or `--owner disabled` to stop all captures. This is host-local ownership, not a
 cross-machine fence. It does not stop another machine, uninstall maintenance,
 remove credentials, or change a running client's loaded plugin version.
 
-The shared admission lock covers worker launch and descendants, including when
-their supervisor is killed. A durable launch intent exists before spawning;
+The shared admission lock covers capture-worker launch and descendants retaining
+its lease, including when their supervisor is killed. Codex execution cleans up
+its managed initial process group, not independently detached user Git-hook
+daemons. Unleased capture re-entry must reacquire admission; this is not an OS
+sandbox. A durable launch intent exists before spawning;
 missing workers and busy requests for a newer boundary stay unresolved until
 that exact boundary is observed or its evidence is deliberately reconciled.
 An observed launch is not a successful-write receipt. Handoff refuses active workers, unresolved legacy

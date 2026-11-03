@@ -1080,6 +1080,110 @@ print(json.dumps(results))
     def test_guard_nonzero_stops_background_descendants_before_releasing_lease(self):
         self.assert_guarded_exit_stops_descendants(7)
 
+    def test_detached_git_hook_has_no_lease_and_guarded_reentry_requires_admission(
+        self,
+    ):
+        _, command = self.guarded_fixture(commit=True)
+        hooks = self.directory / "no-hooks"
+        hooks.mkdir()
+        ready = self.directory / "detached-ready.json"
+        release = self.directory / "release-detached"
+        result_path = self.directory / "detached-result.json"
+        marker = self.directory / "unrelated-detached-marker"
+        child = self.directory / "detached-child.py"
+        library = self.installed / "skills/commit-capture/scripts/lib/capture-owner.py"
+        child.write_text(
+            "import json, os, runpy, signal, subprocess, time\n"
+            "from pathlib import Path\n"
+            "signal.alarm(12)\n"
+            f"owner = runpy.run_path({str(library)!r})\n"
+            "original = os.environ.get('OBSIDIAN_CAPTURE_LEASE_FD')\n"
+            "valid = []\n"
+            "for entry in Path('/dev/fd').iterdir():\n"
+            "    if entry.name.isdecimal():\n"
+            "        os.environ['OBSIDIAN_CAPTURE_LEASE_FD'] = entry.name\n"
+            "        if owner['lease_valid']():\n"
+            "            valid.append(int(entry.name))\n"
+            "if original is None:\n"
+            "    os.environ.pop('OBSIDIAN_CAPTURE_LEASE_FD', None)\n"
+            "else:\n"
+            "    os.environ['OBSIDIAN_CAPTURE_LEASE_FD'] = original\n"
+            f"ready = Path({str(ready)!r})\n"
+            "temporary = ready.with_suffix('.tmp')\n"
+            "temporary.write_text(json.dumps(dict(pid=os.getpid(), pgid=os.getpgrp(), valid_lease_fds=valid)))\n"
+            "temporary.replace(ready)\n"
+            f"release = Path({str(release)!r})\n"
+            "while not release.exists():\n"
+            "    time.sleep(0.02)\n"
+            f"Path({str(marker)!r}).touch()\n"
+            f"result = subprocess.run({shlex.split(command)!r}, capture_output=True, text=True, timeout=5)\n"
+            f"output = Path({str(result_path)!r})\n"
+            "temporary = output.with_suffix('.tmp')\n"
+            "temporary.write_text(json.dumps(dict(returncode=result.returncode, stdout=result.stdout, stderr=result.stderr)))\n"
+            "temporary.replace(output)\n"
+            "while True:\n"
+            "    time.sleep(0.1)\n"
+        )
+        launcher = (
+            "import subprocess, time\nfrom pathlib import Path\n"
+            f"subprocess.Popen({[sys.executable, '-I', '-B', str(child)]!r}, "
+            "start_new_session=True, close_fds=False, stdin=subprocess.DEVNULL, "
+            "stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)\n"
+            f"ready = Path({str(ready)!r})\n"
+            "deadline = time.monotonic() + 5\n"
+            "while not ready.exists() and time.monotonic() < deadline:\n"
+            "    time.sleep(0.02)\n"
+            "raise SystemExit(0 if ready.exists() else 1)\n"
+        )
+        hook = hooks / "pre-commit"
+        hook.write_text(
+            "#!/bin/sh\n"
+            + shlex.join([sys.executable, "-I", "-B", "-c", launcher])
+            + "\n"
+        )
+        hook.chmod(0o700)
+        pid = None
+        try:
+            result = self.run_emitted(command)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            information = json.loads(ready.read_bytes())
+            pid = information["pid"]
+            self.assertGreater(pid, 1)
+            self.assertNotIn(pid, (os.getpid(), os.getpgrp()))
+            self.assertEqual(information["pgid"], pid)
+            self.assertEqual(information["valid_lease_fds"], [])
+            before_profile = self.snapshot(self.profile)
+            before_owner = self.snapshot(self.state)
+            with (self.state / "capture-ownership/admission.lock").open("r+") as lock:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                release.touch()
+                deadline = time.monotonic() + 6
+                while not result_path.exists() and time.monotonic() < deadline:
+                    time.sleep(0.02)
+                self.assertTrue(result_path.exists())
+                response = json.loads(result_path.read_bytes())
+                self.assertTrue(marker.exists())
+                self.assertEqual(response["returncode"], 2, response)
+                self.assertIn("busy", response["stderr"])
+                self.assertEqual(self.snapshot(self.profile), before_profile)
+                self.assertEqual(self.snapshot(self.state), before_owner)
+        finally:
+            if pid is None and ready.exists():
+                pid = json.loads(ready.read_bytes())["pid"]
+            if pid is not None:
+                process = subprocess.run(
+                    ["ps", "-ww", "-p", str(pid), "-o", "command="],
+                    capture_output=True,
+                    text=True,
+                    timeout=2,
+                )
+                if str(child) in shlex.split(process.stdout):
+                    try:
+                        if os.getpgid(pid) == pid and pid != os.getpgrp():
+                            os.killpg(pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+
     def assert_guard_output_backpressure(self, kind):
         stream_case = kind in ("stdout", "stderr", "deadline")
         runtime, command = self.guarded_fixture(
