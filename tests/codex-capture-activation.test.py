@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Installed-package admission against the packed public engine, without providers."""
 
+import array
 import fcntl
 import hashlib
 import json
@@ -14,6 +15,7 @@ import shlex
 import subprocess
 import sys
 import tempfile
+import termios
 import unittest
 
 
@@ -1063,6 +1065,152 @@ print(json.dumps(results))
 
     def test_guard_nonzero_stops_background_descendants_before_releasing_lease(self):
         self.assert_guarded_exit_stops_descendants(7)
+
+    def assert_guard_output_backpressure(self, kind):
+        stream_case = kind in ("stdout", "stderr", "deadline")
+        runtime, command = self.guarded_fixture(
+            commit=stream_case,
+            commit_command="git commit -F message.txt"
+            if kind != "stderr"
+            else "git commit -m fixture",
+        )
+        started = self.directory / "backpressure-group"
+        unpublished = self.directory / "backpressure-group.tmp"
+        marker = self.directory / "backpressure-continued"
+        release = self.directory / "release-backpressure"
+        if stream_case:
+            (self.project / "message.txt").write_text("x" * 200000 + "\n")
+            hooks = self.directory / "no-hooks"
+            hooks.mkdir()
+            hook = hooks / "pre-commit"
+            hook.write_text(
+                "#!/bin/sh\n/bin/ps -o pgid= -p $$ > "
+                + shlex.quote(str(unpublished))
+                + "\n/bin/mv "
+                + shlex.quote(str(unpublished))
+                + " "
+                + shlex.quote(str(started))
+                + "\n(while [ ! -e "
+                + shlex.quote(str(release))
+                + " ]; do /bin/sleep 0.02; done\n/usr/bin/touch "
+                + shlex.quote(str(marker))
+                + "\n) </dev/null >/dev/null 2>&1 &\n/usr/bin/head -c 200000 /dev/zero "
+                + (">&2" if kind == "stderr" else "")
+                + "\nexit 0\n"
+            )
+            hook.chmod(0o700)
+        elif kind == "json":
+            words = shlex.split(command)
+            boundary = words.index("--") + 1
+            command = shlex.join(
+                [*words[:boundary], "status", *words[boundary + 1 : -4]]
+            )
+        elif kind == "diagnostic":
+            (runtime / "bin/obsidian-mcp-native").write_text(
+                "raise RuntimeError('tamper')\n"
+            )
+        elif kind in ("parser-error", "parser-help"):
+            words = shlex.split(command)
+            command = shlex.join(
+                words[: words.index("--authorization")]
+                + (["--help"] if kind == "parser-help" else [])
+            )
+        reader, writer = os.pipe()
+        os.write(writer, b"x")
+        original_flags = fcntl.fcntl(writer, fcntl.F_GETFL)
+        probe_reader, probe_writer = os.pipe() if stream_case else (reader, writer)
+        probe_flags = fcntl.fcntl(probe_writer, fcntl.F_GETFL)
+        capacity = 0
+        try:
+            os.set_blocking(probe_writer, False)
+            while True:
+                try:
+                    capacity += os.write(probe_writer, b"x" * 8192)
+                except BlockingIOError:
+                    break
+        finally:
+            fcntl.fcntl(probe_writer, fcntl.F_SETFL, probe_flags)
+            if stream_case:
+                os.close(probe_writer)
+                os.close(probe_reader)
+        blocked_stderr = kind in ("stderr", "diagnostic", "parser-error")
+        process = subprocess.Popen(
+            shlex.split(command),
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL if blocked_stderr else writer,
+            stderr=writer if blocked_stderr else subprocess.DEVNULL,
+            env=self.env,
+            cwd=self.project,
+            start_new_session=True,
+        )
+        group = None
+        try:
+            if stream_case:
+                deadline = time.monotonic() + 10
+                while not started.exists() and time.monotonic() < deadline:
+                    self.assertIsNone(process.poll())
+                    time.sleep(0.02)
+                self.assertTrue(started.exists())
+                group = int(started.read_text().strip())
+                self.assertNotIn(group, (os.getpgrp(), process.pid))
+                available = array.array("i", [0])
+                while time.monotonic() < deadline:
+                    self.assertIsNone(process.poll())
+                    fcntl.ioctl(reader, termios.FIONREAD, available, True)
+                    if available[0] >= capacity:
+                        break
+                    time.sleep(0.02)
+                self.assertGreaterEqual(available[0], capacity)
+            if kind in ("stdout", "stderr"):
+                process.terminate()
+                process.wait(timeout=3)
+                self.assertEqual(process.returncode, 143)
+            else:
+                process.wait(timeout=8)
+                self.assertEqual(process.returncode, 0 if kind == "parser-help" else 2)
+            with (self.state / "capture-ownership/admission.lock").open("r+") as lock:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                if stream_case:
+                    release.touch()
+                    time.sleep(0.3)
+                    self.assertFalse(marker.exists())
+            self.assertEqual(fcntl.fcntl(writer, fcntl.F_GETFL), original_flags)
+            self.assertTrue(os.get_blocking(writer))
+        finally:
+            if group is not None:
+                try:
+                    os.killpg(group, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+            if process.poll() is None:
+                os.killpg(process.pid, signal.SIGKILL)
+                process.wait(timeout=5)
+            os.close(writer)
+            os.close(reader)
+
+    def test_guard_cancels_unread_stdout_without_releasing_live_descendants(self):
+        self.assert_guard_output_backpressure("stdout")
+
+    def test_guard_cancels_unread_stderr_without_releasing_live_descendants(self):
+        self.assert_guard_output_backpressure("stderr")
+
+    def test_guard_bounds_unread_stream_without_a_signal(self):
+        self.assert_guard_output_backpressure("deadline")
+
+    def test_guard_bounds_unread_final_native_response(self):
+        self.assert_guard_output_backpressure("native")
+
+    def test_guard_bounds_unread_final_json_response(self):
+        self.assert_guard_output_backpressure("json")
+
+    def test_guard_bounds_unread_diagnostics(self):
+        self.assert_guard_output_backpressure("diagnostic")
+
+    def test_guard_bounds_unread_parser_error(self):
+        self.assert_guard_output_backpressure("parser-error")
+
+    def test_guard_bounds_unread_parser_help(self):
+        self.assert_guard_output_backpressure("parser-help")
 
     def test_guard_sigterm_stops_owned_executor_before_releasing_lease(self):
         _, command = self.guarded_fixture(commit=True)

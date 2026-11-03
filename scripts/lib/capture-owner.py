@@ -2109,7 +2109,54 @@ def codex_execution_signals():
             signal.signal(signum, handler)
 
 
-def codex_execute_stream(binding, words, descriptor, payload):
+def codex_guard_write(stream, payload, deadline, interrupted):
+    descriptor = stream.fileno()
+    flags = fcntl.fcntl(descriptor, fcntl.F_GETFL)
+    deadline = min(deadline, time.monotonic() + 5)
+    remaining = memoryview(payload)
+    try:
+        fcntl.fcntl(descriptor, fcntl.F_SETFL, flags | os.O_NONBLOCK)
+        with selectors.SelectSelector() as selector:
+            selector.register(descriptor, selectors.EVENT_WRITE)
+            while remaining:
+                if interrupted[0] is not None:
+                    raise GuardInterrupted(interrupted[0])
+                budget = deadline - time.monotonic()
+                if budget <= 0:
+                    raise OwnershipError(
+                        "guarded output timed out; pending evidence retained"
+                    )
+                if not selector.select(min(0.1, budget)):
+                    continue
+                try:
+                    written = os.write(descriptor, remaining[:8192])
+                except BlockingIOError:
+                    continue
+                remaining = remaining[written:]
+    finally:
+        fcntl.fcntl(descriptor, fcntl.F_SETFL, flags)
+
+
+def codex_guard_message(message, stream=None):
+    try:
+        with codex_execution_signals() as interrupted:
+            codex_guard_write(
+                stream if stream is not None else sys.stderr.buffer,
+                message.encode(),
+                time.monotonic() + 1,
+                interrupted,
+            )
+    except (OwnershipError, OSError):
+        pass
+
+
+class CodexGuardParser(argparse.ArgumentParser):
+    def _print_message(self, message, file=None):
+        if message:
+            codex_guard_message(message, file)
+
+
+def codex_execute_stream(binding, words, descriptor, payload, deadline, interrupted):
     codex_verify(binding)
     command = [
         binding["python"],
@@ -2119,12 +2166,10 @@ def codex_execute_stream(binding, words, descriptor, payload):
         *words,
     ]
     execute = words[0] == "execute-commit"
-    deadline = time.monotonic() + (360 if execute else 30)
     output = bytearray()
     with (
         tempfile.TemporaryFile() as source,
         selectors.DefaultSelector() as selector,
-        codex_execution_signals() as interrupted,
     ):
         if payload is not None:
             source.write(payload)
@@ -2175,8 +2220,7 @@ def codex_execute_stream(binding, words, descriptor, payload):
                             if key.data == "stdout"
                             else sys.stderr.buffer
                         )
-                        stream.write(chunk)
-                        stream.flush()
+                        codex_guard_write(stream, chunk, deadline, interrupted)
             while process.poll() is None:
                 if interrupted[0] is not None:
                     raise GuardInterrupted(interrupted[0])
@@ -2221,7 +2265,7 @@ def codex_prepare_input():
 
 
 def codex_execute_main(arguments):
-    parser = argparse.ArgumentParser(
+    parser = CodexGuardParser(
         description="Execute an allowlisted capture operation under writer admission"
     )
     parser.add_argument("--authorization", required=True)
@@ -2232,7 +2276,7 @@ def codex_execute_main(arguments):
         ticket = codex_decode_authorization(args.authorization)
         operation, options = codex_parse_executor(words)
         payload = codex_prepare_input() if operation == "prepare" else None
-        with admission() as descriptor:
+        with codex_execution_signals() as interrupted, admission() as descriptor:
             home = codex_home(ticket["home"])
             record = codex_record(home)
             current = codex_require_global()
@@ -2241,20 +2285,28 @@ def codex_execute_main(arguments):
             codex_capabilities(binding)
             codex_profile(binding)
             codex_executor_home(binding, options, ticket["cwd"])
-            result, output = codex_execute_stream(binding, words, descriptor, payload)
+            deadline = time.monotonic() + (360 if operation == "execute-commit" else 30)
+            result, output = codex_execute_stream(
+                binding, words, descriptor, payload, deadline, interrupted
+            )
             if output:
-                if result or words[0] in ("prepare", "request", "retry", "skip"):
-                    sys.stdout.buffer.write(output)
-                else:
+                if not result and operation not in (
+                    "prepare",
+                    "request",
+                    "retry",
+                    "skip",
+                ):
                     value = decode_json(output)
-                    print(
+                    output = (
                         json.dumps(
                             codex_guard_output(value, args.authorization, binding)
                         )
-                    )
+                        + "\n"
+                    ).encode()
+                codex_guard_write(sys.stdout.buffer, output, deadline, interrupted)
             return result
     except GuardInterrupted as error:
-        print("capture executor: " + str(error), file=sys.stderr)
+        codex_guard_message("capture executor: " + str(error) + "\n")
         return 128 + error.signum
     except (
         OwnershipError,
@@ -2266,14 +2318,14 @@ def codex_execute_main(arguments):
         RecursionError,
         subprocess.SubprocessError,
     ) as error:
-        print(
+        codex_guard_message(
             "capture executor: "
             + (
                 str(error)
                 if isinstance(error, OwnershipError)
                 else "guarded operation unavailable; pending evidence retained"
-            ),
-            file=sys.stderr,
+            )
+            + "\n"
         )
         return 2
 
