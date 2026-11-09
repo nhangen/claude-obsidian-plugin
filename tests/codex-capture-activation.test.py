@@ -26,6 +26,79 @@ VERIFICATION = "legacy-writers-stopped-and-history-inspected"
 os.environ["PYTHONDONTWRITEBYTECODE"] = "1"
 
 
+class GuidanceCompatibilityTest(unittest.TestCase):
+    prefixes = (
+        "Prepare the pending capture: pipe JSON ",
+        "Prepare the pending commit before another commit: pipe JSON ",
+    )
+
+    def setUp(self):
+        self.runtime = runpy.run_path(str(ROOT / "scripts/lib/capture-owner.py"))
+        self.binding = {"python": "/fixture/python", "bundle": "/fixture/bundle"}
+        self.arguments = [
+            "prepare",
+            "--home", "/fixture/profile",
+            "--session", "a" * 64,
+            "--commit", "b" * 64,
+        ]
+
+    def guidance(self, prefix, launcher, arguments):
+        return (
+            prefix + '{"context":["fixture context"]} to '
+            + shlex.join([*launcher, *arguments])
+            + ", then call mcp__obsidian_write__obsidian_daily_append."
+        )
+
+    def test_both_preparation_prefixes_rewrite_to_authorized_executor(self):
+        launcher = ["/fixture/python", "/fixture/bundle/bin/obsidian-mcp-native"]
+        for prefix in self.prefixes:
+            with self.subTest(prefix=prefix):
+                text = self.guidance(prefix, launcher, self.arguments)
+                rewritten = self.runtime["codex_guard_text"](
+                    text, "fixture-authorization", self.binding
+                )
+                before, command = rewritten.split(" to ", 1)
+                command, after = command.split(", then call ", 1)
+                self.assertEqual(before, prefix + '{"context":["fixture context"]}')
+                self.assertEqual(after, "mcp__obsidian_write__obsidian_daily_append.")
+                self.assertEqual(
+                    shlex.split(command),
+                    [
+                        "/usr/bin/python3", "-I", "-B",
+                        str(ROOT / "packages/codex/scripts/capture.py"),
+                        "codex-execute", "--authorization", "fixture-authorization",
+                        "--", *self.arguments,
+                    ],
+                )
+
+    def test_both_preparation_prefixes_reject_unknown_launchers_and_operations(self):
+        native = "/fixture/bundle/bin/obsidian-mcp-native"
+        for prefix in self.prefixes:
+            for launcher, arguments, error in (
+                (["/unknown/python", native], self.arguments, "launcher"),
+                (["/fixture/python", "/unknown/native"], self.arguments, "launcher"),
+                (["/fixture/python", native], ["unknown"], "unsupported"),
+                (["/fixture/python", native], [
+                    "status", "--home", "/fixture/profile", "--session", "a" * 64,
+                ], "operation mismatch"),
+            ):
+                with self.subTest(prefix=prefix, launcher=launcher, arguments=arguments):
+                    with self.assertRaisesRegex(self.runtime["OwnershipError"], error):
+                        self.runtime["codex_guard_text"](
+                            self.guidance(prefix, launcher, arguments),
+                            "fixture-authorization",
+                            self.binding,
+                        )
+
+
+class PackagedGuidanceCompatibilityTest(GuidanceCompatibilityTest):
+    def setUp(self):
+        super().setUp()
+        self.runtime = runpy.run_path(str(
+            ROOT / "packages/codex/skills/commit-capture/scripts/lib/capture-owner.py"
+        ))
+
+
 class ActivationTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -1426,11 +1499,15 @@ print(json.dumps(results))
             tool_use_id="competing-commit",
             tool_input={"command": "git commit -m competing"},
         )
-        text = output["hookSpecificOutput"]["permissionDecisionReason"]
+        specific = output["hookSpecificOutput"]
+        self.assertIn(specific.get("permissionDecision"), (None, "deny"))
+        self.assertNotIn("updatedInput", specific)
+        text = specific.get("additionalContext", specific.get("permissionDecisionReason"))
+        self.assertIsInstance(text, str)
         status = text.split("Inspect it with ", 1)[1].split(", then rescue", 1)[0]
         takeover = text.split("then rescue interrupted ownership with ", 1)[
             1
-        ].removesuffix(".")
+        ].split("\n", 1)[0].removesuffix(".")
         inspected = self.run_emitted(status)
         self.assertEqual(inspected.returncode, 0, inspected.stderr)
         self.assertTrue(json.loads(inspected.stdout)["snapshots"])

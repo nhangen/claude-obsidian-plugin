@@ -1892,6 +1892,11 @@ def codex_guard_text(text, token, binding):
         ("authorize an exact retry with ", ". Use the returned arguments", "retry"),
         ("Retrieve the frozen keeper save arguments with ", "; call ", "request"),
         (
+            "Prepare the pending capture: pipe JSON ",
+            ", then call ",
+            "prepare",
+        ),
+        (
             "Prepare the pending commit before another commit: pipe JSON ",
             ", then call ",
             "prepare",
