@@ -1499,11 +1499,15 @@ print(json.dumps(results))
             tool_use_id="competing-commit",
             tool_input={"command": "git commit -m competing"},
         )
-        text = output["hookSpecificOutput"]["permissionDecisionReason"]
+        specific = output["hookSpecificOutput"]
+        self.assertIn(specific.get("permissionDecision"), (None, "deny"))
+        self.assertNotIn("updatedInput", specific)
+        text = specific.get("additionalContext", specific.get("permissionDecisionReason"))
+        self.assertIsInstance(text, str)
         status = text.split("Inspect it with ", 1)[1].split(", then rescue", 1)[0]
         takeover = text.split("then rescue interrupted ownership with ", 1)[
             1
-        ].removesuffix(".")
+        ].split("\n", 1)[0].removesuffix(".")
         inspected = self.run_emitted(status)
         self.assertEqual(inspected.returncode, 0, inspected.stderr)
         self.assertTrue(json.loads(inspected.stdout)["snapshots"])
