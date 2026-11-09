@@ -129,6 +129,13 @@ or `--owner disabled` to stop all captures. This is host-local ownership, not a
 cross-machine fence. It does not stop another machine, uninstall maintenance,
 remove credentials, or change a running client's loaded plugin version.
 
+The plugin adapter makes capture refusals advisory for ordinary Bash commands,
+including when an existing profile is pinned to an older public runtime. Pending
+capture evidence and runtime pins stay unchanged; protected MCP writes retain
+their validation. New commit calls can continue without a profile migration or
+clearing unresolved captures. Healthy capture rewrites still use the pinned
+runtime and its execution safeguards.
+
 The shared admission lock covers capture-worker launch and descendants retaining
 its lease, including when their supervisor is killed. Codex execution cleans up
 its managed initial process group, not independently detached user Git-hook

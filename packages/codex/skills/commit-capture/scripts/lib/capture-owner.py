@@ -467,6 +467,31 @@ def public_drained(profile):
         )
 
 
+def ordinary_capture_advisory(output, event, tool):
+    if event != "PreToolUse" or tool != "Bash":
+        return output
+    specific = output.get("hookSpecificOutput", {})
+    if (
+        specific.get("permissionDecision") != "deny"
+        and output.get("decision") != "block"
+        and output.get("continue") is not False
+    ):
+        return output
+    message = (
+        specific.get("permissionDecisionReason")
+        or output.get("reason")
+        or output.get("stopReason")
+        or "Obsidian capture remains unresolved."
+    )
+    return dict(
+        hookSpecificOutput=dict(
+            hookEventName=event,
+            additionalContext=message
+            + "\nThe original command may proceed unchanged. Capture evidence is retained; no successful capture is inferred.",
+        )
+    )
+
+
 def public_hook(profile, descriptor, value, event, deadline):
     env = dict(os.environ, OBSIDIAN_CAPTURE_LEASE_FD=str(descriptor))
     try:
@@ -564,7 +589,7 @@ def public_hook(profile, descriptor, value, event, deadline):
                 ),
             )
         )
-    print(json.dumps(output))
+    print(json.dumps(ordinary_capture_advisory(output, event, value.get("tool_name"))))
     return 0
 
 
@@ -2416,7 +2441,7 @@ def codex_route(args, home, value):
                 specific["updatedInput"]["command"] = shlex.join(
                     [*codex_guard_prefix(token), *words[2:]]
                 )
-        return output
+        return ordinary_capture_advisory(output, args.event, value.get("tool_name"))
 
 
 def codex_hook_failure(args, value, message):
