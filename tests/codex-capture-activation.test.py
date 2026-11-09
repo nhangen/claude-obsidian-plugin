@@ -18,6 +18,7 @@ import sys
 import tempfile
 import termios
 import unittest
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -854,6 +855,144 @@ print(json.dumps(results))
         state = json.loads(state_path.read_bytes())
         self.assertEqual(next(iter(state["commits"].values()))["status"], "committed")
 
+    def pending_commit_advisory(self, root_router=False):
+        if root_router:
+            self.native(
+                "attach", "--host", "claude-plugin", "--scope", "user",
+                "--home", str(self.profile), "--folder", "Sessions",
+                "--release-sha256", self.digest,
+            )
+            self.global_owner(owner="mcp", default_profile=str(self.profile))
+        else:
+            self.activate()
+        self.env.update(
+            GIT_AUTHOR_NAME="Fixture", GIT_AUTHOR_EMAIL="fixture@example.invalid",
+            GIT_COMMITTER_NAME="Fixture", GIT_COMMITTER_EMAIL="fixture@example.invalid",
+        )
+        for arguments in (
+            ("config", "commit.gpgsign", "false"),
+            ("config", "core.hooksPath", str(self.directory / "no-hooks")),
+            ("remote", "add", "origin", "https://github.com/nhangen/advisory-fixture.git"),
+        ):
+            subprocess.run(
+                ["git", "-C", str(self.project), *arguments],
+                env=self.env, check=True, capture_output=True, timeout=10,
+            )
+
+        def event(name, **extra):
+            if not root_router:
+                return self.event(name, **extra)
+            result = self.cli(
+                "route", "--event", name,
+                helper=ROOT / "scripts/lib/capture-owner.py",
+                payload=dict(
+                    hook_event_name=name, session_id="native-session",
+                    turn_id="native-turn", cwd=str(self.project), **extra,
+                    transcript_path=str(self.directory / "missing-fixture-transcript.jsonl"),
+                ),
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            return json.loads(result.stdout or "{}")
+
+        event("UserPromptSubmit", prompt="Fixture work awaiting capture")
+        first = dict(
+            tool_name="Bash", tool_use_id="first-commit",
+            tool_input={"command": "git commit --allow-empty -m first-fixture"},
+        )
+        output = event("PreToolUse", **first)
+        self.assertEqual(
+            output["hookSpecificOutput"].get("permissionDecision"),
+            None if root_router else "allow", output,
+        )
+        wrapped = output["hookSpecificOutput"]["updatedInput"]["command"]
+        self.assertEqual("codex-execute" in wrapped, not root_router)
+        result = self.run_emitted(wrapped)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        first["tool_input"] = {"command": wrapped}
+        event("PostToolUse", **first, tool_response=result.stdout)
+        (state_path,) = self.states()
+        state = json.loads(state_path.read_bytes())
+        self.assertEqual(len(state["commits"]), 1)
+        self.assertEqual(next(iter(state["commits"].values()))["status"], "pending")
+        self.assertEqual(state["snapshots"], {})
+        before = self.snapshot(self.profile)
+        command = "git commit --allow-empty -m second-fixture"
+        output = event(
+            "PreToolUse", tool_name="Bash", tool_use_id="second-commit",
+            tool_input={"command": command},
+        )
+        specific = output["hookSpecificOutput"]
+        self.assertEqual(set(output), {"hookSpecificOutput"})
+        self.assertEqual(set(specific), {"hookEventName", "additionalContext"})
+        self.assertIn("pending commit", specific["additionalContext"])
+        self.assertIn("no successful capture is inferred", specific["additionalContext"])
+        self.assertEqual(self.snapshot(self.profile), before)
+        result = self.run_emitted(command)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            subprocess.check_output(
+                ["git", "-C", str(self.project), "rev-list", "--count", "HEAD"],
+                env=self.env, text=True, timeout=10,
+            ).strip(), "2",
+        )
+        self.assertEqual(self.snapshot(self.profile), before)
+        denied = event(
+            "PreToolUse", tool_name=(
+                "mcp__obsidian-write__obsidian_keeper_save" if root_router
+                else "mcp__obsidian_write__obsidian_keeper_save"
+            ),
+            tool_use_id="unauthorized-write",
+            tool_input={"idempotency_key": state["session_save"]["idempotency_key"]},
+        )
+        self.assertEqual(denied["hookSpecificOutput"]["permissionDecision"], "deny")
+        self.assertEqual(self.snapshot(self.profile), before)
+        self.assertFalse(self.native("drain-status", "--home", str(self.profile))["quiescent"])
+
+    def test_old_pinned_runtime_pending_commit_is_advisory_in_installed_codex(self):
+        self.pending_commit_advisory()
+
+    def test_old_pinned_runtime_pending_commit_is_advisory_in_root_router(self):
+        self.pending_commit_advisory(root_router=True)
+
+    def test_installed_codex_converts_each_runtime_denial_shape_only_for_bash(self):
+        self.activate()
+        module = runpy.run_path(str(
+            self.installed / "skills/commit-capture/scripts/lib/capture-owner.py"
+        ))
+        route = module["codex_route"]
+        native = module["codex_native"]
+        args = module["argparse"].Namespace(event="PreToolUse", delivery="plugin")
+        before = self.snapshot(self.profile)
+        for response in (
+            {"hookSpecificOutput": {
+                "hookEventName": "PreToolUse", "permissionDecision": "deny",
+                "permissionDecisionReason": "Old pending capture",
+            }},
+            {"decision": "block", "reason": "Old pending capture"},
+            {"continue": False, "stopReason": "Old pending capture"},
+        ):
+            def native_response(binding, operation, *arguments, **kwargs):
+                if operation == "hook":
+                    return json.loads(json.dumps(response))
+                return native(binding, operation, *arguments, **kwargs)
+
+            for tool in ("Bash", "Read", "mcp__obsidian_write__obsidian_keeper_save"):
+                with self.subTest(response=response, tool=tool), mock.patch.dict(
+                    os.environ, self.env
+                ), mock.patch.dict(route.__globals__, codex_native=native_response):
+                    output = route(args, str(self.home), dict(
+                        hook_event_name="PreToolUse", cwd=str(self.project),
+                        tool_name=tool, tool_input={"command": "git commit -m fixture"},
+                    ))
+                    if tool == "Bash":
+                        self.assertEqual(set(output), {"hookSpecificOutput"})
+                        specific = output["hookSpecificOutput"]
+                        self.assertEqual(set(specific), {"hookEventName", "additionalContext"})
+                        self.assertIn("Old pending capture", specific["additionalContext"])
+                    else:
+                        self.assertEqual(output, response)
+                    self.assertEqual(self.snapshot(self.profile), before)
+
     def test_guarded_failed_commit_preserves_exit_and_stderr(self):
         _, command = self.guarded_fixture(commit=True)
         hooks = self.directory / "no-hooks"
@@ -1500,7 +1639,7 @@ print(json.dumps(results))
             tool_input={"command": "git commit -m competing"},
         )
         specific = output["hookSpecificOutput"]
-        self.assertIn(specific.get("permissionDecision"), (None, "deny"))
+        self.assertNotIn("permissionDecision", specific)
         self.assertNotIn("updatedInput", specific)
         text = specific.get("additionalContext", specific.get("permissionDecisionReason"))
         self.assertIsInstance(text, str)

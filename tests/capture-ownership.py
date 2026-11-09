@@ -1629,6 +1629,8 @@ class OwnershipTests(unittest.TestCase):
 
     def test_runtime_failure_does_not_block_shell_or_misreport_saved_capture(self):
         self.mock_runtime("raise SystemExit(64)\n")
+        pending = self.evidence("session-capture/old/activity.json", {"pending": ["old"]})
+        original = pending.read_bytes()
         for owner in OWNERS:
             result = self.run_owner(
                 "route",
@@ -1643,12 +1645,76 @@ class OwnershipTests(unittest.TestCase):
                 ),
                 owner=owner,
             )
+            self.assertEqual(result.returncode, 0, result.stderr)
             output = json.loads(result.stdout)
             self.assertNotIn("permissionDecision", output["hookSpecificOutput"])
+            self.assertNotIn("updatedInput", output["hookSpecificOutput"])
+            self.assertNotIn("decision", output)
+            self.assertNotEqual(output.get("continue"), False)
             self.assertIn(
                 "unavailable", output["hookSpecificOutput"]["additionalContext"]
             )
-            self.assertFalse((self.base / "session-capture").exists())
+            self.assertEqual(pending.read_bytes(), original)
+
+    def test_successful_old_runtime_denials_are_advisory_only_for_pretool_bash(self):
+        self.mock_runtime("print('{}')\n")
+        pending = self.evidence("session-capture/old/activity.json", {"pending": ["old"]})
+        original = pending.read_bytes()
+        responses = (
+            {"hookSpecificOutput": {
+                "hookEventName": "PreToolUse",
+                "permissionDecision": "deny",
+                "permissionDecisionReason": "Old pending capture",
+                "updatedInput": {"command": "must not execute"},
+            }},
+            {"decision": "block", "reason": "Old pending capture"},
+            {"continue": False, "stopReason": "Old pending capture"},
+        )
+        for owner in OWNERS:
+            for response in responses:
+                (self.case / "mock-bundle/bin/obsidian-mcp-native").write_text(
+                    "print(" + repr(json.dumps(response)) + ")\n"
+                )
+                for tool in ("Bash", "Read", "mcp__obsidian_write__obsidian_keeper_save"):
+                    with self.subTest(owner=owner, response=response, tool=tool):
+                        result = self.run_owner(
+                            "route", "--event", "PreToolUse", owner=owner,
+                            payload=json.dumps(dict(
+                                cwd=str(self.case), tool_name=tool,
+                                tool_input={"command": "git commit -m fixture"},
+                            )),
+                        )
+                        self.assertEqual(result.returncode, 0, result.stderr)
+                        output = json.loads(result.stdout)
+                        if tool == "Bash":
+                            self.assertEqual(set(output), {"hookSpecificOutput"})
+                            specific = output["hookSpecificOutput"]
+                            self.assertEqual(set(specific), {"hookEventName", "additionalContext"})
+                            self.assertIn("Old pending capture", specific["additionalContext"])
+                            self.assertIn("no successful capture is inferred", specific["additionalContext"])
+                        else:
+                            self.assertEqual(output, response)
+                        self.assertEqual(pending.read_bytes(), original)
+
+    def test_successful_runtime_healthy_rewrite_and_other_event_block_are_preserved(self):
+        self.mock_runtime("print('{}')\n")
+        for event, response in (
+            ("PreToolUse", {"hookSpecificOutput": {
+                "hookEventName": "PreToolUse", "permissionDecision": "allow",
+                "updatedInput": {"command": "healthy capture executor"},
+            }}),
+            ("Stop", {"decision": "block", "reason": "Pending capture"}),
+        ):
+            (self.case / "mock-bundle/bin/obsidian-mcp-native").write_text(
+                "print(" + repr(json.dumps(response)) + ")\n"
+            )
+            for owner in OWNERS:
+                result = self.run_owner(
+                    "route", "--event", event, owner=owner,
+                    payload=json.dumps(dict(cwd=str(self.case), tool_name="Bash")),
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(json.loads(result.stdout), response)
 
     def test_empty_state_home_and_symlink_record_refuse(self):
         self.env["XDG_STATE_HOME"] = ""
