@@ -303,6 +303,24 @@ class SetupTest(unittest.TestCase):
                            "invalid repository root")
         self.assertEqual(list(self.home.iterdir()), [])
 
+    def test_relative_vault_and_repo_root_are_stored_absolute(self):
+        (self.root / "repo").mkdir()
+        result = subprocess.run(
+            ["python3", str(SCRIPT), "--client-dir", str(self.client),
+             "--vault", "vault", "--repo-root", "repo", "--apply"],
+            cwd=self.root, env=self.env, text=True, capture_output=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        args = json.loads((self.home / ".claude.json").read_text())["mcpServers"]["obsidian"]["args"]
+        self.assertEqual(args, ["--vault", str(self.vault.resolve()),
+                                "--repo-root", str((self.root / "repo").resolve())])
+        self.assertTrue(Path(args[1]).is_absolute())
+
+    def test_empty_repo_root_refuses(self):
+        self.assertRefused(self.run_vault_setup("--repo-root", "", "--apply"),
+                           "repository root must be set and nonempty")
+        self.assertEqual(list(self.home.iterdir()), [])
+
     def test_vault_nonexistent_repo_root_refuses(self):
         nonexistent = self.root / "nonexistent-repo"
         result = self.run_vault_setup("--repo-root", str(nonexistent), "--apply")
@@ -323,6 +341,18 @@ class SetupTest(unittest.TestCase):
     def test_vault_conflicting_registration_refuses(self):
         config = self.home / ".claude.json"
         original = json.dumps({"mcpServers": {"obsidian": {"command": "other-server"}}})
+        config.write_text(original)
+        result = self.run_vault_setup("--apply")
+        self.assertRefused(result, "existing Obsidian registration differs")
+        self.assertEqual(config.read_text(), original)
+
+
+    def test_vault_conflict_on_write_server_alone_refuses(self):
+        self.assertEqual(self.run_vault_setup("--apply").returncode, 0)
+        config = self.home / ".claude.json"
+        value = json.loads(config.read_text())
+        value["mcpServers"]["obsidian-write"]["env"] = {}
+        original = json.dumps(value)
         config.write_text(original)
         result = self.run_vault_setup("--apply")
         self.assertRefused(result, "existing Obsidian registration differs")
