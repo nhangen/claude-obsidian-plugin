@@ -64,8 +64,6 @@ def plan(args, home):
     if os.environ.get("CLAUDE_CONFIG_DIR"):
         raise SetupError("custom CLAUDE_CONFIG_DIR requires manual setup")
     client = Path(args.client_dir).expanduser().absolute()
-    if args.endpoint and args.vault:
-        raise SetupError("--endpoint and --vault are mutually exclusive")
     if not args.endpoint and not args.vault:
         raise SetupError("either --endpoint or --vault is required")
 
@@ -89,7 +87,7 @@ def plan(args, home):
             if not args.daily_path.strip() or has_control(args.daily_path):
                 raise SetupError("invalid daily path")
             daily_posix = Path(args.daily_path)
-            if daily_posix.is_absolute() or args.daily_path.startswith("/") or ".." in daily_posix.parts:
+            if daily_posix.is_absolute() or ".." in daily_posix.parts:
                 raise SetupError("daily path must be relative to the vault")
             server_args.extend(["--daily-path", args.daily_path])
         for root in args.repo_root:
