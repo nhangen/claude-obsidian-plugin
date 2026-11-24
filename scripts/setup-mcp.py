@@ -212,7 +212,11 @@ def main():
         print(json.dumps({"applied": args.apply, "changed_files": len(changes),
                           "capture_writer": "unchanged", "connection_verified": False}))
         return 0
-    except (SetupError, OSError, ValueError, TypeError):
+    except SetupError as error:
+        print(f"obsidian-mcp-setup: incomplete; {error}. "
+              "No writer handoff performed. Inspect configuration/backups before retrying.", file=sys.stderr)
+        return 64
+    except (OSError, ValueError, TypeError):
         print("obsidian-mcp-setup: incomplete; configuration or prerequisites rejected. "
               "No writer handoff performed. Inspect configuration/backups before retrying.", file=sys.stderr)
         return 64

@@ -45,6 +45,10 @@ class SetupTest(unittest.TestCase):
             env=self.env, text=True, capture_output=True,
         )
 
+    def assertRefused(self, result, reason):
+        self.assertEqual(result.returncode, 64, result.stderr)
+        self.assertIn(reason, result.stderr)
+
     def test_dry_run_writes_nothing_and_never_prints_token(self):
         self.env["OBSIDIAN_MCP_READ_TOKEN"] = "private-canary-secret"
         result = self.run_setup()
@@ -235,24 +239,24 @@ class SetupTest(unittest.TestCase):
             ["python3", str(SCRIPT), "--client-dir", str(self.client), "--apply"],
             env=self.env, text=True, capture_output=True,
         )
-        self.assertEqual(result.returncode, 64)
+        self.assertRefused(result, "either --endpoint or --vault is required")
 
     def test_endpoint_refuses_daily_path_and_repo_root(self):
         result = self.run_setup("--daily-path", "Daily", "--apply")
-        self.assertEqual(result.returncode, 64)
+        self.assertRefused(result, "--daily-path and --repo-root require --vault")
         repo = self.root / "repo"
         repo.mkdir()
         result = self.run_setup("--repo-root", str(repo), "--apply")
-        self.assertEqual(result.returncode, 64)
+        self.assertRefused(result, "--daily-path and --repo-root require --vault")
 
     def test_vault_refuses_endpoint_flags(self):
         token = self.root / "read-token"
         token.write_text("secret")
         token.chmod(0o600)
         result = self.run_vault_setup("--read-token-file", str(token), "--apply")
-        self.assertEqual(result.returncode, 64)
+        self.assertRefused(result, "cannot be used with --vault")
         result = self.run_vault_setup("--allow-tailnet-http", "--apply")
-        self.assertEqual(result.returncode, 64)
+        self.assertRefused(result, "cannot be used with --vault")
 
     def test_vault_nonexistent_or_file_refuses(self):
         nonexistent = self.root / "does-not-exist"
@@ -261,7 +265,7 @@ class SetupTest(unittest.TestCase):
              "--vault", str(nonexistent), "--apply"],
             env=self.env, text=True, capture_output=True,
         )
-        self.assertEqual(result.returncode, 64)
+        self.assertRefused(result, "vault path must be an existing directory")
 
         regular_file = self.root / "file-not-dir"
         regular_file.write_text("file")
@@ -270,25 +274,25 @@ class SetupTest(unittest.TestCase):
              "--vault", str(regular_file), "--apply"],
             env=self.env, text=True, capture_output=True,
         )
-        self.assertEqual(result.returncode, 64)
+        self.assertRefused(result, "vault path must be an existing directory")
 
     def test_vault_invalid_daily_path_refuses(self):
         result = self.run_vault_setup("--daily-path", "/absolute/daily", "--apply")
-        self.assertEqual(result.returncode, 64)
+        self.assertRefused(result, "daily path must be relative to the vault")
         result = self.run_vault_setup("--daily-path", "../escaped", "--apply")
-        self.assertEqual(result.returncode, 64)
+        self.assertRefused(result, "daily path must be relative to the vault")
         result = self.run_vault_setup("--daily-path", "daily\ninvalid", "--apply")
-        self.assertEqual(result.returncode, 64)
+        self.assertRefused(result, "invalid daily path")
 
     def test_vault_nonexistent_repo_root_refuses(self):
         nonexistent = self.root / "nonexistent-repo"
         result = self.run_vault_setup("--repo-root", str(nonexistent), "--apply")
-        self.assertEqual(result.returncode, 64)
+        self.assertRefused(result, "repository root must be an existing directory")
 
     def test_vault_missing_server_launcher_refuses(self):
         (self.client / "bin/obsidian-mcp-server").unlink()
         result = self.run_vault_setup("--apply")
-        self.assertEqual(result.returncode, 64)
+        self.assertRefused(result, "install the verified public client")
         self.assertEqual(list(self.home.iterdir()), [])
 
     def test_vault_conflicting_registration_refuses(self):
@@ -296,7 +300,7 @@ class SetupTest(unittest.TestCase):
         original = json.dumps({"mcpServers": {"obsidian": {"command": "other-server"}}})
         config.write_text(original)
         result = self.run_vault_setup("--apply")
-        self.assertEqual(result.returncode, 64)
+        self.assertRefused(result, "existing Obsidian registration differs")
         self.assertEqual(config.read_text(), original)
 
 
