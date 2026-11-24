@@ -248,7 +248,7 @@ class LoaderTest(unittest.TestCase):
     def runtime(self):
         import hashlib
 
-        pin_path = self.package / "skills/setup/scripts/client-v0.3.1.pin.json"
+        pin_path = self.package / "skills/setup/scripts/client-v0.3.2.pin.json"
         pin = json.loads(pin_path.read_bytes())
         pin["releaseId"] = json.loads(self.metadata)["releaseId"]
         digest = hashlib.sha256(self.metadata).hexdigest()
@@ -535,7 +535,7 @@ class LoaderTest(unittest.TestCase):
         installed = self.installed_package()
         for relative in (
             "skills/commit-capture/scripts/lib/obsidian-mcp-client-install",
-            "skills/setup/scripts/client-v0.3.1.pin.json",
+            "skills/setup/scripts/client-v0.3.2.pin.json",
         ):
             with self.subTest(relative=relative):
                 path = installed / relative

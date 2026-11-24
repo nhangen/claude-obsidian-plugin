@@ -69,7 +69,7 @@ class BootstrapTest(unittest.TestCase):
             self.skill,
         )
         self.script = self.skill / "scripts/bootstrap-runtime.py"
-        self.pin_path = self.skill / "scripts/client-v0.3.1.pin.json"
+        self.pin_path = self.skill / "scripts/client-v0.3.2.pin.json"
         self.pin = json.loads(self.pin_path.read_bytes())
         self.assets = self.root / "assets"
         self.assets.mkdir()
@@ -311,7 +311,7 @@ class Response(io.BytesIO):
 class Opener:
     def open(self, request, timeout):
         assert 0 < timeout <= 10
-        assert request.full_url.startswith('https://github.com/nhangen/obsidian-mcp/releases/download/client-v0.3.1/')
+        assert request.full_url.startswith('https://github.com/nhangen/obsidian-mcp/releases/download/client-v0.3.2/')
         name = request.full_url.rsplit('/', 1)[-1]
         data = (assets / name).read_bytes()
         behavior = {behavior!r}
@@ -467,10 +467,10 @@ urllib.request.build_opener = build_opener""",
                 )
             ],
             [
-                (f"obsidian-mcp-client/f{i}", tarfile.REGTYPE, b"x" * (3200 * 1024))
-                for i in range(2)
+                (f"obsidian-mcp-client/f{i}", tarfile.REGTYPE, b"x" * (4800 * 1024))
+                for i in range(7)
             ],
-            [("obsidian-mcp-client/large", tarfile.REGTYPE, b"x" * (9 * 1024 * 1024))],
+            [("obsidian-mcp-client/large", tarfile.REGTYPE, b"x" * (29 * 1024 * 1024))],
         ]
         for members in cases:
             with self.subTest(sizes=[len(m[2]) for m in members]):
@@ -481,10 +481,35 @@ urllib.request.build_opener = build_opener""",
 
     def test_compressed_asset_size_limit(self):
         archive = self.assets / NAMES[2]
-        archive.write_bytes(b"x" * (2 * 1024 * 1024 + 1))
+        archive.write_bytes(b"x" * (16 * 1024 * 1024 + 1))
         self.repin()
         self.run_setup("--apply", ok=False)
         self.assertFalse(self.prefix.exists())
+
+    def test_role_scoped_asset_size_limits(self):
+        installer = self.assets / NAMES[0]
+        original_installer = installer.read_bytes()
+        try:
+            installer.write_bytes(b"#" + b"x" * (64 * 1024))
+            self.repin()
+            self.run_setup("--apply", ok=False)
+            self.assertFalse(self.prefix.exists())
+        finally:
+            installer.write_bytes(original_installer)
+            self.repin()
+
+        metadata = self.assets / NAMES[1]
+        original_metadata = metadata.read_bytes()
+        try:
+            obj = json.loads(original_metadata)
+            obj["padding"] = "x" * (16 * 1024)
+            metadata.write_bytes(json.dumps(obj).encode())
+            self.repin()
+            self.run_setup("--apply", ok=False)
+            self.assertFalse(self.prefix.exists())
+        finally:
+            metadata.write_bytes(original_metadata)
+            self.repin()
 
     def test_archive_truncation_corrupt_gzip_and_missing_end_markers(self):
         original = (self.assets / NAMES[2]).read_bytes()
@@ -608,7 +633,7 @@ class PublicReleaseTest(unittest.TestCase):
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
                 if not args:
                     self.assertTrue(json.loads(result.stdout)["dryRun"])
-            pin = json.loads((skill / "scripts/client-v0.3.1.pin.json").read_bytes())
+            pin = json.loads((skill / "scripts/client-v0.3.2.pin.json").read_bytes())
             self.assertEqual((prefix / "current").resolve().name, pin["releaseId"])
             self.assertFalse((home / ".config").exists())
 
