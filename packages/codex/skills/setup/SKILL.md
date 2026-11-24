@@ -263,8 +263,9 @@ Codex has a separate admission record and does not need workspace enrollment.
 The selected public runtime must advertise attached user-wide Codex capture and
 native turn identity. The published bootstrap pin is `client-v0.3.2`.
 Do not fabricate a release pin, execute an unverified candidate, silently select
-an isolated profile, or call source fixtures a published installation. Stop with
-an unsupported-capability result until an independently authenticated compatible bundle is available.
+an isolated profile, or call source fixtures a published installation. If the
+selected runtime does not advertise these capabilities, stop with an
+unsupported-capability result.
 
 For an authorized compatible bundle, obtain its release-metadata SHA-256 from
 the trusted distribution, not from the candidate as its own authority. Preview:

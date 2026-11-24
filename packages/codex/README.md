@@ -122,7 +122,8 @@ substitute an isolated profile.
 
 An explicitly supplied release-metadata SHA-256 is the trust input. The plugin
 authenticates its vendored standalone verifier against the published 0.3.1
-installer pin, then verifies the selected runtime before executing capabilities,
+installer pin, which stays separate from the `client-v0.3.2` bootstrap pin on
+purpose, then verifies the selected runtime before executing capabilities,
 profile operations or hooks. Installed releases and standalone bundles retain
 their respective inventory checks. Runtime verification is local; hooks do not
 download dependencies or obtain credentials.
