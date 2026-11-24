@@ -595,6 +595,7 @@ urllib.request.build_opener = build_opener""",
 
 class PackagedPinTest(unittest.TestCase):
     # Measured client-v0.3.3 archive expansion facts (#285):
+    MEASURED_TAG = "client-v0.3.3"
     MEASURED_TAR_BYTES = 24_596_480
     MEASURED_PAYLOAD_BYTES = 24_548_782
     MEASURED_MEMBERS = 55
@@ -613,6 +614,10 @@ class PackagedPinTest(unittest.TestCase):
         module = runpy.run_path(str(script))
         pin = module["read_pin"]()
         self.assertEqual(pin["tag"], module["TAG"])
+        self.assertEqual(
+            pin["tag"], self.MEASURED_TAG,
+            "pin moved; re-measure the archive and update MEASURED_*",
+        )
         self.assertEqual(set(pin["assets"]), set(module["ASSETS"]))
         self.assertGreaterEqual(
             module["MAX_TAR_BYTES"], self.MEASURED_TAR_BYTES
