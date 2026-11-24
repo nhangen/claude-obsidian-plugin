@@ -23,6 +23,11 @@ class SetupTest(unittest.TestCase):
             launcher = self.client / "bin" / f"obsidian-mcp-{profile}"
             launcher.write_text("#!/bin/sh\nexit 0\n")
             launcher.chmod(0o755)
+        server_launcher = self.client / "bin" / "obsidian-mcp-server"
+        server_launcher.write_text("#!/bin/sh\nexit 0\n")
+        server_launcher.chmod(0o755)
+        self.vault = self.root / "vault"
+        self.vault.mkdir()
         self.env = dict(os.environ, HOME=str(self.home))
         self.env.pop("CLAUDE_CONFIG_DIR", None)
 
@@ -30,6 +35,13 @@ class SetupTest(unittest.TestCase):
         return subprocess.run(
             ["python3", str(SCRIPT), "--client-dir", str(self.client),
              "--endpoint", "https://vault.example/mcp", *extra],
+            env=self.env, text=True, capture_output=True,
+        )
+
+    def run_vault_setup(self, *extra):
+        return subprocess.run(
+            ["python3", str(SCRIPT), "--client-dir", str(self.client),
+             "--vault", str(self.vault), *extra],
             env=self.env, text=True, capture_output=True,
         )
 
@@ -143,6 +155,142 @@ class SetupTest(unittest.TestCase):
         self.assertEqual(list(self.home.iterdir()), [])
         self.env["HOME"] = ""
         self.assertEqual(self.run_setup("--apply").returncode, 64)
+
+    def test_vault_dry_run_and_apply(self):
+        result = self.run_vault_setup()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(list(self.home.iterdir()), [])
+        plan = json.loads(result.stdout)
+        self.assertFalse(plan["applied"])
+        self.assertEqual(plan["capture_writer"], "unchanged")
+
+        result = self.run_vault_setup("--apply")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        config = json.loads((self.home / ".claude.json").read_text())
+        settings = json.loads((self.home / ".claude/settings.json").read_text())
+
+        read_server = config["mcpServers"]["obsidian"]
+        self.assertEqual(read_server["command"], str(self.client / "bin/obsidian-mcp-server"))
+        self.assertEqual(read_server["args"], ["--vault", str(self.vault.resolve())])
+        self.assertEqual(read_server["env"], {})
+
+        write_server = config["mcpServers"]["obsidian-write"]
+        self.assertEqual(write_server["command"], str(self.client / "bin/obsidian-mcp-server"))
+        self.assertEqual(write_server["args"], ["--vault", str(self.vault.resolve())])
+        self.assertEqual(write_server["env"], {"MCP_STDIO_PROFILE": "write"})
+
+        self.assertEqual(
+            settings["permissions"]["allow"],
+            ["mcp__obsidian-write__obsidian_keeper_save", "mcp__obsidian-write__obsidian_daily_append"],
+        )
+
+        # Idempotency check: re-running produces no changes
+        result = self.run_vault_setup("--apply")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout)["changed_files"], 0)
+
+    def test_vault_with_daily_path_and_repo_roots(self):
+        repo1 = self.root / "repo1"
+        repo2 = self.root / "repo2"
+        repo1.mkdir()
+        repo2.mkdir()
+
+        result = self.run_vault_setup(
+            "--daily-path", "Journal/Daily",
+            "--repo-root", str(repo1),
+            "--repo-root", str(repo2),
+            "--apply",
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        config = json.loads((self.home / ".claude.json").read_text())
+        expected_args = [
+            "--vault", str(self.vault.resolve()),
+            "--daily-path", "Journal/Daily",
+            "--repo-root", str(repo1.resolve()),
+            "--repo-root", str(repo2.resolve()),
+        ]
+        self.assertEqual(config["mcpServers"]["obsidian"]["args"], expected_args)
+        self.assertEqual(config["mcpServers"]["obsidian-write"]["args"], expected_args)
+        self.assertEqual(config["mcpServers"]["obsidian"]["env"], {})
+        self.assertEqual(config["mcpServers"]["obsidian-write"]["env"], {"MCP_STDIO_PROFILE": "write"})
+
+    def test_mutually_exclusive_endpoint_and_vault(self):
+        result = subprocess.run(
+            ["python3", str(SCRIPT), "--client-dir", str(self.client),
+             "--endpoint", "https://vault.example/mcp",
+             "--vault", str(self.vault), "--apply"],
+            env=self.env, text=True, capture_output=True,
+        )
+        self.assertEqual(result.returncode, 64)
+
+    def test_neither_endpoint_nor_vault_refuses(self):
+        result = subprocess.run(
+            ["python3", str(SCRIPT), "--client-dir", str(self.client), "--apply"],
+            env=self.env, text=True, capture_output=True,
+        )
+        self.assertEqual(result.returncode, 64)
+
+    def test_endpoint_refuses_daily_path_and_repo_root(self):
+        result = self.run_setup("--daily-path", "Daily", "--apply")
+        self.assertEqual(result.returncode, 64)
+        repo = self.root / "repo"
+        repo.mkdir()
+        result = self.run_setup("--repo-root", str(repo), "--apply")
+        self.assertEqual(result.returncode, 64)
+
+    def test_vault_refuses_endpoint_flags(self):
+        token = self.root / "read-token"
+        token.write_text("secret")
+        token.chmod(0o600)
+        result = self.run_vault_setup("--read-token-file", str(token), "--apply")
+        self.assertEqual(result.returncode, 64)
+        result = self.run_vault_setup("--allow-tailnet-http", "--apply")
+        self.assertEqual(result.returncode, 64)
+
+    def test_vault_nonexistent_or_file_refuses(self):
+        nonexistent = self.root / "does-not-exist"
+        result = subprocess.run(
+            ["python3", str(SCRIPT), "--client-dir", str(self.client),
+             "--vault", str(nonexistent), "--apply"],
+            env=self.env, text=True, capture_output=True,
+        )
+        self.assertEqual(result.returncode, 64)
+
+        regular_file = self.root / "file-not-dir"
+        regular_file.write_text("file")
+        result = subprocess.run(
+            ["python3", str(SCRIPT), "--client-dir", str(self.client),
+             "--vault", str(regular_file), "--apply"],
+            env=self.env, text=True, capture_output=True,
+        )
+        self.assertEqual(result.returncode, 64)
+
+    def test_vault_invalid_daily_path_refuses(self):
+        result = self.run_vault_setup("--daily-path", "/absolute/daily", "--apply")
+        self.assertEqual(result.returncode, 64)
+        result = self.run_vault_setup("--daily-path", "../escaped", "--apply")
+        self.assertEqual(result.returncode, 64)
+        result = self.run_vault_setup("--daily-path", "daily\ninvalid", "--apply")
+        self.assertEqual(result.returncode, 64)
+
+    def test_vault_nonexistent_repo_root_refuses(self):
+        nonexistent = self.root / "nonexistent-repo"
+        result = self.run_vault_setup("--repo-root", str(nonexistent), "--apply")
+        self.assertEqual(result.returncode, 64)
+
+    def test_vault_missing_server_launcher_refuses(self):
+        (self.client / "bin/obsidian-mcp-server").unlink()
+        result = self.run_vault_setup("--apply")
+        self.assertEqual(result.returncode, 64)
+        self.assertEqual(list(self.home.iterdir()), [])
+
+    def test_vault_conflicting_registration_refuses(self):
+        config = self.home / ".claude.json"
+        original = json.dumps({"mcpServers": {"obsidian": {"command": "other-server"}}})
+        config.write_text(original)
+        result = self.run_vault_setup("--apply")
+        self.assertEqual(result.returncode, 64)
+        self.assertEqual(config.read_text(), original)
 
 
 if __name__ == "__main__":

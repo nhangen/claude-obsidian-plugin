@@ -12,7 +12,7 @@ Run it with Python 3.11+ on macOS, Linux, or WSL. Use that exact installed
 helper path; do not search plugin caches or depend on a source checkout.
 
 Run the helper without `--apply` first. It authenticates the three pinned
-public `nhangen/obsidian-mcp` `client-v0.3.2` release assets, safely stages the
+public `nhangen/obsidian-mcp` `client-v0.3.3` release assets, safely stages the
 bundle, and asks the verified standalone public installer for a dry run.
 Report the before/after runtime slots. If installation is already authorized,
 continue with `--apply`; otherwise obtain approval for the displayed change.
@@ -261,7 +261,7 @@ working connection or capture. Keep existing Claude ownership and profiles;
 Codex has a separate admission record and does not need workspace enrollment.
 
 The selected public runtime must advertise attached user-wide Codex capture and
-native turn identity. The published bootstrap pin is `client-v0.3.2`.
+native turn identity. The published bootstrap pin is `client-v0.3.3`.
 Do not fabricate a release pin, execute an unverified candidate, silently select
 an isolated profile, or call source fixtures a published installation. If the
 selected runtime does not advertise these capabilities, stop with an

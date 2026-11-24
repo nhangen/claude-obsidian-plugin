@@ -70,7 +70,7 @@ class BootstrapTest(unittest.TestCase):
             self.skill,
         )
         self.script = self.skill / "scripts/bootstrap-runtime.py"
-        self.pin_path = self.skill / "scripts/client-v0.3.2.pin.json"
+        self.pin_path = self.skill / "scripts/client-v0.3.3.pin.json"
         self.pin = json.loads(self.pin_path.read_bytes())
         self.assets = self.root / "assets"
         self.assets.mkdir()
@@ -312,7 +312,7 @@ class Response(io.BytesIO):
 class Opener:
     def open(self, request, timeout):
         assert 0 < timeout <= 10
-        assert request.full_url.startswith('https://github.com/nhangen/obsidian-mcp/releases/download/client-v0.3.2/')
+        assert request.full_url.startswith('https://github.com/nhangen/obsidian-mcp/releases/download/client-v0.3.3/')
         name = request.full_url.rsplit('/', 1)[-1]
         data = (assets / name).read_bytes()
         behavior = {behavior!r}
@@ -594,6 +594,12 @@ urllib.request.build_opener = build_opener""",
 
 
 class PackagedPinTest(unittest.TestCase):
+    # Measured client-v0.3.3 archive expansion facts (#285):
+    MEASURED_TAR_BYTES = 24_596_480
+    MEASURED_PAYLOAD_BYTES = 24_548_782
+    MEASURED_MEMBERS = 55
+    MEASURED_LARGEST_FILE_BYTES = 4_699_472
+
     def test_packaged_pin_fits_its_own_asset_limits(self):
         script = (
             Path(
@@ -608,6 +614,18 @@ class PackagedPinTest(unittest.TestCase):
         pin = module["read_pin"]()
         self.assertEqual(pin["tag"], module["TAG"])
         self.assertEqual(set(pin["assets"]), set(module["ASSETS"]))
+        self.assertGreaterEqual(
+            module["MAX_TAR_BYTES"], self.MEASURED_TAR_BYTES
+        )
+        self.assertGreaterEqual(
+            module["MAX_PAYLOAD_BYTES"], self.MEASURED_PAYLOAD_BYTES
+        )
+        self.assertGreaterEqual(
+            module["MAX_MEMBERS"], self.MEASURED_MEMBERS
+        )
+        self.assertGreaterEqual(
+            module["MAX_FILE_BYTES"], self.MEASURED_LARGEST_FILE_BYTES
+        )
 
 
 @unittest.skipUnless(
@@ -664,7 +682,7 @@ class PublicReleaseTest(unittest.TestCase):
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
                 if not args:
                     self.assertTrue(json.loads(result.stdout)["dryRun"])
-            pin = json.loads((skill / "scripts/client-v0.3.2.pin.json").read_bytes())
+            pin = json.loads((skill / "scripts/client-v0.3.3.pin.json").read_bytes())
             self.assertEqual((prefix / "current").resolve().name, pin["releaseId"])
             self.assertFalse((home / ".config").exists())
 

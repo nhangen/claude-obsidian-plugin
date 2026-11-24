@@ -523,6 +523,10 @@ Claude Code supplies `${CLAUDE_PLUGIN_ROOT}`. The Codex skill resolves its bundl
 For a shared remote server, run `/obsidian:setup` and select remote MCP. The
 wizard reuses the verified public client and registers separate read/write tools
 and scoped routine-write permissions. It needs no local vault or llm-tools.
+For local vaults, `scripts/setup-mcp.py` supports zero-install local setup using
+`--vault <path>` (with optional `--daily-path` and `--repo-root`), registering
+the bundled standalone stdio server launcher (`bin/obsidian-mcp-server`) with
+read and write (`MCP_STDIO_PROFILE=write`) profiles.
 `scripts/setup-mcp.py` previews by default; `--apply` preserves unrelated settings
 and refuses existing differing registrations. Credentials stay in the host
 environment or private token files, not in the generated config. Reconnect and

@@ -69,6 +69,29 @@ files and backups, then rerun the same arguments to complete it. Backups can
 contain existing credentials and must remain private. Do not restore a whole
 backup over later unrelated host changes.
 
+#### Zero-install local vault MCP setup (bundled stdio server)
+
+When the user has a local Obsidian vault and wants zero-install local MCP integration:
+
+1. Obtain the absolute path to the local Obsidian vault (e.g. `/Users/yourname/Documents/Obsidian`).
+2. Reuse an installed, verified public client (client-v0.3.3+) containing `bin/obsidian-mcp-server`.
+   No git checkout, build toolchain, or separate server install is required.
+3. Preview Claude user-scope registration and exact routine-write permissions:
+
+   ```bash
+   python3 "${CLAUDE_PLUGIN_ROOT}/scripts/setup-mcp.py" \
+     --client-dir /absolute/public-client/current \
+     --vault /absolute/path/to/vault
+   ```
+
+   Optionally supply `--daily-path <path>` (e.g. `Daily/`) and repeatable `--repo-root <path>`
+   for allowed repository roots for commit metadata.
+   After checking the preview, rerun with `--apply`.
+   Existing differing registrations or conflicting ask/deny rules are refused, never removed or
+   overwritten. The helper configures `mcpServers.obsidian` (read) and `mcpServers.obsidian-write`
+   (write with `MCP_STDIO_PROFILE=write`) using `bin/obsidian-mcp-server`.
+4. Reconnect the host, verify discovery and a bounded read.
+
 #### Explicit capture attachment, separate from connection setup
 
 Only when automatic MCP capture is explicitly requested and a compatible public
