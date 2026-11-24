@@ -188,7 +188,6 @@ class SetupTest(unittest.TestCase):
             ["mcp__obsidian-write__obsidian_keeper_save", "mcp__obsidian-write__obsidian_daily_append"],
         )
 
-        # Idempotency check: re-running produces no changes
         result = self.run_vault_setup("--apply")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(json.loads(result.stdout)["changed_files"], 0)
