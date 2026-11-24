@@ -164,7 +164,7 @@ if manifest.get("requires_local_executor") is not True:
 PY
 [ -f "$SKILL_ROOT/SKILL.md" ] || fail "installed skill is missing"
 [ -f "$INSTALLED/skills/setup/SKILL.md" ] || fail "installed setup skill is missing"
-[ -f "$INSTALLED/skills/setup/scripts/client-v0.3.2.pin.json" ] || fail "installed runtime pins are missing"
+[ -f "$INSTALLED/skills/setup/scripts/client-v0.3.3.pin.json" ] || fail "installed runtime pins are missing"
 python3 -I -B "$INSTALLED/skills/setup/scripts/bootstrap-runtime.py" --help \
   >"$TMP/setup-help.out" || fail "installed setup entrypoint failed"
 grep -q -- '--apply' "$TMP/setup-help.out" || fail "installed setup has no explicit apply option"

@@ -34,6 +34,10 @@ def load(path):
     return raw, value
 
 
+def has_control(value):
+    return any(ord(char) < 32 or ord(char) == 127 for char in value)
+
+
 def endpoint_policy(endpoint, allow_tailnet):
     if any(ord(char) <= 32 or ord(char) == 127 for char in endpoint):
         raise SetupError("invalid endpoint")
@@ -60,7 +64,42 @@ def plan(args, home):
     if os.environ.get("CLAUDE_CONFIG_DIR"):
         raise SetupError("custom CLAUDE_CONFIG_DIR requires manual setup")
     client = Path(args.client_dir).expanduser().absolute()
-    transport = endpoint_policy(args.endpoint, args.allow_tailnet_http)
+    if not args.endpoint and not args.vault:
+        raise SetupError("either --endpoint or --vault is required")
+
+    if args.endpoint:
+        if args.daily_path is not None or args.repo_root:
+            raise SetupError("--daily-path and --repo-root require --vault")
+        transport = endpoint_policy(args.endpoint, args.allow_tailnet_http)
+        server_args = []
+    else:
+        if args.allow_tailnet_http or args.read_token_file or args.write_token_file:
+            raise SetupError("endpoint credential and transport flags cannot be used with --vault")
+        if not args.vault.strip():
+            raise SetupError("vault path must be set and nonempty")
+        if has_control(args.vault):
+            raise SetupError("invalid vault path")
+        vault_path = Path(args.vault).expanduser().resolve()
+        if not vault_path.is_dir():
+            raise SetupError("vault path must be an existing directory")
+        server_args = ["--vault", str(vault_path)]
+        if args.daily_path is not None:
+            if not args.daily_path.strip() or has_control(args.daily_path):
+                raise SetupError("invalid daily path")
+            daily_posix = Path(args.daily_path)
+            if daily_posix.is_absolute() or ".." in daily_posix.parts:
+                raise SetupError("daily path must be relative to the vault")
+            server_args.extend(["--daily-path", args.daily_path])
+        for root in args.repo_root:
+            if not root or not root.strip():
+                raise SetupError("repository root must be set and nonempty")
+            if has_control(root):
+                raise SetupError("invalid repository root")
+            root_path = Path(root).expanduser().resolve()
+            if not root_path.is_dir():
+                raise SetupError("repository root must be an existing directory")
+            server_args.extend(["--repo-root", str(root_path)])
+
     paths = (home / ".claude.json", home / ".claude/settings.json")
     originals, values = zip(*(load(path) for path in paths))
     config, settings = copy.deepcopy(values)
@@ -79,24 +118,33 @@ def plan(args, home):
         if any(rule == "mcp__obsidian-write" or fnmatchcase(f"mcp__obsidian-write__{tool}", rule)
                for rule in rules for tool in tools):
             raise SetupError("existing permission policy prevents automatic routine writes")
-    for profile, name in (("read", "obsidian"), ("write", "obsidian-write")):
-        launcher = client / "bin" / f"obsidian-mcp-{profile}"
+    if args.vault:
+        launcher = client / "bin" / "obsidian-mcp-server"
         if not launcher.is_file() or not os.access(launcher, os.X_OK):
-            raise SetupError("install the verified public client before setup")
-        upper = profile.upper()
-        prefix = f"OBSIDIAN_MCP_{upper}"
-        token_file = getattr(args, f"{profile}_token_file")
-        env = {f"{prefix}_ENDPOINT": args.endpoint, **transport}
-        if token_file:
-            token_path = Path(token_file).expanduser().absolute()
-            info = token_path.lstat()
-            if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid()
-                    or stat.S_IMODE(info.st_mode) not in (0o400, 0o600)):
-                raise SetupError("credential files must be owned regular files, mode 0400 or 0600")
-            env.update({f"{prefix}_CREDENTIAL_PROVIDER": "file", f"{prefix}_TOKEN_FILE": str(token_path)})
+            raise SetupError("bin/obsidian-mcp-server requires client-v0.3.3 or later; "
+                             "install the verified public client before setup")
+    for profile, name in (("read", "obsidian"), ("write", "obsidian-write")):
+        if args.vault:
+            env = {"MCP_STDIO_PROFILE": "write"} if profile == "write" else {}
+            entry = {"command": str(launcher), "args": list(server_args), "env": env}
         else:
-            env.update({f"{prefix}_CREDENTIAL_PROVIDER": "env", f"{prefix}_TOKEN_ENV": f"{prefix}_TOKEN"})
-        entry = {"command": str(launcher), "args": [], "env": env}
+            launcher = client / "bin" / f"obsidian-mcp-{profile}"
+            if not launcher.is_file() or not os.access(launcher, os.X_OK):
+                raise SetupError("install the verified public client before setup")
+            upper = profile.upper()
+            prefix = f"OBSIDIAN_MCP_{upper}"
+            token_file = getattr(args, f"{profile}_token_file")
+            env = {f"{prefix}_ENDPOINT": args.endpoint, **transport}
+            if token_file:
+                token_path = Path(token_file).expanduser().absolute()
+                info = token_path.lstat()
+                if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid()
+                        or stat.S_IMODE(info.st_mode) not in (0o400, 0o600)):
+                    raise SetupError("credential files must be owned regular files, mode 0400 or 0600")
+                env.update({f"{prefix}_CREDENTIAL_PROVIDER": "file", f"{prefix}_TOKEN_FILE": str(token_path)})
+            else:
+                env.update({f"{prefix}_CREDENTIAL_PROVIDER": "env", f"{prefix}_TOKEN_ENV": f"{prefix}_TOKEN"})
+            entry = {"command": str(launcher), "args": [], "env": env}
         if name in servers and servers[name] != entry:
             raise SetupError("existing Obsidian registration differs; inspect and migrate it explicitly")
         servers[name] = entry
@@ -147,7 +195,11 @@ def apply(changes):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--client-dir", required=True, help="verified public client current directory")
-    parser.add_argument("--endpoint", required=True)
+    target = parser.add_mutually_exclusive_group()
+    target.add_argument("--endpoint")
+    target.add_argument("--vault")
+    parser.add_argument("--daily-path")
+    parser.add_argument("--repo-root", action="append", default=[], help="allowed repository root for commit metadata (repeatable)")
     parser.add_argument("--read-token-file")
     parser.add_argument("--write-token-file")
     parser.add_argument("--allow-tailnet-http", action="store_true")
@@ -168,7 +220,11 @@ def main():
         print(json.dumps({"applied": args.apply, "changed_files": len(changes),
                           "capture_writer": "unchanged", "connection_verified": False}))
         return 0
-    except (SetupError, OSError, ValueError, TypeError):
+    except SetupError as error:
+        print(f"obsidian-mcp-setup: incomplete; {error}. "
+              "No writer handoff performed. Inspect configuration/backups before retrying.", file=sys.stderr)
+        return 64
+    except (OSError, ValueError, TypeError, RuntimeError):
         print("obsidian-mcp-setup: incomplete; configuration or prerequisites rejected. "
               "No writer handoff performed. Inspect configuration/backups before retrying.", file=sys.stderr)
         return 64

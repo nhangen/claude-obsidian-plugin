@@ -15,7 +15,7 @@ connection setup; do not use another chat's success as its acceptance evidence.
 
 The `setup` skill verifies, installs, or reuses the public client runtime as a
 plugin implementation dependency. It resolves its helper from the installed
-skill, authenticates fixed `nhangen/obsidian-mcp` `client-v0.3.2` release pins,
+skill, authenticates fixed `nhangen/obsidian-mcp` `client-v0.3.3` release pins,
 and delegates lifecycle to a freshly verified standalone public installer.
 It needs Python 3.11+ on macOS, Linux, or WSL, without a private tools checkout.
 
@@ -117,12 +117,12 @@ case-insensitive filesystems; ambiguous or corrupt inventory closes admission.
 The public runtime must advertise attached user-wide Codex capture, native turn identities,
 and the required recovery operations. Its new attached-profile capability was
 merged in public source `f511884950777179de8e5bc47a2a5dd2bca52b7c` and published in
-`client-v0.3.2`. Activation must refuse an unsupported runtime, not silently
+`client-v0.3.3`. Activation must refuse an unsupported runtime, not silently
 substitute an isolated profile.
 
 An explicitly supplied release-metadata SHA-256 is the trust input. The plugin
 authenticates its vendored standalone verifier against the published 0.3.1
-installer pin, which stays separate from the `client-v0.3.2` bootstrap pin on
+installer pin, which stays separate from the `client-v0.3.3` bootstrap pin on
 purpose, then verifies the selected runtime before executing capabilities,
 profile operations or hooks. Installed releases and standalone bundles retain
 their respective inventory checks. Runtime verification is local; hooks do not

@@ -18,10 +18,17 @@ Interactive first-run wizard. Writes `obsidian.local.md` from user answers so ro
 
 ### 0. Choose the Host Role
 
-Choose remote MCP when the user has a shared server and no local vault. Complete
-the remote branch below, then STOP this wizard. Do not ask for local vault paths,
-create `obsidian.local.md`, install a watcher, or run local keeper commands.
-Only follow steps 1 onward for an explicitly local vault setup.
+Pick one of three roles:
+
+- **Remote MCP**: the user has a shared server and no local vault. Complete the
+  remote branch below, then STOP this wizard. Do not ask for local vault paths,
+  create `obsidian.local.md`, install a watcher, or run local keeper commands.
+- **Local vault over MCP**: the user has a local vault and wants MCP tools served
+  by the bundled stdio server, with no plugin routing config. Complete the
+  zero-install branch below, then STOP this wizard. Do not create
+  `obsidian.local.md` or install a watcher.
+- **Local plugin setup**: the user wants the plugin's own routing, hooks and
+  keeper for a local vault. Follow steps 1 onward.
 
 #### Remote MCP setup
 
@@ -68,6 +75,43 @@ of changed existing files. A partial setup exits nonzero; inspect the two config
 files and backups, then rerun the same arguments to complete it. Backups can
 contain existing credentials and must remain private. Do not restore a whole
 backup over later unrelated host changes.
+
+#### Zero-install local vault MCP setup (bundled stdio server)
+
+When the user has a local Obsidian vault and wants zero-install local MCP integration:
+
+1. Obtain the absolute path to the local Obsidian vault (e.g. `/Users/yourname/Documents/Obsidian`).
+2. Reuse an installed, verified public client (client-v0.3.3+) containing
+   `bin/obsidian-mcp-server`. Otherwise install the client release from
+   https://github.com/nhangen/obsidian-mcp/releases using its public installation
+   instructions and independently verified bootstrap/metadata checksums. Do not
+   execute an unverified downloaded bootstrap. No git checkout, build toolchain,
+   or separate server install is required.
+3. Preview Claude user-scope registration and exact routine-write permissions:
+
+   ```bash
+   python3 "${CLAUDE_PLUGIN_ROOT}/scripts/setup-mcp.py" \
+     --client-dir /absolute/public-client/current \
+     --vault /absolute/path/to/vault
+   ```
+
+   Optionally supply `--daily-path <path>` (e.g. `Daily/`) and repeatable `--repo-root <path>`
+   for allowed repository roots for commit metadata.
+   After checking the preview, rerun with `--apply`.
+   Existing differing registrations or conflicting ask/deny rules are refused, never removed or
+   overwritten. The helper configures `mcpServers.obsidian` (read) and `mcpServers.obsidian-write`
+   (write with `MCP_STDIO_PROFILE=write`) using `bin/obsidian-mcp-server`.
+   A host that already ran the remote branch has endpoint registrations under
+   the same names, so `--vault` refuses with "existing Obsidian registration
+   differs". That is expected: show the user both entries and let them decide
+   whether to remove the endpoint registration before rerunning.
+4. Reconnect the host, verify discovery and a bounded read. Never call
+   registration itself a successful connection or save.
+5. Report automatic capture as UNCHANGED. This setup adds MCP tools, not a new
+   session/commit writer. If the plugin's hooks already capture into this vault,
+   they keep doing so. Do not enable automatic MCP capture, disable legacy hooks,
+   replay pending events, or claim a plugin migration without the separately
+   verified ownership handoff tracked in #254.
 
 #### Explicit capture attachment, separate from connection setup
 
