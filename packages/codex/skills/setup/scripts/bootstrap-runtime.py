@@ -25,15 +25,22 @@ import urllib.request
 
 
 REPOSITORY = "nhangen/obsidian-mcp"
-TAG = "client-v0.3.1"
+TAG = "client-v0.3.2"
 INSTALLER = "obsidian-mcp-client-install"
 METADATA = "obsidian-mcp-client.release.json"
 ARCHIVE = "obsidian-mcp-client.tgz"
 ASSETS = (INSTALLER, METADATA, ARCHIVE)
 ROOT = "obsidian-mcp-client"
-MAX_ASSET_BYTES = 2 * 1024 * 1024
-MAX_TAR_BYTES = 8 * 1024 * 1024
-MAX_PAYLOAD_BYTES = 6 * 1024 * 1024
+MAX_INSTALLER_BYTES = 64 * 1024
+MAX_METADATA_BYTES = 16 * 1024
+MAX_ARCHIVE_BYTES = 16 * 1024 * 1024
+MAX_ASSET_BYTES = {
+    INSTALLER: MAX_INSTALLER_BYTES,
+    METADATA: MAX_METADATA_BYTES,
+    ARCHIVE: MAX_ARCHIVE_BYTES,
+}
+MAX_TAR_BYTES = 28 * 1024 * 1024
+MAX_PAYLOAD_BYTES = 26 * 1024 * 1024
 MAX_FILE_BYTES = 5 * 1024 * 1024
 MAX_MEMBERS = 128
 REQUEST_TIMEOUT = 10
@@ -83,11 +90,12 @@ def read_pin() -> dict:
         or set(pin.get("assets", {})) != set(ASSETS)
     ):
         fail("packaged release pin is invalid")
-    for entry in pin["assets"].values():
+    for name in ASSETS:
+        entry = pin["assets"][name]
         if (
             set(entry) != {"sha256", "size"}
             or type(entry["size"]) is not int
-            or not 0 < entry["size"] <= MAX_ASSET_BYTES
+            or not 0 < entry["size"] <= MAX_ASSET_BYTES[name]
             or not isinstance(entry["sha256"], str)
             or not HEX64.fullmatch(entry["sha256"])
         ):

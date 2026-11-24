@@ -52,10 +52,10 @@ private routing state. Claude ownership and normal-home configuration are not
 replaced. See [the package activation contract](../../packages/codex/README.md#native-capture-activation).
 
 This source capability depends on public runtime support merged at
-`f511884950777179de8e5bc47a2a5dd2bca52b7c`; the published bootstrap pin remains
-`client-v0.3.1` and is not sufficient. Installation, hook trust and capture
-activation are separate gates. Administrator-managed activation is not shipped
-by this slice, and unselected managed delivery cannot duplicate plugin events.
+`f511884950777179de8e5bc47a2a5dd2bca52b7c` and published in `client-v0.3.2`.
+Installation, hook trust and capture activation are separate gates. Administrator-managed
+activation is not shipped by this slice, and unselected managed delivery cannot duplicate
+plugin events.
 
 ### 2. Advanced isolated capture (`obsidian-mcp-native`)
 

@@ -1,0 +1,20 @@
+{
+  "repository": "nhangen/obsidian-mcp",
+  "tag": "client-v0.3.2",
+  "sourceCommit": "cacc84c7bcfc0563094661e5d8d0184efc4eea7e",
+  "releaseId": "13fbe3a9d9dee39e51bbfca5e63fc992f86ddf086e2ab7c5c5085cb1c66fc144",
+  "assets": {
+    "obsidian-mcp-client-install": {
+      "sha256": "3fed2243bf21891933eb385d3e06fdde33ec95d38cd7544e5825911dd8549159",
+      "size": 38858
+    },
+    "obsidian-mcp-client.release.json": {
+      "sha256": "57610b0cecb061fc33b25bbc32d3cb8affb594b253f6bfc7108a94bd89665a5a",
+      "size": 6930
+    },
+    "obsidian-mcp-client.tgz": {
+      "sha256": "aaf2206c1e38e8f62fc51a44eb935016f4d6c772e4c793bfdbac6ac000afcbdc",
+      "size": 11488653
+    }
+  }
+}
