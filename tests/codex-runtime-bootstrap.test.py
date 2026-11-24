@@ -484,7 +484,8 @@ urllib.request.build_opener = build_opener""",
         archive = self.assets / NAMES[2]
         archive.write_bytes(b"x" * (16 * 1024 * 1024 + 1))
         self.repin()
-        self.run_setup("--apply", ok=False)
+        result = self.run_setup("--apply", ok=False)
+        self.assertIn("packaged asset pin is invalid", result.stderr)
         self.assertFalse(self.prefix.exists())
 
     def test_role_scoped_asset_size_limits(self):
@@ -493,7 +494,8 @@ urllib.request.build_opener = build_opener""",
         try:
             installer.write_bytes(b"#" + b"x" * (64 * 1024))
             self.repin()
-            self.run_setup("--apply", ok=False)
+            result = self.run_setup("--apply", ok=False)
+            self.assertIn("packaged asset pin is invalid", result.stderr)
             self.assertFalse(self.prefix.exists())
         finally:
             installer.write_bytes(original_installer)
@@ -506,7 +508,8 @@ urllib.request.build_opener = build_opener""",
             obj["padding"] = "x" * (16 * 1024)
             metadata.write_bytes(json.dumps(obj).encode())
             self.repin()
-            self.run_setup("--apply", ok=False)
+            result = self.run_setup("--apply", ok=False)
+            self.assertIn("packaged asset pin is invalid", result.stderr)
             self.assertFalse(self.prefix.exists())
         finally:
             metadata.write_bytes(original_metadata)
