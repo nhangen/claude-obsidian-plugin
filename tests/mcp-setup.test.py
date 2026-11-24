@@ -284,6 +284,25 @@ class SetupTest(unittest.TestCase):
         result = self.run_vault_setup("--daily-path", "daily\ninvalid", "--apply")
         self.assertRefused(result, "invalid daily path")
 
+    def test_empty_daily_path_refuses(self):
+        self.assertRefused(self.run_vault_setup("--daily-path", "", "--apply"), "invalid daily path")
+        self.assertRefused(self.run_setup("--daily-path", "", "--apply"),
+                           "--daily-path and --repo-root require --vault")
+        self.assertEqual(list(self.home.iterdir()), [])
+
+    def test_control_characters_in_vault_or_repo_root_refuse(self):
+        odd = self.root / "vault\ninjected: true"
+        odd.mkdir()
+        result = subprocess.run(
+            ["python3", str(SCRIPT), "--client-dir", str(self.client),
+             "--vault", str(odd), "--apply"],
+            env=self.env, text=True, capture_output=True,
+        )
+        self.assertRefused(result, "invalid vault path")
+        self.assertRefused(self.run_vault_setup("--repo-root", str(odd), "--apply"),
+                           "invalid repository root")
+        self.assertEqual(list(self.home.iterdir()), [])
+
     def test_vault_nonexistent_repo_root_refuses(self):
         nonexistent = self.root / "nonexistent-repo"
         result = self.run_vault_setup("--repo-root", str(nonexistent), "--apply")

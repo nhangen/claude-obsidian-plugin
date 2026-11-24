@@ -34,6 +34,10 @@ def load(path):
     return raw, value
 
 
+def has_control(value):
+    return any(ord(char) < 32 or ord(char) == 127 for char in value)
+
+
 def endpoint_policy(endpoint, allow_tailnet):
     if any(ord(char) <= 32 or ord(char) == 127 for char in endpoint):
         raise SetupError("invalid endpoint")
@@ -66,21 +70,23 @@ def plan(args, home):
         raise SetupError("either --endpoint or --vault is required")
 
     if args.endpoint:
-        if args.daily_path or args.repo_root:
+        if args.daily_path is not None or args.repo_root:
             raise SetupError("--daily-path and --repo-root require --vault")
         transport = endpoint_policy(args.endpoint, args.allow_tailnet_http)
         server_args = []
     else:
         if args.allow_tailnet_http or args.read_token_file or args.write_token_file:
             raise SetupError("endpoint credential and transport flags cannot be used with --vault")
-        if not args.vault or not args.vault.strip():
+        if not args.vault.strip():
             raise SetupError("vault path must be set and nonempty")
+        if has_control(args.vault):
+            raise SetupError("invalid vault path")
         vault_path = Path(args.vault).expanduser().resolve()
         if not vault_path.is_dir():
             raise SetupError("vault path must be an existing directory")
         server_args = ["--vault", str(vault_path)]
-        if args.daily_path:
-            if any(c in "\r\n\t" for c in args.daily_path):
+        if args.daily_path is not None:
+            if not args.daily_path.strip() or has_control(args.daily_path):
                 raise SetupError("invalid daily path")
             daily_posix = Path(args.daily_path)
             if daily_posix.is_absolute() or args.daily_path.startswith("/") or ".." in daily_posix.parts:
@@ -89,6 +95,8 @@ def plan(args, home):
         for root in args.repo_root:
             if not root or not root.strip():
                 raise SetupError("repository root must be set and nonempty")
+            if has_control(root):
+                raise SetupError("invalid repository root")
             root_path = Path(root).expanduser().resolve()
             if not root_path.is_dir():
                 raise SetupError("repository root must be an existing directory")
