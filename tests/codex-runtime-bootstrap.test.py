@@ -468,16 +468,26 @@ urllib.request.build_opener = build_opener""",
                 )
             ],
             [
-                (f"obsidian-mcp-client/f{i}", tarfile.REGTYPE, b"x" * (4800 * 1024))
-                for i in range(7)
+                (
+                    f"obsidian-mcp-client/f{i}",
+                    tarfile.REGTYPE,
+                    b"x" * (4608 * 1024),
+                )
+                for i in range(6)
             ],
             [("obsidian-mcp-client/large", tarfile.REGTYPE, b"x" * (29 * 1024 * 1024))],
         ]
-        for members in cases:
-            with self.subTest(sizes=[len(m[2]) for m in members]):
+        reasons = [
+            "archive member count limit exceeded",
+            "archive contains an unsafe member",
+            "archive payload size limit exceeded",
+            "archive expanded size limit exceeded",
+        ]
+        for members, reason in zip(cases, reasons):
+            with self.subTest(reason=reason):
                 self.bad_archive(members)
                 result = self.run_setup("--apply", ok=False)
-                self.assertIn("archive", result.stderr)
+                self.assertIn(reason, result.stderr)
                 self.assertFalse(self.prefix.exists())
 
     def test_compressed_asset_size_limit(self):
