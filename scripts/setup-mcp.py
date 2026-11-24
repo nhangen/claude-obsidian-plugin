@@ -120,11 +120,13 @@ def plan(args, home):
         if any(rule == "mcp__obsidian-write" or fnmatchcase(f"mcp__obsidian-write__{tool}", rule)
                for rule in rules for tool in tools):
             raise SetupError("existing permission policy prevents automatic routine writes")
+    if args.vault:
+        launcher = client / "bin" / "obsidian-mcp-server"
+        if not launcher.is_file() or not os.access(launcher, os.X_OK):
+            raise SetupError("bin/obsidian-mcp-server requires client-v0.3.3 or later; "
+                             "install the verified public client before setup")
     for profile, name in (("read", "obsidian"), ("write", "obsidian-write")):
         if args.vault:
-            launcher = client / "bin" / "obsidian-mcp-server"
-            if not launcher.is_file() or not os.access(launcher, os.X_OK):
-                raise SetupError("install the verified public client before setup")
             env = {"MCP_STDIO_PROFILE": "write"} if profile == "write" else {}
             entry = {"command": str(launcher), "args": list(server_args), "env": env}
         else:

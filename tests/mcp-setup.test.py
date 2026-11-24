@@ -311,7 +311,13 @@ class SetupTest(unittest.TestCase):
     def test_vault_missing_server_launcher_refuses(self):
         (self.client / "bin/obsidian-mcp-server").unlink()
         result = self.run_vault_setup("--apply")
-        self.assertRefused(result, "install the verified public client")
+        self.assertRefused(result, "bin/obsidian-mcp-server requires client-v0.3.3 or later")
+        self.assertEqual(list(self.home.iterdir()), [])
+
+    def test_vault_non_executable_server_launcher_refuses(self):
+        (self.client / "bin/obsidian-mcp-server").chmod(0o644)
+        result = self.run_vault_setup("--apply")
+        self.assertRefused(result, "bin/obsidian-mcp-server requires client-v0.3.3 or later")
         self.assertEqual(list(self.home.iterdir()), [])
 
     def test_vault_conflicting_registration_refuses(self):
