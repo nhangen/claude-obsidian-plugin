@@ -150,15 +150,24 @@ class SetupTest(unittest.TestCase):
 
     def test_endpoint_credentials_are_rejected_without_echo(self):
         result = self.run_setup("--endpoint", "https://secret@vault.example/mcp")
-        self.assertEqual(result.returncode, 64)
+        self.assertRefused(result, "invalid endpoint")
         self.assertNotIn("secret", result.stdout + result.stderr)
 
     def test_missing_launcher_and_empty_home_refuse(self):
         (self.client / "bin/obsidian-mcp-write").unlink()
-        self.assertEqual(self.run_setup("--apply").returncode, 64)
+        self.assertRefused(self.run_setup("--apply"), "install the verified public client")
         self.assertEqual(list(self.home.iterdir()), [])
         self.env["HOME"] = ""
-        self.assertEqual(self.run_setup("--apply").returncode, 64)
+        self.assertRefused(self.run_setup("--apply"), "HOME must be set and nonempty")
+
+    def test_unknown_home_user_refuses_without_traceback(self):
+        result = subprocess.run(
+            ["python3", str(SCRIPT), "--client-dir", str(self.client),
+             "--vault", "~no-such-user-for-setup-test/vault", "--apply"],
+            env=self.env, text=True, capture_output=True,
+        )
+        self.assertRefused(result, "configuration or prerequisites rejected")
+        self.assertNotIn("Traceback", result.stderr)
 
     def test_vault_dry_run_and_apply(self):
         result = self.run_vault_setup()

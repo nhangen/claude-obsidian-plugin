@@ -224,7 +224,7 @@ def main():
         print(f"obsidian-mcp-setup: incomplete; {error}. "
               "No writer handoff performed. Inspect configuration/backups before retrying.", file=sys.stderr)
         return 64
-    except (OSError, ValueError, TypeError):
+    except (OSError, ValueError, TypeError, RuntimeError):
         print("obsidian-mcp-setup: incomplete; configuration or prerequisites rejected. "
               "No writer handoff performed. Inspect configuration/backups before retrying.", file=sys.stderr)
         return 64
