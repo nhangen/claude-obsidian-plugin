@@ -5,11 +5,11 @@ from __future__ import annotations
 
 import gzip
 import hashlib
-import importlib.util
 import io
 import json
 import os
 from pathlib import Path
+import runpy
 import shutil
 import subprocess
 import sys
@@ -604,12 +604,10 @@ class PackagedPinTest(unittest.TestCase):
             )
             / "scripts/bootstrap-runtime.py"
         )
-        spec = importlib.util.spec_from_file_location("bootstrap_runtime", script)
-        module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
-        pin = module.read_pin()
-        self.assertEqual(pin["tag"], module.TAG)
-        self.assertEqual(set(pin["assets"]), set(module.ASSETS))
+        module = runpy.run_path(str(script))
+        pin = module["read_pin"]()
+        self.assertEqual(pin["tag"], module["TAG"])
+        self.assertEqual(set(pin["assets"]), set(module["ASSETS"]))
 
 
 @unittest.skipUnless(

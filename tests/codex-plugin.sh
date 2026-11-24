@@ -171,6 +171,7 @@ grep -q -- '--apply' "$TMP/setup-help.out" || fail "installed setup has no expli
 CODEX_BOOTSTRAP_INSTALLED_SKILL="$INSTALLED/skills/setup" \
   PYTHONDONTWRITEBYTECODE=1 python3 "$ROOT_DIR/tests/codex-runtime-bootstrap.test.py" \
   BootstrapTest.test_installed_entrypoint_preview_does_not_write_persistent_state \
+  PackagedPinTest \
   || fail "installed setup preview failed without checkout dependencies"
 [ -f "$INSTALLED/hooks/hooks.json" ] || fail "Codex capture hook definitions are missing"
 CODEX_HOME="$CODEX_HOME_DIR" python3 -I -B "$INSTALLED/scripts/capture.py" codex-status \
