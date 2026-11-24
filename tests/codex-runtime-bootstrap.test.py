@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import gzip
 import hashlib
+import importlib.util
 import io
 import json
 import os
@@ -577,6 +578,25 @@ urllib.request.build_opener = build_opener""",
         for option in ("--pin", "--url"):
             result = self.run_setup(option, "SECRET_SENTINEL", ok=False)
             self.assertNotIn("SECRET_SENTINEL", result.stderr)
+
+
+class PackagedPinTest(unittest.TestCase):
+    def test_packaged_pin_fits_its_own_asset_limits(self):
+        script = (
+            Path(
+                os.environ.get(
+                    "CODEX_BOOTSTRAP_INSTALLED_SKILL",
+                    ROOT / "packages/codex/skills/setup",
+                )
+            )
+            / "scripts/bootstrap-runtime.py"
+        )
+        spec = importlib.util.spec_from_file_location("bootstrap_runtime", script)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        pin = module.read_pin()
+        self.assertEqual(pin["tag"], module.TAG)
+        self.assertEqual(set(pin["assets"]), set(module.ASSETS))
 
 
 @unittest.skipUnless(
