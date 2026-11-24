@@ -19,11 +19,6 @@ class SetupError(Exception):
     pass
 
 
-class Parser(argparse.ArgumentParser):
-    def error(self, message):
-        raise SetupError(message)
-
-
 def load(path):
     for parent in (path, *path.parents):
         if parent.is_symlink():
@@ -190,7 +185,7 @@ def apply(changes):
 
 
 def main():
-    parser = Parser(description=__doc__)
+    parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--client-dir", required=True, help="verified public client current directory")
     target = parser.add_mutually_exclusive_group()
     target.add_argument("--endpoint")
@@ -201,8 +196,8 @@ def main():
     parser.add_argument("--write-token-file")
     parser.add_argument("--allow-tailnet-http", action="store_true")
     parser.add_argument("--apply", action="store_true", help="otherwise preview only")
+    args = parser.parse_args()
     try:
-        args = parser.parse_args()
         if not os.environ.get("HOME"):
             raise SetupError("HOME must be set and nonempty")
         home = Path(os.environ["HOME"]).resolve(strict=True)

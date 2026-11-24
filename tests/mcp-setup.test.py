@@ -221,7 +221,14 @@ class SetupTest(unittest.TestCase):
              "--vault", str(self.vault), "--apply"],
             env=self.env, text=True, capture_output=True,
         )
-        self.assertEqual(result.returncode, 64)
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("not allowed with argument", result.stderr)
+        self.assertEqual(list(self.home.iterdir()), [])
+
+    def test_usage_errors_name_the_rejected_argument(self):
+        result = self.run_vault_setup("--vualt", "x")
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("unrecognized arguments: --vualt", result.stderr)
 
     def test_neither_endpoint_nor_vault_refuses(self):
         result = subprocess.run(
