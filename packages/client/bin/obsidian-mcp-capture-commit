@@ -32,6 +32,7 @@ ORG_REPO_PATTERN = re.compile(
     r"[A-Za-z0-9][A-Za-z0-9._-]{0,99}/[A-Za-z0-9][A-Za-z0-9._-]{0,99}\Z"
 )
 REQUIRED_TOOL_FIELDS = {
+    "content",
     "target_path",
     "skip_if_hash",
     "section",
@@ -137,19 +138,19 @@ def read_json_file(path, limit, code):
     return value, raw
 
 
-def validate_tool_schema(schema):
+def validate_tool_schema(schema, source):
     properties = schema.get("properties") if isinstance(schema, dict) else None
     if not isinstance(properties, dict):
         raise CaptureError(
             "CAPABILITY_UNAVAILABLE",
-            detail="obsidian_daily_append has no readable input schema.",
+            detail=f"{source} has no readable obsidian_daily_append input schema.",
         )
     for field in sorted(REQUIRED_TOOL_FIELDS):
         descriptor = properties.get(field)
         if not isinstance(descriptor, dict) or descriptor.get("type") != "string":
             raise CaptureError(
                 "CAPABILITY_UNAVAILABLE",
-                detail=f"obsidian_daily_append must accept a string field named {field}.",
+                detail=f"{source}'s obsidian_daily_append must accept a string field named {field}.",
             )
 
 
@@ -196,7 +197,10 @@ def select_initialize_protocol(contract):
             for transport in REQUIRED_INITIALIZE_TRANSPORTS
         ):
             return revision
-    raise CaptureError("CAPABILITY_UNAVAILABLE")
+    raise CaptureError(
+        "CAPABILITY_UNAVAILABLE",
+        detail="The bundled contract approves no protocol revision this client implements.",
+    )
 
 
 def load_bundle():
@@ -242,8 +246,11 @@ def load_bundle():
     try:
         schema = contract["tools"]["obsidian_daily_append"]["inputSchema"]
     except (KeyError, TypeError):
-        raise CaptureError("CAPABILITY_UNAVAILABLE") from None
-    validate_tool_schema(schema)
+        raise CaptureError(
+            "CAPABILITY_UNAVAILABLE",
+            detail="The bundled contract does not describe obsidian_daily_append.",
+        ) from None
+    validate_tool_schema(schema, "The bundled contract")
     protocol = select_initialize_protocol(contract)
     errors = contract.get("tools", {}).get("obsidian_daily_append", {}).get("errors")
     if (
@@ -622,7 +629,9 @@ class Bridge:
 def discovered_schema(result):
     tools = result.get("tools")
     if not isinstance(tools, list):
-        raise CaptureError("CAPABILITY_UNAVAILABLE")
+        raise CaptureError(
+            "CAPABILITY_UNAVAILABLE", detail="The server did not return a list of tools."
+        )
     matches = [
         tool
         for tool in tools
@@ -633,7 +642,7 @@ def discovered_schema(result):
             "CAPABILITY_UNAVAILABLE",
             detail="The server must offer exactly one obsidian_daily_append tool.",
         )
-    validate_tool_schema(matches[0].get("inputSchema"))
+    validate_tool_schema(matches[0].get("inputSchema"), "The server")
 
 
 def recovery_guidance(status, retryable, error_code):
@@ -765,7 +774,9 @@ def invoke(bundle, protocol, allowed_errors, arguments, target):
         if not isinstance(capabilities, dict) or not isinstance(
             capabilities.get("tools"), dict
         ):
-            raise CaptureError("CAPABILITY_UNAVAILABLE")
+            raise CaptureError(
+                "CAPABILITY_UNAVAILABLE", detail="The server does not offer tools."
+            )
         bridge.send({"jsonrpc": "2.0", "method": "notifications/initialized"})
         bridge.send({"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}})
         discovered_schema(bridge.response(2))
