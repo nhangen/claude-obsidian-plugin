@@ -526,8 +526,8 @@ and scoped routine-write permissions. It needs no local vault or llm-tools.
 For local vaults, `scripts/setup-mcp.py` supports zero-install local setup using
 `--vault <path>` (with optional `--daily-path` and `--repo-root`), registering
 the bundled standalone stdio server launcher (`bin/obsidian-mcp-server`) with
-read and write (`MCP_STDIO_PROFILE=write`) profiles. It needs client-v0.3.3 or
-later and no credentials; on a host that already has remote registrations it
+read and write (`MCP_STDIO_PROFILE=write`) profiles. It needs a public client
+that ships that launcher, and no credentials; on a host that already has remote registrations it
 refuses until you remove or migrate them.
 `scripts/setup-mcp.py` previews by default; `--apply` preserves unrelated settings
 and refuses existing differing registrations. In remote mode, credentials stay in

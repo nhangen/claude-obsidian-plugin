@@ -121,7 +121,7 @@ def plan(args, home):
     if args.vault:
         launcher = client / "bin" / "obsidian-mcp-server"
         if not launcher.is_file() or not os.access(launcher, os.X_OK):
-            raise SetupError("bin/obsidian-mcp-server requires client-v0.3.3 or later; "
+            raise SetupError("client has no executable bin/obsidian-mcp-server; "
                              "install the verified public client before setup")
     for profile, name in (("read", "obsidian"), ("write", "obsidian-write")):
         if args.vault:
