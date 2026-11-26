@@ -81,7 +81,7 @@ backup over later unrelated host changes.
 When the user has a local Obsidian vault and wants zero-install local MCP integration:
 
 1. Obtain the absolute path to the local Obsidian vault (e.g. `/Users/yourname/Documents/Obsidian`).
-2. Reuse an installed, verified public client (client-v0.3.3+) containing
+2. Reuse an installed, verified public client containing
    `bin/obsidian-mcp-server`. Otherwise install the client release from
    https://github.com/nhangen/obsidian-mcp/releases using its public installation
    instructions and independently verified bootstrap/metadata checksums. Do not
