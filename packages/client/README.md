@@ -55,9 +55,10 @@ outside this lifecycle change.
 
 The bundle includes a commit-capture consumer. The default pinned release
 `mcp-v0.2.0` provides exact-target append and the exact/prefix hash guard, so an
-explicit invocation can pass the local capability gate. The consumer still requires
-the live server version and discovered schema to match before writing; the released
-contract alone does not change writer ownership.
+explicit invocation can pass the local capability gate. Before writing,
+the consumer checks that the live server offers a compatible tool schema. It does
+not check the server's version number. The released contract alone does not change
+writer ownership.
 
 ## Local commit-event metadata
 
@@ -100,8 +101,9 @@ bundled write bridge only after both the bundled contract and live discovered
 and `idempotency_key`. The client requests `2025-11-25` only when the pinned
 matrix approves that implemented initialize revision for both stdio and Streamable
 HTTP with non-planned status. The initialize response must return that exact
-protocol, an initialized tools capability object, and the server version pinned by
-the manifest before the client sends any initialized notification or tool request.
+protocol and an initialized tools capability object before the client sends any
+initialized notification or tool request. The server's version number does not
+affect acceptance.
 
 The default target is
 `Projects/Development/<org>/<repo>/<date>.md`. The retained `mtf-builder`

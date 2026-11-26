@@ -57,9 +57,9 @@ for line in sys.stdin:
         continue
     elif request.get("method") == "tools/list":
         properties = {name:{"type":"string"} for name in ("content","section","target_path","skip_if_hash","idempotency_key")}
-        if scenario == "missing-capability":
-            properties.pop("target_path")
-        send({"jsonrpc":"2.0","id":request["id"],"result":{"tools":[{"name":"obsidian_daily_append","inputSchema":{"type":"object","properties":properties}}]}})
+        if scenario == "incompatible-schema":
+            properties["skip_if_hash"] = {"type":"integer"}
+        send({"jsonrpc":"2.0","id":request["id"],"result":{"tools":[] if scenario == "no-tool" else [{"name":"obsidian_daily_append","inputSchema":{"type":"object","properties":properties}}]}})
     elif request.get("method") == "tools/call":
         arguments = request["params"]["arguments"]
         with Path(os.environ["FAKE_CALLS"]).open("a") as handle:
@@ -377,14 +377,24 @@ class CaptureCommitTest(unittest.TestCase):
         self.assert_error(result, "EVENT_REJECTED")
         self.assertFalse(self.started.exists())
 
-    def test_discovered_tool_and_live_version_gate_before_write(self):
-        missing = self.run_capture(self.event(), scenario="missing-capability")
-        self.assert_error(missing, "CAPABILITY_UNAVAILABLE")
-        self.assertEqual(self.call_records(), [])
-        self.started.unlink()
-        version = self.run_capture(self.event(), version="0.1.15")
-        self.assert_error(version, "SERVER_VERSION_MISMATCH")
-        self.assertEqual(self.call_records(), [])
+    def test_incompatible_server_is_refused_with_a_reason_before_write(self):
+        for scenario, detail in (
+            ("no-tool", "The server must offer exactly one obsidian_daily_append tool."),
+            ("incompatible-schema", "obsidian_daily_append must accept a string field named skip_if_hash."),
+        ):
+            with self.subTest(scenario=scenario):
+                result = self.run_capture(self.event(), scenario=scenario)
+                self.assertEqual(result.returncode, 64, result.stderr)
+                self.assertEqual(result.stderr, f"error:CAPABILITY_UNAVAILABLE\n{detail}\n")
+                self.assertEqual(self.call_records(), [])
+
+    def test_server_version_never_decides_acceptance(self):
+        for version in ("0.0.1", "99.0.0", "9.9.9-rc.1", "dev", ""):
+            with self.subTest(version=version):
+                self.calls.unlink(missing_ok=True)
+                result = self.run_capture(self.event(), version=version)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(len(self.call_records()), 1)
 
     def test_mismatched_initialize_protocol_stops_before_initialized_notification(self):
         result = self.run_capture(self.event(), scenario="protocol-mismatch")

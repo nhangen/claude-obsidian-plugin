@@ -522,7 +522,7 @@ PY
 grep -Fq 'plugin-free' "$bundle/README.md" || fail "README does not state client boundary"
 grep -Fq "The default pin is \`mcp-v0.2.0\`" "$bundle/README.md" || fail "README does not name the pinned release"
 grep -Fq "\`mcp-v0.2.0\` provides exact-target append" "$bundle/README.md" || fail "README capability wording does not match the pinned release"
-grep -Fq 'live server version and discovered schema to match' "$bundle/README.md" || fail "README does not preserve the live capability gate"
+grep -Fq 'checks that the live server offers a compatible tool schema' "$bundle/README.md" || fail "README does not preserve the live capability gate"
 ! grep -R -E '/Users/|100\.[0-9]+\.|obsidian-mcp-read-token' "$bundle" >/dev/null || fail "packed bundle contains a personal path, endpoint, or credential service"
 
 OBSIDIAN_MCP_TEST_READ_LAUNCHER="$bundle/bin/obsidian-mcp-read" \
