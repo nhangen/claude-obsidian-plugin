@@ -52,14 +52,22 @@ for line in sys.stdin:
             result["capabilities"] = {}
         elif scenario == "tools-capability-malformed":
             result["capabilities"]["tools"] = []
+        if scenario == "no-server-info":
+            result.pop("serverInfo")
         send({"jsonrpc":"2.0","id":request["id"],"result":result})
     elif request.get("method") == "notifications/initialized":
         continue
     elif request.get("method") == "tools/list":
         properties = {name:{"type":"string"} for name in ("content","section","target_path","skip_if_hash","idempotency_key")}
-        if scenario == "missing-capability":
-            properties.pop("target_path")
-        send({"jsonrpc":"2.0","id":request["id"],"result":{"tools":[{"name":"obsidian_daily_append","inputSchema":{"type":"object","properties":properties}}]}})
+        if scenario.startswith("without-"):
+            properties.pop(scenario.removeprefix("without-"))
+        if scenario == "incompatible-schema":
+            properties["skip_if_hash"] = {"type":"integer"}
+        tool = {"name":"obsidian_daily_append","inputSchema":{"type":"object","properties":properties}}
+        if scenario == "unreadable-schema":
+            tool["inputSchema"] = {"type":"object"}
+        tools = {"no-tool": [], "duplicate-tool": [tool, tool], "tools-not-list": {}}.get(scenario, [tool])
+        send({"jsonrpc":"2.0","id":request["id"],"result":{"tools":tools}})
     elif request.get("method") == "tools/call":
         arguments = request["params"]["arguments"]
         with Path(os.environ["FAKE_CALLS"]).open("a") as handle:
@@ -255,10 +263,11 @@ class CaptureCommitTest(unittest.TestCase):
             timeout=timeout,
         )
 
-    def assert_error(self, result, code):
+    def assert_error(self, result, code, detail=None):
         self.assertEqual(result.returncode, 64, result.stderr)
         self.assertEqual(result.stdout, "")
-        self.assertEqual(result.stderr, f"error:{code}\n")
+        explanation = f"{detail}\n" if detail else ""
+        self.assertEqual(result.stderr, f"error:{code}\n{explanation}")
 
     def failure_envelope(self, result):
         self.assertEqual(result.returncode, 64, result.stderr)
@@ -377,14 +386,69 @@ class CaptureCommitTest(unittest.TestCase):
         self.assert_error(result, "EVENT_REJECTED")
         self.assertFalse(self.started.exists())
 
-    def test_discovered_tool_and_live_version_gate_before_write(self):
-        missing = self.run_capture(self.event(), scenario="missing-capability")
-        self.assert_error(missing, "CAPABILITY_UNAVAILABLE")
-        self.assertEqual(self.call_records(), [])
-        self.started.unlink()
-        version = self.run_capture(self.event(), version="0.1.15")
-        self.assert_error(version, "SERVER_VERSION_MISMATCH")
-        self.assertEqual(self.call_records(), [])
+    def test_incompatible_server_is_refused_with_a_reason_before_write(self):
+        for scenario, detail in (
+            ("no-tool", "The server must offer exactly one obsidian_daily_append tool."),
+            ("incompatible-schema", "The server's obsidian_daily_append must accept a string field named skip_if_hash."),
+        ):
+            with self.subTest(scenario=scenario):
+                result = self.run_capture(self.event(), scenario=scenario)
+                self.assertEqual(result.returncode, 64, result.stderr)
+                self.assertEqual(result.stderr, f"error:CAPABILITY_UNAVAILABLE\n{detail}\n")
+                self.assertEqual(self.call_records(), [])
+
+    def test_every_sent_field_is_required_and_each_refusal_says_why(self):
+        cases = [
+            (f"without-{field}", f"The server's obsidian_daily_append must accept a string field named {field}.")
+            for field in ("content", "target_path", "skip_if_hash", "section", "idempotency_key")
+        ] + [
+            ("unreadable-schema", "The server has no readable obsidian_daily_append input schema."),
+            ("duplicate-tool", "The server must offer exactly one obsidian_daily_append tool."),
+            ("tools-not-list", "The server did not return a list of tools."),
+        ]
+        for scenario, detail in cases:
+            with self.subTest(scenario=scenario):
+                result = self.run_capture(self.event(), scenario=scenario)
+                self.assertEqual(result.returncode, 64, result.stderr)
+                self.assertEqual(result.stderr, f"error:CAPABILITY_UNAVAILABLE\n{detail}\n")
+                self.assertEqual(self.call_records(), [])
+
+    def test_bundled_contract_fault_does_not_blame_the_server(self):
+        result = self.run_capture(
+            self.event(),
+            contract_mutator=lambda contract: contract["tools"]["obsidian_daily_append"]
+            ["inputSchema"]["properties"].pop("content"),
+        )
+        self.assertEqual(
+            result.stderr,
+            "error:CAPABILITY_UNAVAILABLE\n"
+            "The bundled contract's obsidian_daily_append must accept a string field named content.\n",
+        )
+
+    def test_bundled_contract_without_the_tool_says_so(self):
+        result = self.run_capture(
+            self.event(),
+            contract_mutator=lambda contract: contract["tools"].pop("obsidian_daily_append"),
+        )
+        self.assert_error(
+            result,
+            "CAPABILITY_UNAVAILABLE",
+            "The bundled contract does not describe obsidian_daily_append.",
+        )
+        self.assertFalse(self.started.exists())
+
+    def test_missing_server_info_is_accepted(self):
+        result = self.run_capture(self.event(), scenario="no-server-info")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(len(self.call_records()), 1)
+
+    def test_server_version_never_decides_acceptance(self):
+        for version in ("0.0.1", "99.0.0", "9.9.9-rc.1", "dev", ""):
+            with self.subTest(version=version):
+                self.calls.unlink(missing_ok=True)
+                result = self.run_capture(self.event(), version=version)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(len(self.call_records()), 1)
 
     def test_mismatched_initialize_protocol_stops_before_initialized_notification(self):
         result = self.run_capture(self.event(), scenario="protocol-mismatch")
@@ -400,13 +464,13 @@ class CaptureCommitTest(unittest.TestCase):
 
     def test_missing_tools_capability_stops_before_initialized_notification(self):
         result = self.run_capture(self.event(), scenario="tools-capability-missing")
-        self.assert_error(result, "CAPABILITY_UNAVAILABLE")
+        self.assert_error(result, "CAPABILITY_UNAVAILABLE", "The server does not offer tools.")
         self.assertEqual(self.request_methods(), ["initialize"])
         self.assertEqual(self.call_records(), [])
 
     def test_malformed_tools_capability_stops_before_initialized_notification(self):
         result = self.run_capture(self.event(), scenario="tools-capability-malformed")
-        self.assert_error(result, "CAPABILITY_UNAVAILABLE")
+        self.assert_error(result, "CAPABILITY_UNAVAILABLE", "The server does not offer tools.")
         self.assertEqual(self.request_methods(), ["initialize"])
         self.assertEqual(self.call_records(), [])
 
@@ -478,7 +542,11 @@ class CaptureCommitTest(unittest.TestCase):
         ):
             with self.subTest(mutator=mutator.__name__):
                 result = self.run_capture(self.event(), contract_mutator=mutator)
-                self.assert_error(result, "CAPABILITY_UNAVAILABLE")
+                self.assert_error(
+                    result,
+                    "CAPABILITY_UNAVAILABLE",
+                    "The bundled contract approves no protocol revision this client implements.",
+                )
                 self.assertFalse(self.started.exists())
                 self.assertEqual(self.request_methods(), [])
 
