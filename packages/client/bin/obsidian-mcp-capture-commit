@@ -152,6 +152,18 @@ def validate_tool_schema(schema, source):
                 "CAPABILITY_UNAVAILABLE",
                 detail=f"{source}'s obsidian_daily_append must accept a string field named {field}.",
             )
+    required = schema.get("required", [])
+    if not isinstance(required, list) or not all(isinstance(name, str) for name in required):
+        raise CaptureError(
+            "CAPABILITY_UNAVAILABLE",
+            detail=f"{source} has no readable obsidian_daily_append input schema.",
+        )
+    unsent = sorted(set(required) - REQUIRED_TOOL_FIELDS)
+    if unsent:
+        raise CaptureError(
+            "CAPABILITY_UNAVAILABLE",
+            detail=f"{source}'s obsidian_daily_append requires fields this client does not send: {', '.join(map(json.dumps, unsent))}.",
+        )
 
 
 def select_initialize_protocol(contract):
@@ -769,7 +781,10 @@ def invoke(bundle, protocol, allowed_errors, arguments, target):
         )
         initialized = bridge.response(1)
         if initialized.get("protocolVersion") != protocol:
-            raise CaptureError("PROTOCOL_VERSION_MISMATCH")
+            raise CaptureError(
+                "PROTOCOL_VERSION_MISMATCH",
+                detail=f"The server did not accept MCP protocol {protocol}.",
+            )
         capabilities = initialized.get("capabilities")
         if not isinstance(capabilities, dict) or not isinstance(
             capabilities.get("tools"), dict
