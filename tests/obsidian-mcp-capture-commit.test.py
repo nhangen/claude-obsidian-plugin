@@ -64,6 +64,11 @@ for line in sys.stdin:
         if scenario == "incompatible-schema":
             properties["skip_if_hash"] = {"type":"integer"}
         tool = {"name":"obsidian_daily_append","inputSchema":{"type":"object","properties":properties}}
+        required = {"requires-unsent": ["content", "workspace_id"], "requires-sent": ["content"], "required-malformed": "content", "required-nonstring": ["content", 5], "required-multiline": ["content", "a\nerror:FAKE"]}.get(scenario)
+        if required is not None:
+            tool["inputSchema"]["required"] = required
+        if scenario == "extra-optional":
+            properties["tags"] = {"type":"array"}
         if scenario == "unreadable-schema":
             tool["inputSchema"] = {"type":"object"}
         tools = {"no-tool": [], "duplicate-tool": [tool, tool], "tools-not-list": {}}.get(scenario, [tool])
@@ -397,6 +402,27 @@ class CaptureCommitTest(unittest.TestCase):
                 self.assertEqual(result.stderr, f"error:CAPABILITY_UNAVAILABLE\n{detail}\n")
                 self.assertEqual(self.call_records(), [])
 
+    def test_optional_extras_and_required_sent_fields_are_accepted(self):
+        for scenario in ("extra-optional", "requires-sent"):
+            with self.subTest(scenario=scenario):
+                result = self.run_capture(self.event(), scenario=scenario)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(json.loads(result.stdout)["status"], "committed")
+
+    def test_server_requiring_an_unsent_field_is_refused_before_write(self):
+        for scenario, detail in (
+            ("requires-unsent", "The server's obsidian_daily_append requires fields this client does not send: \"workspace_id\"."),
+            ("required-multiline", "The server's obsidian_daily_append requires fields this client does not send: \"a\\nerror:FAKE\"."),
+            ("required-nonstring", "The server has no readable obsidian_daily_append input schema."),
+            ("required-malformed", "The server has no readable obsidian_daily_append input schema."),
+        ):
+            with self.subTest(scenario=scenario):
+                self.calls.unlink(missing_ok=True)
+                result = self.run_capture(self.event(), scenario=scenario)
+                self.assertEqual(result.returncode, 64, result.stderr)
+                self.assertEqual(result.stderr, f"error:CAPABILITY_UNAVAILABLE\n{detail}\n")
+                self.assertEqual(self.call_records(), [])
+
     def test_every_sent_field_is_required_and_each_refusal_says_why(self):
         cases = [
             (f"without-{field}", f"The server's obsidian_daily_append must accept a string field named {field}.")
@@ -452,13 +478,21 @@ class CaptureCommitTest(unittest.TestCase):
 
     def test_mismatched_initialize_protocol_stops_before_initialized_notification(self):
         result = self.run_capture(self.event(), scenario="protocol-mismatch")
-        self.assert_error(result, "PROTOCOL_VERSION_MISMATCH")
+        self.assert_error(
+            result,
+            "PROTOCOL_VERSION_MISMATCH",
+            "The server did not accept MCP protocol 2025-11-25.",
+        )
         self.assertEqual(self.request_methods(), ["initialize"])
         self.assertEqual(self.call_records(), [])
 
     def test_absent_initialize_protocol_stops_before_initialized_notification(self):
         result = self.run_capture(self.event(), scenario="protocol-missing")
-        self.assert_error(result, "PROTOCOL_VERSION_MISMATCH")
+        self.assert_error(
+            result,
+            "PROTOCOL_VERSION_MISMATCH",
+            "The server did not accept MCP protocol 2025-11-25.",
+        )
         self.assertEqual(self.request_methods(), ["initialize"])
         self.assertEqual(self.call_records(), [])
 

@@ -1179,9 +1179,9 @@ def observe_commit(state, event):
             "Commit receipt did not match the prepared native call; capture remains unresolved.",
         )
     consumer = runpy.run_path(str(BUNDLE / "bin/obsidian-mcp-capture-commit"))
-    contract = json.loads((BUNDLE / "contract.json").read_bytes())
-    errors = frozenset(contract["tools"]["obsidian_daily_append"]["errors"])
     try:
+        contract = json.loads((BUNDLE / "contract.json").read_bytes())
+        errors = frozenset(contract["tools"]["obsidian_daily_append"]["errors"])
         result = normalized_result(event)
         status = consumer["validate_outcome"](
             result, pending["path"], arguments, errors
@@ -1190,7 +1190,7 @@ def observe_commit(state, event):
         pending["recovery"] = error.envelope or consumer["unknown_outcome"](
             "RECEIPT_INVALID", pending["path"], arguments
         )
-    except (NativeError, ValueError, TypeError, KeyError):
+    except (NativeError, OSError, ValueError, TypeError, KeyError):
         pending["recovery"] = consumer["unknown_outcome"](
             "RECEIPT_INVALID", pending["path"], arguments
         )
