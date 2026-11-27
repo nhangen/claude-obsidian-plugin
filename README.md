@@ -179,6 +179,30 @@ Release publication, installed-host execution, interrupted-write recovery,
 writer activation and client migration remain separate acceptance gates in
 [#254](https://github.com/nhangen/claude-obsidian-plugin/issues/254).
 
+#### Move capture setups to a newer client
+
+A capture setup is tied to one installed client release. After installing a newer
+client, `rebind` moves every setup that capture ownership uses, including its
+workspace setups and Codex activation records. It does not require a drain, and
+it does not edit or delete capture records.
+
+```bash
+python3 scripts/lib/capture-owner.py rebind --bundle <installed-release-directory> \
+  --release-sha256 <sha256-of-its-release.json>          # preview
+python3 scripts/lib/capture-owner.py rebind --bundle <installed-release-directory> \
+  --release-sha256 <sha256-of-its-release.json> --apply
+```
+
+`rebind` authenticates the release first. With `--apply`, it holds the exclusive
+admission lock, saves the original files under
+`capture-ownership/rebind-backups/`, changes only the release fields, and checks
+each changed setup with the new client. If a check fails or the command is
+interrupted, it restores every file. If the process is killed outright, run the
+same command again to finish. It is refused while a handoff is `draining`.
+`rebind` checks that setups load, not that the new client accepts every saved
+record, and it does not check that an older client can read records the newer
+one writes.
+
 ### Legacy local workflow
 
 - A **Stop hook** runs at session end; if the session is significant, a background `claude --print` summarizer writes a structured note to your vault.

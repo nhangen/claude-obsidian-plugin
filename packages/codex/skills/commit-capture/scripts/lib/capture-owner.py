@@ -1109,6 +1109,154 @@ def resume():
         return current
 
 
+def replace_bytes(path, data):
+    descriptor, temporary = tempfile.mkstemp(dir=path.parent)
+    try:
+        with os.fdopen(descriptor, "wb") as stream:
+            stream.write(data)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+    finally:
+        Path(temporary).unlink(missing_ok=True)
+
+
+def rebind_plan(current, release):
+    """Return {path: (original bytes, new bytes)} for every live setup and record."""
+    plan = {}
+    records = codex_inventory()
+    parents = set(current["profiles"].values())
+    if current.get("default_profile"):
+        parents.add(current["default_profile"])
+    parents.update(
+        item["profile"] for record in records for item in record["retained_profiles"]
+    )
+    setups = []
+    for parent in sorted(parents):
+        home = Path(parent)
+        existing_directory(home)
+        for path in [home / "capture-profile.json"] + sorted(
+            home.glob("workspaces/*/capture-profile.json")
+        ):
+            value = read(path)
+            if not isinstance(value, dict) or "bundle" not in value:
+                raise OwnershipError("unreadable capture setup: " + str(path))
+            updated = dict(
+                value,
+                bundle=release["bundle"],
+                releaseSha256=release["externalReleaseSha256"],
+                releaseId=release["releaseId"],
+            )
+            if updated == value:
+                continue
+            original = path.read_bytes()
+            text = json.dumps(updated, sort_keys=True, separators=(",", ":"))
+            if original.endswith(b"\n"):
+                text += "\n"
+            plan[path] = (original, text.encode())
+            setups.append(path)
+    changed_records = []
+    for record in records:
+        updated = dict(
+            record,
+            retained_profiles=[
+                dict(item, **release) for item in record["retained_profiles"]
+            ],
+            **release,
+        )
+        if updated == record:
+            continue
+        validate_codex_record(updated, record["codex_home"])
+        path = codex_path(record["codex_home"])
+        text = json.dumps(updated, sort_keys=True) + "\n"
+        plan[path] = (path.read_bytes(), text.encode())
+        changed_records.append(path)
+    return plan, setups, changed_records
+
+
+def rebind_check(current, setups):
+    """Check every changed setup with the new client and the production readers."""
+    for path in setups:
+        value = read(path)
+        result = subprocess.run(
+            [
+                value.get("python") or sys.executable,
+                str(Path(value["bundle"]) / "bin/obsidian-mcp-native"),
+                "profile-status",
+                "--home",
+                str(path.parent),
+            ],
+            capture_output=True,
+            check=False,
+            timeout=30,
+        )
+        if result.returncode:
+            raise OwnershipError("the new client rejected " + str(path.parent))
+    claude = set(current["profiles"].values())
+    if current.get("default_profile"):
+        claude.add(current["default_profile"])
+    for parent in sorted(claude):
+        public_command(parent, "drain-status")
+    for record in codex_inventory():
+        binding = {key: record[key] for key in CODEX_BINDING_KEYS}
+        codex_capabilities(binding)
+        codex_profile(binding)
+
+
+def rebind(args):
+    """Move every live setup to another installed client without draining records."""
+    if not args.bundle or not args.release_sha256:
+        raise OwnershipError("rebind requires --bundle and --release-sha256")
+    bundle = str(canonical_path(args.bundle, strict=True))
+    metadata = codex_verify(
+        dict(bundle=bundle, externalReleaseSha256=args.release_sha256)
+    )
+    release = dict(
+        bundle=bundle,
+        externalReleaseSha256=args.release_sha256,
+        releaseId=metadata["releaseId"],
+    )
+    with admission(exclusive=True):
+        current = ownership()
+        if current["phase"] != "stable":
+            raise OwnershipError("a handoff is draining; run resume before rebind")
+        plan, setups, records = rebind_plan(current, release)
+        result = dict(
+            releaseId=release["releaseId"],
+            setups=len(setups),
+            codexRecords=len(records),
+        )
+        if not plan:
+            return dict(result, status="unchanged")
+        if not args.apply:
+            return dict(result, status="preview")
+        backup = directory(state_path() / "rebind-backups" / str(time.time_ns()))
+        manifest = {}
+        for index, (path, (original, _)) in enumerate(plan.items()):
+            name = str(index) + ".orig"
+            replace_bytes(backup / name, original)
+            manifest[name] = str(path)
+        write(backup / "manifest.json", manifest)
+        try:
+            for path, (_, updated) in plan.items():
+                replace_bytes(path, updated)
+            rebind_check(current, setups)
+        except BaseException as error:
+            for path, (original, _) in plan.items():
+                replace_bytes(path, original)
+            if not isinstance(error, Exception):
+                raise
+            reason = (
+                str(error)
+                if isinstance(error, OwnershipError)
+                else type(error).__name__
+            )
+            raise OwnershipError(
+                "rebind failed and every file was restored: " + reason
+            ) from error
+        return dict(result, status="rebound", backup=str(backup))
+
+
 def check_exclusion(current, cwd):
     if not current.get("excluded_projects"):
         return
@@ -2547,6 +2695,7 @@ def main():
             "inspect-legacy",
             "handoff",
             "resume",
+            "rebind",
             "record-commit",
             "resolve-legacy",
             "reflog",
@@ -2568,6 +2717,9 @@ def main():
     parser.add_argument("--evidence")
     parser.add_argument("--evidence-sha256")
     parser.add_argument("--reason")
+    parser.add_argument("--bundle")
+    parser.add_argument("--release-sha256")
+    parser.add_argument("--apply", action="store_true")
     args, command = parser.parse_known_args()
     if command[:1] == ["--"]:
         command = command[1:]
@@ -2595,6 +2747,8 @@ def main():
         return route(args.event, args.script, command)
     if args.operation == "resume":
         result = resume()
+    elif args.operation == "rebind":
+        result = rebind(args)
     elif args.operation == "resolve-legacy":
         result = resolve_legacy(args)
     elif args.operation == "handoff":
