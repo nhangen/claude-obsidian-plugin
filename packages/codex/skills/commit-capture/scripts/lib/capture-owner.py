@@ -1109,6 +1109,192 @@ def resume():
         return current
 
 
+def replace_bytes(path, data):
+    descriptor, temporary = tempfile.mkstemp(dir=path.parent)
+    try:
+        with os.fdopen(descriptor, "wb") as stream:
+            stream.write(data)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+        descriptor = os.open(path.parent, os.O_RDONLY)
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+    finally:
+        Path(temporary).unlink(missing_ok=True)
+
+
+def rebind_plan(current, release):
+    """Return {path: (original bytes, new bytes)} for every live setup and record."""
+    plan = {}
+    records = codex_inventory()
+    parents = set(current["profiles"].values())
+    if current.get("default_profile"):
+        parents.add(current["default_profile"])
+    parents.update(
+        item["profile"] for record in records for item in record["retained_profiles"]
+    )
+    setups = []
+    for parent in sorted(parents):
+        home = Path(parent)
+        if not existing_directory(home):
+            raise OwnershipError("capture setup missing: " + parent)
+        for path in [home / "capture-profile.json"] + sorted(
+            home.glob("workspaces/*/capture-profile.json")
+        ):
+            value = read(path)
+            if not isinstance(value, dict) or "bundle" not in value:
+                raise OwnershipError("unreadable capture setup: " + str(path))
+            updated = dict(
+                value,
+                bundle=release["bundle"],
+                releaseSha256=release["externalReleaseSha256"],
+                releaseId=release["releaseId"],
+            )
+            if updated == value:
+                continue
+            original = path.read_bytes()
+            text = json.dumps(updated, sort_keys=True, separators=(",", ":"))
+            if original.endswith(b"\n"):
+                text += "\n"
+            plan[path] = (original, text.encode())
+            setups.append(path)
+    changed_records = []
+    for record in records:
+        retained = []
+        for item in record["retained_profiles"]:
+            if dict(item, **release) not in retained:
+                retained.append(dict(item, **release))
+        updated = dict(record, retained_profiles=retained, **release)
+        if updated == record:
+            continue
+        validate_codex_record(updated, record["codex_home"])
+        path = codex_path(record["codex_home"])
+        text = json.dumps(updated, sort_keys=True) + "\n"
+        plan[path] = (path.read_bytes(), text.encode())
+        changed_records.append(path)
+    return plan, setups, changed_records
+
+
+def rebind_check(current, setups, release):
+    """Check every changed setup with the new client and the production readers."""
+    for path in setups:
+        value = read(path)
+        try:
+            result = subprocess.run(
+                [
+                    value.get("python") or sys.executable,
+                    str(Path(value["bundle"]) / "bin/obsidian-mcp-native"),
+                    "profile-status",
+                    "--home",
+                    str(path.parent),
+                ],
+                capture_output=True,
+                check=False,
+                timeout=30,
+            )
+            status = None if result.returncode else decode_json(result.stdout)
+        except (OSError, ValueError, subprocess.SubprocessError) as error:
+            raise OwnershipError(
+                "could not check " + str(path.parent) + ": " + type(error).__name__
+            ) from error
+        if (
+            not isinstance(status, dict)
+            or status.get("status") != "validated"
+            or status.get("apiVersion") != 1
+            or status.get("release_id") != release["releaseId"]
+        ):
+            detail = result.stderr[-300:].decode(errors="replace").strip()
+            raise OwnershipError(
+                "the new client rejected "
+                + str(path.parent)
+                + (": " + detail if detail else "")
+            )
+    claude = set(current["profiles"].values())
+    if current.get("default_profile"):
+        claude.add(current["default_profile"])
+    for parent in sorted(claude):
+        public_command(parent, "drain-status")
+    for record in codex_inventory():
+        binding = {key: record[key] for key in CODEX_BINDING_KEYS}
+        codex_capabilities(binding)
+        codex_profile(binding)
+
+
+def rebind(args):
+    """Move every live setup to another installed client without draining records."""
+    if not args.bundle or not args.release_sha256:
+        raise OwnershipError("rebind requires --bundle and --release-sha256")
+    bundle = str(canonical_path(args.bundle, strict=True))
+    metadata = codex_verify(
+        dict(bundle=bundle, externalReleaseSha256=args.release_sha256)
+    )
+    release = dict(
+        bundle=bundle,
+        externalReleaseSha256=args.release_sha256,
+        releaseId=metadata["releaseId"],
+    )
+    with admission(exclusive=args.apply):
+        current = ownership()
+        if current["phase"] != "stable":
+            raise OwnershipError("a handoff is draining; run resume before rebind")
+        if any(record["phase"] != "stable" for record in codex_inventory()):
+            raise OwnershipError(
+                "a Codex activation is draining; finish it before rebind"
+            )
+        plan, setups, records = rebind_plan(current, release)
+        result = dict(
+            releaseId=release["releaseId"],
+            setups=len(setups),
+            codexRecords=len(records),
+        )
+        if not plan:
+            return dict(result, status="unchanged")
+        if not args.apply:
+            return dict(result, status="preview")
+        backup = directory(state_path() / "rebind-backups" / str(time.time_ns()))
+        manifest = {}
+        for index, (path, (original, _)) in enumerate(plan.items()):
+            name = str(index) + ".orig"
+            replace_bytes(backup / name, original)
+            manifest[name] = str(path)
+        write(backup / "manifest.json", manifest)
+        try:
+            for path, (_, updated) in plan.items():
+                replace_bytes(path, updated)
+            rebind_check(current, setups, release)
+        except BaseException as error:
+            stuck = []
+            for path, (original, _) in plan.items():
+                try:
+                    replace_bytes(path, original)
+                except OSError as failure:
+                    stuck.append(str(path) + " (" + type(failure).__name__ + ")")
+            if not stuck and not isinstance(error, Exception):
+                raise
+            reason = (
+                str(error)
+                if isinstance(error, OwnershipError)
+                else type(error).__name__
+            )
+            outcome = (
+                "not restored: " + ", ".join(stuck)
+                if stuck
+                else "every file was restored"
+            )
+            raise OwnershipError(
+                "rebind failed and "
+                + outcome
+                + "; originals in "
+                + str(backup)
+                + ": "
+                + reason
+            ) from error
+        return dict(result, status="rebound", backup=str(backup))
+
+
 def check_exclusion(current, cwd):
     if not current.get("excluded_projects"):
         return
@@ -2547,6 +2733,7 @@ def main():
             "inspect-legacy",
             "handoff",
             "resume",
+            "rebind",
             "record-commit",
             "resolve-legacy",
             "reflog",
@@ -2568,6 +2755,9 @@ def main():
     parser.add_argument("--evidence")
     parser.add_argument("--evidence-sha256")
     parser.add_argument("--reason")
+    parser.add_argument("--bundle")
+    parser.add_argument("--release-sha256")
+    parser.add_argument("--apply", action="store_true")
     args, command = parser.parse_known_args()
     if command[:1] == ["--"]:
         command = command[1:]
@@ -2595,6 +2785,8 @@ def main():
         return route(args.event, args.script, command)
     if args.operation == "resume":
         result = resume()
+    elif args.operation == "rebind":
+        result = rebind(args)
     elif args.operation == "resolve-legacy":
         result = resolve_legacy(args)
     elif args.operation == "handoff":

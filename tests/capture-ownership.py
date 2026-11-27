@@ -1,3 +1,4 @@
+import argparse
 import fcntl
 import hashlib
 import json
@@ -2211,6 +2212,366 @@ class OwnershipTests(unittest.TestCase):
                 json.loads(result.stdout)["hookSpecificOutput"]["permissionDecision"],
                 "deny",
             )
+
+
+class RebindTests(unittest.TestCase):
+    """rebind moves every live setup to another client release, or changes nothing."""
+
+    NEW_ID = "2" * 64
+    NEW_SHA = "3" * 64
+    FIELDS = {"bundle", "releaseSha256", "releaseId"}
+
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory(prefix="capture-rebind-")
+        self.addCleanup(temporary.cleanup)
+        self.case = Path(temporary.name).resolve()
+        patch = mock.patch.dict(
+            os.environ,
+            {"HOME": str(self.case / "home"), "XDG_STATE_HOME": str(self.case / "state")},
+        )
+        patch.start()
+        self.addCleanup(patch.stop)
+        os.environ.pop("OBSIDIAN_CAPTURE_LEASE_FD", None)
+        self.old = self.bundle("old")
+        self.new = self.bundle("new")
+
+    def bundle(self, name):
+        path = self.case / "releases" / name
+        (path / "bin").mkdir(parents=True)
+        capabilities = dict(
+            apiVersion=1,
+            release_id=self.NEW_ID,
+            hosts=["claude-plugin", "codex"],
+            captureScopes={"claude-plugin": ["project", "user"], "codex": ["user"]},
+            attachedCaptureScopes={"codex": ["user"]},
+            userWorkspaceModes={"codex": ["git", "directory"]},
+            promptIdentities={"codex": "native-turn-id"},
+            projectModes={"claude-plugin": ["git", "directory"]},
+            operations=["attach", "profile-status", "drain-status", "hook",
+                        "prepare", "retry", "request"],
+        )
+        # A setup directory holding "reject" fails validation under this client.
+        (path / "bin/obsidian-mcp-native").write_text(
+            "import json,sys,pathlib\n"
+            "if sys.argv[1] == 'capabilities':\n"
+            " print(" + repr(json.dumps(capabilities)) + ")\n"
+            "else:\n"
+            " home=pathlib.Path(sys.argv[sys.argv.index('--home')+1])\n"
+            " if (home/'reject').exists(): sys.exit('bad folder setting')\n"
+            " d=json.loads((home/'capture-profile.json').read_text())\n"
+            # "stale": exits 0 while still reporting the release it replaced.
+            " rid='1'*64 if (home/'stale').exists() else d['releaseId']\n"
+            " print(json.dumps(dict(status='validated',apiVersion=1,release_id=rid)))\n"
+        )
+        return path
+
+    def profile(self, home, **extra):
+        home.mkdir(parents=True, mode=0o700)
+        value = dict(
+            schemaVersion=1,
+            host="claude-plugin",
+            scope="user",
+            active=True,
+            bundle=str(self.old),
+            releaseSha256="a" * 64,
+            releaseId="1" * 64,
+            python=os.path.realpath(sys.executable),
+            folder="Projects",
+        )
+        value.update(extra)
+        path = home / "capture-profile.json"
+        path.write_text(json.dumps(value, sort_keys=True, separators=(",", ":")))
+        path.chmod(0o600)
+        return path
+
+    def install(self, module):
+        parent = self.case / "claude"
+        files = [
+            self.profile(parent),
+            self.profile(parent / "workspaces/w1", parentHome=str(parent)),
+        ]
+        state = parent / "workspaces/w1/capture-state/s.json"
+        state.parent.mkdir()
+        state.write_text('{"disposition":"pending"}')
+        codex = self.case / "codex"
+        files.append(self.profile(codex, host="codex", profileMode="attached", files={}))
+        base = module["state_path"]()
+        module["write"](
+            base / "owner.json",
+            dict(schema=1, owner="mcp", phase="stable", generation=3,
+                 profiles={}, default_profile=str(parent)),
+        )
+        home = str(self.case / "codex-home")
+        binding = dict(
+            profile=str(codex), bundle=str(self.old), externalReleaseSha256="a" * 64,
+            releaseId="1" * 64, python=os.path.realpath(sys.executable),
+        )
+        record = module["codex_path"](home)
+        module["directory"](record.parent)
+        module["write"](
+            record,
+            dict(binding, schema=1, host="codex", codex_home=home, owner="mcp",
+                 delivery="plugin", phase="stable", generation=1,
+                 retained_profiles=[dict(binding)]),
+        )
+        return files, record, state
+
+    def load(self, owner):
+        module = runpy.run_path(str(owner), run_name="rebind_test")
+        # Release authentication has its own tests; these cover what rebind writes.
+        module["rebind"].__globals__["codex_verify"] = lambda binding: {
+            "releaseId": self.NEW_ID
+        }
+        return module
+
+    def run_rebind(self, module, apply):
+        return module["rebind"](
+            argparse.Namespace(bundle=str(self.new), release_sha256=self.NEW_SHA, apply=apply)
+        )
+
+    def snapshot(self, paths):
+        return {str(p): p.read_bytes() for p in paths}
+
+    def test_preview_reports_the_setups_and_writes_nothing(self):
+        module = self.load(OWNER)
+        files, record, state = self.install(module)
+        before = self.snapshot([*files, record, state])
+        result = self.run_rebind(module, apply=False)
+        self.assertEqual(
+            (result["status"], result["setups"], result["codexRecords"]),
+            ("preview", 3, 1),
+        )
+        self.assertEqual(self.snapshot([*files, record, state]), before)
+
+    def test_apply_changes_only_release_fields_and_keeps_records(self):
+        for owner in OWNERS:
+            with self.subTest(owner=owner):
+                self.setUp()
+                module = self.load(owner)
+                files, record, state = self.install(module)
+                originals = {p: json.loads(p.read_text()) for p in files}
+                unfinished = state.read_bytes()
+                result = self.run_rebind(module, apply=True)
+                self.assertEqual((result["status"], result["setups"]), ("rebound", 3))
+                for path in files:
+                    value = json.loads(path.read_text())
+                    changed = {k for k in value if value[k] != originals[path].get(k)}
+                    self.assertEqual(changed, self.FIELDS)
+                    self.assertEqual(
+                        (value["bundle"], value["releaseSha256"], value["releaseId"]),
+                        (str(self.new), self.NEW_SHA, self.NEW_ID),
+                    )
+                self.assertEqual(state.read_bytes(), unfinished)
+                saved = sorted(
+                    p.read_text() for p in Path(result["backup"]).glob("*.orig")
+                )
+                self.assertEqual(len(saved), 4)
+                backup = Path(result["backup"])
+                manifest = json.loads((backup / "manifest.json").read_text())
+                for name, target in manifest.items():
+                    if Path(target) in originals:
+                        self.assertEqual(
+                            json.loads((backup / name).read_text()),
+                            originals[Path(target)],
+                        )
+                self.assertEqual(
+                    set(manifest.values()), {str(p) for p in [*files, record]}
+                )
+                self.assertIn(
+                    json.dumps(originals[files[0]], sort_keys=True, separators=(",", ":")),
+                    saved,
+                )
+
+    def test_apply_leaves_the_codex_record_valid_for_the_production_reader(self):
+        module = self.load(OWNER)
+        self.install(module)
+        self.run_rebind(module, apply=True)
+        [value] = module["codex_inventory"]()
+        self.assertEqual(value["releaseId"], self.NEW_ID)
+        self.assertEqual(
+            [r["releaseId"] for r in value["retained_profiles"]], [self.NEW_ID]
+        )
+
+    def test_a_setup_the_new_client_rejects_restores_every_file(self):
+        module = self.load(OWNER)
+        files, record, state = self.install(module)
+        (files[1].parent / "reject").touch()
+        before = self.snapshot([*files, record, state])
+        with self.assertRaisesRegex(ValueError, "restored.*workspaces/w1"):
+            self.run_rebind(module, apply=True)
+        self.assertEqual(self.snapshot([*files, record, state]), before)
+
+    def test_an_unauthenticated_release_changes_nothing(self):
+        module = self.load(OWNER)
+        files, record, state = self.install(module)
+        before = self.snapshot([*files, record, state])
+
+        def refuse(binding):
+            raise module["OwnershipError"]("public bundle verification failed")
+
+        module["rebind"].__globals__["codex_verify"] = refuse
+        with self.assertRaisesRegex(ValueError, "verification failed"):
+            self.run_rebind(module, apply=True)
+        self.assertEqual(self.snapshot([*files, record, state]), before)
+
+    def test_rebind_is_refused_while_a_handoff_is_draining(self):
+        module = self.load(OWNER)
+        files, record, state = self.install(module)
+        path = module["state_path"]() / "owner.json"
+        module["write"](path, dict(module["read"](path), phase="draining"))
+        before = self.snapshot([*files, record, state])
+        with self.assertRaisesRegex(ValueError, "resume"):
+            self.run_rebind(module, apply=True)
+        self.assertEqual(self.snapshot([*files, record, state]), before)
+
+    def assert_restored(self, module, files, record, state, pattern):
+        before = self.snapshot([*files, record, state])
+        with self.assertRaisesRegex(ValueError, pattern):
+            self.run_rebind(module, apply=True)
+        self.assertEqual(self.snapshot([*files, record, state]), before)
+
+    def edit_record(self, module, record, **changes):
+        module["write"](record, dict(module["read"](record), **changes))
+
+    def test_a_draining_codex_record_is_refused(self):
+        module = self.load(OWNER)
+        files, record, state = self.install(module)
+        self.edit_record(module, record, phase="draining")
+        self.assert_restored(module, files, record, state, "Codex.*draining")
+
+    def test_a_rejection_includes_the_client_reason(self):
+        module = self.load(OWNER)
+        files, record, state = self.install(module)
+        (files[1].parent / "reject").touch()
+        self.assert_restored(module, files, record, state, "bad folder setting")
+
+    def test_a_client_that_reports_another_release_is_rejected(self):
+        module = self.load(OWNER)
+        files, record, state = self.install(module)
+        (files[1].parent / "stale").touch()
+        self.assert_restored(module, files, record, state, "restored.*workspaces/w1")
+
+    def test_a_check_that_cannot_run_names_the_setup(self):
+        module = self.load(OWNER)
+        files, record, state = self.install(module)
+        value = json.loads(files[1].read_text())
+        files[1].write_text(json.dumps(dict(value, python=str(self.case / "none"))))
+        self.assert_restored(
+            module, files, record, state, "restored.*workspaces/w1.*FileNotFoundError"
+        )
+
+    def test_a_client_without_the_needed_capture_scope_is_rejected(self):
+        module = self.load(OWNER)
+        files, record, state = self.install(module)
+        executable = self.new / "bin/obsidian-mcp-native"
+        text = executable.read_text()
+        old = '"claude-plugin": ["project", "user"]'
+        self.assertIn(old, text)
+        executable.write_text(text.replace(old, '"claude-plugin": ["project"]'))
+        self.assert_restored(module, files, record, state, "restored.*user-scope capture")
+
+    def test_a_codex_reader_rejection_restores_every_file(self):
+        module = self.load(OWNER)
+        files, record, state = self.install(module)
+
+        def refuse(binding, deadline=None):
+            raise module["OwnershipError"]("codex reader refused")
+
+        module["rebind"].__globals__["codex_profile"] = refuse
+        self.assert_restored(module, files, record, state, "codex reader refused")
+
+    def test_an_interrupt_restores_every_file(self):
+        module = self.load(OWNER)
+        files, record, state = self.install(module)
+        before = self.snapshot([*files, record, state])
+
+        def interrupt(*args):
+            raise KeyboardInterrupt
+
+        module["rebind"].__globals__["rebind_check"] = interrupt
+        with self.assertRaises(KeyboardInterrupt):
+            self.run_rebind(module, apply=True)
+        self.assertEqual(self.snapshot([*files, record, state]), before)
+
+    def test_a_failed_restore_continues_and_reports_the_file_and_backup(self):
+        module = self.load(OWNER)
+        files, record, state = self.install(module)
+        before = self.snapshot([*files, record, state])
+        (files[1].parent / "reject").touch()
+        real = module["replace_bytes"]
+        stuck = files[0]
+
+        def fail_one_restore(path, data):
+            if path == stuck and data == before[str(stuck)]:
+                raise OSError("disk full")
+            real(path, data)
+
+        module["rebind"].__globals__["replace_bytes"] = fail_one_restore
+        with self.assertRaises(ValueError) as caught:
+            self.run_rebind(module, apply=True)
+        message = str(caught.exception)
+        self.assertIn("not restored: " + str(stuck), message)
+        self.assertIn("rebind-backups", message)
+        after = self.snapshot([*files, record, state])
+        self.assertEqual(
+            [path for path in before if after[path] != before[path]], [str(stuck)]
+        )
+
+    def test_replacing_a_file_syncs_its_directory(self):
+        module = self.load(OWNER)
+        synced = []
+        real = os.fsync
+
+        def record_sync(descriptor):
+            synced.append(stat.S_ISDIR(os.fstat(descriptor).st_mode))
+            real(descriptor)
+
+        with mock.patch.object(os, "fsync", record_sync):
+            module["replace_bytes"](self.case / "file", b"x")
+        self.assertEqual(synced, [False, True])
+
+    def test_preview_runs_beside_a_capture_but_apply_waits(self):
+        module = self.load(OWNER)
+        files, record, state = self.install(module)
+        with module["admission"]():
+            self.assertEqual(self.run_rebind(module, apply=False)["status"], "preview")
+            self.assert_restored(module, files, record, state, "admission busy")
+
+    def test_retained_bindings_that_become_identical_are_merged(self):
+        module = self.load(OWNER)
+        files, record, state = self.install(module)
+        retained = module["read"](record)["retained_profiles"]
+        self.edit_record(
+            module,
+            record,
+            retained_profiles=[dict(retained[0], releaseId="4" * 64), *retained],
+        )
+        self.run_rebind(module, apply=True)
+        [value] = module["codex_inventory"]()
+        self.assertEqual(len(value["retained_profiles"]), 1)
+
+    def test_a_missing_retained_profile_is_named_and_nothing_changes(self):
+        module = self.load(OWNER)
+        files, record, state = self.install(module)
+        retained = module["read"](record)["retained_profiles"]
+        gone = str(self.case / "gone")
+        self.edit_record(
+            module,
+            record,
+            retained_profiles=[*retained, dict(retained[0], profile=gone)],
+        )
+        self.assert_restored(
+            module, files, record, state, "capture setup missing: .*gone"
+        )
+
+    def test_both_shipped_copies_are_identical(self):
+        self.assertEqual(len({Path(owner).read_bytes() for owner in OWNERS}), 1)
+
+    def test_a_second_apply_reports_unchanged(self):
+        module = self.load(OWNER)
+        self.install(module)
+        self.run_rebind(module, apply=True)
+        self.assertEqual(self.run_rebind(module, apply=True)["status"], "unchanged")
 
 
 if __name__ == "__main__":
