@@ -197,8 +197,16 @@ python3 scripts/lib/capture-owner.py rebind --bundle <installed-release-director
 admission lock, saves the original files under
 `capture-ownership/rebind-backups/`, changes only the release fields, and checks
 each changed setup with the new client. If a check fails or the command is
-interrupted, it restores every file. If the process is killed outright, run the
-same command again to finish. It is refused while a handoff is `draining`.
+interrupted, it restores every file. If any file can't be restored, the error
+names it and the backup directory. Preview works while captures are running.
+`rebind` is refused while a handoff or a Codex activation is `draining`. Codex
+command tickets issued before a rebind are refused afterward.
+
+If the process is killed outright, run the same command again to finish. That
+run backs up only the files it still changes, so the original files are in the
+oldest `rebind-backups/` directory from the attempt
+([#299](https://github.com/nhangen/claude-obsidian-plugin/issues/299)).
+
 `rebind` checks that setups load, not that the new client accepts every saved
 record, and it does not check that an older client can read records the newer
 one writes.

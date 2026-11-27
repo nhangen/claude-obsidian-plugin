@@ -1117,6 +1117,11 @@ def replace_bytes(path, data):
             stream.flush()
             os.fsync(stream.fileno())
         os.replace(temporary, path)
+        descriptor = os.open(path.parent, os.O_RDONLY)
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
     finally:
         Path(temporary).unlink(missing_ok=True)
 
@@ -1134,7 +1139,8 @@ def rebind_plan(current, release):
     setups = []
     for parent in sorted(parents):
         home = Path(parent)
-        existing_directory(home)
+        if not existing_directory(home):
+            raise OwnershipError("capture setup missing: " + parent)
         for path in [home / "capture-profile.json"] + sorted(
             home.glob("workspaces/*/capture-profile.json")
         ):
@@ -1157,13 +1163,11 @@ def rebind_plan(current, release):
             setups.append(path)
     changed_records = []
     for record in records:
-        updated = dict(
-            record,
-            retained_profiles=[
-                dict(item, **release) for item in record["retained_profiles"]
-            ],
-            **release,
-        )
+        retained = []
+        for item in record["retained_profiles"]:
+            if dict(item, **release) not in retained:
+                retained.append(dict(item, **release))
+        updated = dict(record, retained_profiles=retained, **release)
         if updated == record:
             continue
         validate_codex_record(updated, record["codex_home"])
@@ -1174,24 +1178,40 @@ def rebind_plan(current, release):
     return plan, setups, changed_records
 
 
-def rebind_check(current, setups):
+def rebind_check(current, setups, release):
     """Check every changed setup with the new client and the production readers."""
     for path in setups:
         value = read(path)
-        result = subprocess.run(
-            [
-                value.get("python") or sys.executable,
-                str(Path(value["bundle"]) / "bin/obsidian-mcp-native"),
-                "profile-status",
-                "--home",
-                str(path.parent),
-            ],
-            capture_output=True,
-            check=False,
-            timeout=30,
-        )
-        if result.returncode:
-            raise OwnershipError("the new client rejected " + str(path.parent))
+        try:
+            result = subprocess.run(
+                [
+                    value.get("python") or sys.executable,
+                    str(Path(value["bundle"]) / "bin/obsidian-mcp-native"),
+                    "profile-status",
+                    "--home",
+                    str(path.parent),
+                ],
+                capture_output=True,
+                check=False,
+                timeout=30,
+            )
+            status = None if result.returncode else decode_json(result.stdout)
+        except (OSError, ValueError, subprocess.SubprocessError) as error:
+            raise OwnershipError(
+                "could not check " + str(path.parent) + ": " + type(error).__name__
+            ) from error
+        if (
+            not isinstance(status, dict)
+            or status.get("status") != "validated"
+            or status.get("apiVersion") != 1
+            or status.get("release_id") != release["releaseId"]
+        ):
+            detail = result.stderr[-300:].decode(errors="replace").strip()
+            raise OwnershipError(
+                "the new client rejected "
+                + str(path.parent)
+                + (": " + detail if detail else "")
+            )
     claude = set(current["profiles"].values())
     if current.get("default_profile"):
         claude.add(current["default_profile"])
@@ -1216,10 +1236,14 @@ def rebind(args):
         externalReleaseSha256=args.release_sha256,
         releaseId=metadata["releaseId"],
     )
-    with admission(exclusive=True):
+    with admission(exclusive=args.apply):
         current = ownership()
         if current["phase"] != "stable":
             raise OwnershipError("a handoff is draining; run resume before rebind")
+        if any(record["phase"] != "stable" for record in codex_inventory()):
+            raise OwnershipError(
+                "a Codex activation is draining; finish it before rebind"
+            )
         plan, setups, records = rebind_plan(current, release)
         result = dict(
             releaseId=release["releaseId"],
@@ -1240,19 +1264,33 @@ def rebind(args):
         try:
             for path, (_, updated) in plan.items():
                 replace_bytes(path, updated)
-            rebind_check(current, setups)
+            rebind_check(current, setups, release)
         except BaseException as error:
+            stuck = []
             for path, (original, _) in plan.items():
-                replace_bytes(path, original)
-            if not isinstance(error, Exception):
+                try:
+                    replace_bytes(path, original)
+                except OSError as failure:
+                    stuck.append(str(path) + " (" + type(failure).__name__ + ")")
+            if not stuck and not isinstance(error, Exception):
                 raise
             reason = (
                 str(error)
                 if isinstance(error, OwnershipError)
                 else type(error).__name__
             )
+            outcome = (
+                "not restored: " + ", ".join(stuck)
+                if stuck
+                else "every file was restored"
+            )
             raise OwnershipError(
-                "rebind failed and every file was restored: " + reason
+                "rebind failed and "
+                + outcome
+                + "; originals in "
+                + str(backup)
+                + ": "
+                + reason
             ) from error
         return dict(result, status="rebound", backup=str(backup))
 
