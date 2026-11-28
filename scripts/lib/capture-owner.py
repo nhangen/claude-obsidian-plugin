@@ -1461,7 +1461,9 @@ def add_commit(args):
                 "add-commit did not finish within "
                 + str(ADD_COMMIT_TIMEOUT)
                 + " seconds; run it again, which reports already_pending if the"
-                " commit was recorded"
+                " commit was recorded. If it reports PUBLICATION_AMBIGUOUS, the"
+                " stop left a .capture-* file in the setup's capture-state folder;"
+                " ask the user before removing it"
             ) from error
         except OSError as error:
             raise OwnershipError(

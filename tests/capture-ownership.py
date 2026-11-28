@@ -2853,6 +2853,7 @@ class AddCommitTests(unittest.TestCase):
         )
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("did not finish within 1 seconds", result.stderr)
+        self.assertIn("PUBLICATION_AMBIGUOUS", result.stderr)
 
     def test_add_commit_refused_while_draining_disabled_or_legacy(self):
         other = self.repository("other")
