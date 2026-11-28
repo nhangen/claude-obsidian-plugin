@@ -179,6 +179,35 @@ Release publication, installed-host execution, interrupted-write recovery,
 writer activation and client migration remain separate acceptance gates in
 [#254](https://github.com/nhangen/claude-obsidian-plugin/issues/254).
 
+#### Capture a commit from another repository
+
+A Claude session captures commits in its own project automatically. For a commit
+in another repository, hook guidance at session start and on each prompt prints
+this command with the setup and session filled in:
+
+```bash
+python3 scripts/lib/capture-owner.py add-commit --home <capture-setup> \
+  --session <session-key> --repo <repository-root> --commit <full-hash> \
+  [--path <vault-note.md>]
+```
+
+The agent that made the commit runs it, or a subagent reports the repository root
+and full hash to the main agent. The command returns the `daily_append`
+arguments; the agent adds context and saves from the session's project folder.
+
+Before it calls the client, the command holds the shared admission lock and
+refuses unless ownership is `mcp` and `stable` and the setup is registered. It
+also refuses a repository inside a folder excluded with `--exclude-project`,
+including a linked worktree outside that folder whose git directory is inside it.
+The client checks that a lock descriptor is open, which stops accidental direct
+calls; it isn't a security boundary against the agent. The command needs a client
+release that has `add-commit`, and hook guidance offers it only with such a
+client. Codex and directory-only setups don't offer it. Nothing detects these
+commits automatically.
+
+Before you move setups back to an older client, save or skip open entries. An
+older client doesn't read them.
+
 #### Move capture setups to a newer client
 
 A capture setup is tied to one installed client release. After installing a newer
