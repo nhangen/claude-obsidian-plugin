@@ -688,12 +688,12 @@ if : > "$INJ/$BAD_FILE" 2>/dev/null; then
   # as text — it just cannot survive as a *field*, which means its delimiters are
   # gone.
   first_field() {
-    printf '%s' "$1" | tr '|' '\n' | while IFS= read -r seg; do
+    while IFS= read -r seg; do
       seg="${seg#"${seg%%[![:space:]]*}"}"
       case "$seg" in
         "$2="*) printf '%s' "${seg#"$2"=}"; return 0 ;;
       esac
-    done
+    done <<< "${1//|/$'\n'}"
   }
   GOT="$(first_field "$POST_OUT" org_repo)"
   [ "${GOT% }" = "nhangen/injpath" ] || fail "a path steered the first org_repo field: '$GOT'"$'\n'"got: $POST_OUT"
