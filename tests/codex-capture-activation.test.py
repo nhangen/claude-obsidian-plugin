@@ -265,7 +265,7 @@ class ActivationTest(unittest.TestCase):
         self.activate()
         config = (self.home / "config.toml").read_bytes()
         output = self.event("UserPromptSubmit", prompt="Record meaningful work")
-        self.assertIn("native-turn", json.dumps(output))
+        self.assertIn("false obsidian-capture-skip", json.dumps(output))
         paths = self.states()
         self.assertEqual(len(paths), 1)
         path = paths[0]
@@ -643,9 +643,9 @@ print(json.dumps(results))
         prompt = self.event("UserPromptSubmit", prompt="Guarded fixture work")
         if not commit:
             text = prompt["hookSpecificOutput"]["additionalContext"]
-            return runtime, text.split("acknowledge explicitly with ", 1)[1].split(
-                " (or user_requested_no_capture)", 1
-            )[0]
+            command = self.resolve_skip_request(self.skip_request(text))
+            self.assertIsNotNone(command)
+            return runtime, command
         (self.project / "file.txt").write_text("Fixture work\n")
         subprocess.run(
             ["git", "-C", str(self.project), "add", "file.txt"],
@@ -743,6 +743,52 @@ print(json.dumps(results))
             ).strip(),
             "fixture",
         )
+
+    def test_compact_skip_receipt_round_trip(self):
+        self.activate()
+        output = self.event("UserPromptSubmit", prompt="Fixture no-op")
+        prompt = output["hookSpecificOutput"]["additionalContext"]
+        stop = self.event("Stop", stop_hook_active=False)
+        self.assertEqual(stop["decision"], "block")
+        self.assertTrue(stop["reason"].startswith("OBSIDIAN_MCP_CONTINUE:native-turn\n"))
+        for guidance in (prompt, stop["reason"]):
+            self.assertNotIn("--authorization", guidance)
+            self.assertNotIn(str(self.bundle), guidance)
+            self.assertNotIn(str(self.profile), guidance)
+            self.assertIn("obsidian_keeper_save", guidance)
+        request = self.skip_request(prompt)
+        self.assertEqual(request, self.skip_request(stop["reason"]))
+        self.assertNotEqual(self.run_emitted(request).returncode, 0)
+        before = self.states()[0].read_bytes()
+        self.assertIsNone(self.resolve_skip_request(request + " && true"))
+        for invalid_event in ({"agent_id": "child"}, {"turn_id": None}, {"tool_use_id": None}):
+            self.assertIsNone(self.resolve_skip_request(request, **invalid_event))
+        self.assertEqual(self.states()[0].read_bytes(), before)
+        command = self.resolve_skip_request(request)
+        self.assertIsNotNone(command)
+        self.assertEqual(self.states()[0].read_bytes(), before)
+        result = self.run_emitted(command)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout), {"status": "skipped_by_policy"})
+        self.assertEqual(self.event("Stop", stop_hook_active=True), {})
+        self.event("UserPromptSubmit", prompt="Next turn", turn_id="next-turn")
+        self.assertIsNone(self.resolve_skip_request(request))
+
+    def skip_request(self, guidance):
+        return guidance.split("acknowledge explicitly with ", 1)[1].split(
+            " (or user_requested_no_capture)", 1
+        )[0]
+
+    def resolve_skip_request(self, request, **overrides):
+        event = dict(
+            tool_name="Bash", tool_use_id="skip-receipt", tool_input={"command": request}
+        )
+        output = self.event("PreToolUse", **(event | overrides))
+        hook = output.get("hookSpecificOutput", {})
+        if "updatedInput" in hook:
+            self.assertEqual(hook["permissionDecision"], "allow")
+            return hook["updatedInput"]["command"]
+        return None
 
     def test_guarded_recovery_completes_with_stdin_producer_still_open(self):
         _, command = self.guarded_fixture()
@@ -2509,7 +2555,7 @@ sys.exit(function())
             timeout=30,
         )
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("hook-turn", result.stdout)
+        self.assertIn("false obsidian-capture-skip", result.stdout)
         self.assertFalse(marker.exists())
 
     def test_native_aliases_are_not_translated(self):
