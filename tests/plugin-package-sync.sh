@@ -35,18 +35,24 @@ second="$(version)"
 test "$second" = "$(next "$first")"
 sync --check
 
-printf '\n' >> scripts/lib/capture-owner.py
 printf '\n' >> packages/codex/hooks/hooks.json
 ! sync --check || exit 1
 sync
 third="$(version)"
 test "$third" = "$(next "$second")"
+sync --check
+
+printf '\n' >> scripts/lib/capture-owner.py
+! sync --check || exit 1
+sync
+fourth="$(version)"
+test "$fourth" = "$(next "$third")"
 cmp scripts/lib/capture-owner.py packages/codex/skills/commit-capture/scripts/lib/capture-owner.py
 sync --check
 
 printf '\n' >> packages/codex/skills/commit-capture/scripts/lib/capture-owner.py
 ! sync --check || exit 1
 sync
-test "$(version)" = "$third"
+test "$(version)" = "$fourth"
 cmp scripts/lib/capture-owner.py packages/codex/skills/commit-capture/scripts/lib/capture-owner.py
 sync --check
