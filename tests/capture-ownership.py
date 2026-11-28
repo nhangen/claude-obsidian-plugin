@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import runpy
 import stat
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -2730,13 +2731,37 @@ class AddCommitTests(unittest.TestCase):
         self.env["FAKE_EXIT"] = "64"
         self.assertEqual(self.add(other).returncode, 64)
 
-    def test_add_commit_accepts_a_workspace_setup_of_the_default(self):
+    def user_default(self):
         parent = self.profile(self.case / "user", None, scope="user")
-        child = self.profile(
-            parent / "workspaces/w1", self.project, parentHome=str(parent)
-        )
         self.owner_record(profiles={}, default_profile=str(parent))
+        return parent
+
+    def test_add_commit_accepts_a_workspace_setup_of_the_default(self):
+        parent = self.user_default()
+        child = self.profile(
+            parent / "workspaces" / ("c" * 64), self.project, parentHome=str(parent)
+        )
         self.assert_reached_client(self.add(self.repository("other"), home=child))
+
+    def test_add_commit_refuses_a_setup_that_only_names_a_registered_parent(self):
+        parent = self.user_default()
+        other = self.repository("other")
+        foreign = self.case / "foreign-bundle"
+        shutil.copytree(self.bundle, foreign)
+        for name, home, extra in (
+            ("outside the parent", self.case / "elsewhere" / ("c" * 64), {}),
+            ("not a workspace key", parent / "workspaces/w1", {}),
+            (
+                "another bundle",
+                parent / "workspaces" / ("d" * 64),
+                dict(bundle=str(foreign)),
+            ),
+        ):
+            with self.subTest(name=name):
+                child = self.profile(
+                    home, self.project, parentHome=str(parent), **extra
+                )
+                self.assert_never_ran(self.add(other, home=child), "not registered")
 
     def test_add_commit_refuses_excluded_root_subfolder_and_foreign_worktree(
         self,

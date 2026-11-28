@@ -1371,6 +1371,31 @@ def check_excluded_repository(current, repo):
                 )
 
 
+def setup_profile(home):
+    try:
+        return public_profile(home)
+    except (OSError, ValueError) as error:
+        raise OwnershipError(
+            "capture setup unreadable: " + str(home) + "; nothing captured"
+        ) from error
+
+
+def registered_setup(current, home):
+    """A registered setup, or a workspace setup that the client keeps under one."""
+    registered = {*current["profiles"].values(), current.get("default_profile")}
+    config = setup_profile(home)
+    if home in registered:
+        return True
+    parent = config.get("parentHome")
+    return (
+        isinstance(parent, str)
+        and parent in registered
+        and Path(home).parent == Path(parent) / "workspaces"
+        and re.fullmatch(r"[0-9a-f]{64}", Path(home).name) is not None
+        and config.get("bundle") == setup_profile(parent).get("bundle")
+    )
+
+
 def add_commit(args):
     for name in ("home", "session", "repo", "commit"):
         if not getattr(args, name):
@@ -1384,13 +1409,7 @@ def add_commit(args):
                 + "/"
                 + current["phase"]
             )
-        registered = set(current["profiles"].values())
-        registered.add(current.get("default_profile"))
-        config = public_profile(args.home)
-        if (
-            args.home not in registered
-            and config.get("parentHome") not in registered - {None}
-        ):
+        if not registered_setup(current, args.home):
             raise OwnershipError("capture setup is not registered; nothing captured")
         check_excluded_repository(current, args.repo)
         command = [
