@@ -2587,19 +2587,26 @@ class AddCommitTests(unittest.TestCase):
         bundle = self.case / "bundle"
         (bundle / "bin").mkdir(parents=True)
         (bundle / "bin/obsidian-mcp-native").write_text(
-            "import json,os,sys,pathlib\n"
+            "import fcntl,json,os,sys,pathlib\n"
             "if sys.argv[1] == 'hook':\n"
             " pathlib.Path(" + repr(str(self.record)) + ").write_text(\n"
             "  os.environ.get('OBSIDIAN_CAPTURE_ADD_COMMIT', 'null'))\n"
             " print('{}'); sys.exit(0)\n"
             "fd = int(os.environ['OBSIDIAN_CAPTURE_LEASE_FD'])\n"
+            "held = False\n"
+            "try:\n"
+            " fcntl.flock(os.open(os.environ['LOCK_PATH'], os.O_RDWR),\n"
+            "  fcntl.LOCK_EX | fcntl.LOCK_NB)\n"
+            "except BlockingIOError:\n"
+            " held = True\n"
             "pathlib.Path(" + repr(str(self.record)) + ").write_text(json.dumps(\n"
-            " dict(argv=sys.argv[1:], inode=os.fstat(fd).st_ino,\n"
+            " dict(argv=sys.argv[1:], inode=os.fstat(fd).st_ino, held=held,\n"
             "      git_dir=os.environ.get('GIT_DIR'))))\n"
             "print('{\"status\":\"pending\"}')\n"
             "sys.exit(int(os.environ.get('FAKE_EXIT', '0')))\n"
         )
         self.bundle = bundle
+        self.env["LOCK_PATH"] = str(self.state / "admission.lock")
         self.project = self.repository("project")
         self.home = self.profile(self.case / "parent", self.project)
         self.owner_record()
@@ -2719,6 +2726,7 @@ class AddCommitTests(unittest.TestCase):
                     ran["inode"], (self.state / "admission.lock").stat().st_ino
                 )
                 self.assertIsNone(ran["git_dir"])
+                self.assertTrue(ran["held"], "the lock must be held while it runs")
         self.env["FAKE_EXIT"] = "64"
         self.assertEqual(self.add(other).returncode, 64)
 
@@ -2730,7 +2738,7 @@ class AddCommitTests(unittest.TestCase):
         self.owner_record(profiles={}, default_profile=str(parent))
         self.assert_reached_client(self.add(self.repository("other"), home=child))
 
-    def test_add_commit_refuses_excluded_root_subfolder_case_variant_and_foreign_worktree(
+    def test_add_commit_refuses_excluded_root_subfolder_and_foreign_worktree(
         self,
     ):
         private = self.repository("Private")
@@ -2740,20 +2748,30 @@ class AddCommitTests(unittest.TestCase):
         (private / "sub").mkdir()
         self.owner_record(excluded_projects=[str(private)])
         cases = [private, private / "sub", nested, outside]
-        variant = self.case / "private"
-        if variant.exists() and os.path.samefile(variant, private):
-            cases.append(variant)
         for repo in cases:
             with self.subTest(repo=repo):
                 self.assert_never_ran(self.add(repo), "excluded")
         self.assert_reached_client(self.add(self.repository("Private-sibling")))
 
-    def test_add_commit_excludes_a_listed_folder_that_no_longer_exists(self):
-        gone = self.case / "gone"
-        other = self.repository("other")
-        self.git(other, "worktree", "add", "-q", "--detach", str(gone / "tree"))
-        self.owner_record(excluded_projects=[str(gone)])
-        self.assert_never_ran(self.add(gone / "tree"), "excluded")
+    def test_add_commit_matches_an_exclusion_typed_in_another_case(self):
+        private = self.repository("Private")
+        typed = self.case / "private"
+        if not (typed.exists() and os.path.samefile(typed, private)):
+            self.skipTest("needs a case-insensitive filesystem")
+        self.owner_record(excluded_projects=[str(typed)])
+        self.assert_never_ran(self.add(private), "excluded")
+
+    def test_add_commit_ignores_git_variables_when_checking_exclusions(self):
+        private = self.repository("Private")
+        allowed = self.repository("allowed")
+        self.owner_record(excluded_projects=[str(private)])
+        self.env["GIT_DIR"] = str(allowed / ".git")
+        self.env["GIT_WORK_TREE"] = str(allowed)
+        self.assert_never_ran(self.add(private), "excluded")
+
+    def test_add_commit_with_a_deleted_excluded_folder_still_allows_others(self):
+        self.owner_record(excluded_projects=[str(self.case / "gone")])
+        self.assert_reached_client(self.add(self.repository("other")))
 
     def test_add_commit_refused_while_draining_disabled_or_legacy(self):
         other = self.repository("other")
@@ -2772,6 +2790,8 @@ class AddCommitTests(unittest.TestCase):
             self.case / "stray", self.project, parentHome=str(self.case / "unknown")
         )
         self.assert_never_ran(self.add(other, home=stray), "not registered")
+        orphan = self.profile(self.case / "orphan", self.project)
+        self.assert_never_ran(self.add(other, home=orphan), "not registered")
 
 
 if __name__ == "__main__":
