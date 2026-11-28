@@ -2574,5 +2574,205 @@ class RebindTests(unittest.TestCase):
         self.assertEqual(self.run_rebind(module, apply=True)["status"], "unchanged")
 
 
+class AddCommitTests(unittest.TestCase):
+    """add-commit reaches the client only through ownership, exclusion, and the lease."""
+
+    setUp_owner = OwnershipTests.setUp
+    run_owner = OwnershipTests.run_owner
+    HASH = "a" * 40
+
+    def setUp(self):
+        self.setUp_owner()
+        self.record = self.case / "client-ran.json"
+        bundle = self.case / "bundle"
+        (bundle / "bin").mkdir(parents=True)
+        (bundle / "bin/obsidian-mcp-native").write_text(
+            "import json,os,sys,pathlib\n"
+            "if sys.argv[1] == 'hook':\n"
+            " pathlib.Path(" + repr(str(self.record)) + ").write_text(\n"
+            "  os.environ.get('OBSIDIAN_CAPTURE_ADD_COMMIT', 'null'))\n"
+            " print('{}'); sys.exit(0)\n"
+            "fd = int(os.environ['OBSIDIAN_CAPTURE_LEASE_FD'])\n"
+            "pathlib.Path(" + repr(str(self.record)) + ").write_text(json.dumps(\n"
+            " dict(argv=sys.argv[1:], inode=os.fstat(fd).st_ino,\n"
+            "      git_dir=os.environ.get('GIT_DIR'))))\n"
+            "print('{\"status\":\"pending\"}')\n"
+            "sys.exit(int(os.environ.get('FAKE_EXIT', '0')))\n"
+        )
+        self.bundle = bundle
+        self.project = self.repository("project")
+        self.home = self.profile(self.case / "parent", self.project)
+        self.owner_record()
+
+    def repository(self, name):
+        path = self.case / name
+        path.mkdir(parents=True)
+        self.git(path, "init", "-q")
+        self.git(path, "commit", "-q", "--allow-empty", "-m", "first")
+        return path
+
+    def git(self, path, *arguments):
+        subprocess.run(
+            ["git", "-C", str(path), *arguments],
+            env=self.env,
+            check=True,
+            capture_output=True,
+        )
+
+    def profile(self, home, project, **extra):
+        home.mkdir(parents=True, mode=0o700)
+        value = dict(
+            host="claude-plugin",
+            active=True,
+            scope="project",
+            project=None if project is None else str(project),
+            bundle=str(self.bundle),
+        )
+        value.update(extra)
+        path = home / "capture-profile.json"
+        path.write_text(json.dumps(value))
+        path.chmod(0o600)
+        return home
+
+    def owner_record(self, **changes):
+        for path in (self.base, self.state):
+            path.mkdir(parents=True, exist_ok=True)
+            path.chmod(0o700)
+        value = dict(
+            schema=1,
+            owner="mcp",
+            phase="stable",
+            generation=1,
+            profiles={str(self.project): str(self.home)},
+        )
+        value.update(changes)
+        path = self.state / "owner.json"
+        path.write_text(json.dumps(value))
+        path.chmod(0o600)
+
+    def add(self, repo, *extra, home=None, owner=OWNER):
+        return self.run_owner(
+            "add-commit",
+            "--home",
+            str(home or self.home),
+            "--session",
+            "b" * 64,
+            "--repo",
+            str(repo),
+            "--commit",
+            self.HASH,
+            *extra,
+            owner=owner,
+        )
+
+    def assert_reached_client(self, result):
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout), {"status": "pending"})
+        return json.loads(self.record.read_text())
+
+    def assert_never_ran(self, result, message):
+        self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+        self.assertIn(message, result.stderr)
+        self.assertFalse(self.record.exists(), "the client must not run")
+
+    def test_hook_passes_the_add_commit_prefix(self):
+        for owner in OWNERS:
+            with self.subTest(owner=owner):
+                result = self.run_owner(
+                    "route",
+                    "--event",
+                    "UserPromptSubmit",
+                    payload=json.dumps(dict(cwd=str(self.project))),
+                    owner=owner,
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(
+                    json.loads(self.record.read_text()),
+                    [sys.executable, str(owner), "add-commit"],
+                )
+
+    def test_add_commit_passes_the_lease_and_arguments_through(self):
+        other = self.repository("other")
+        self.env["GIT_DIR"] = str(self.project / ".git")
+        for owner in OWNERS:
+            with self.subTest(owner=owner):
+                ran = self.assert_reached_client(
+                    self.add(other, "--path", "Projects/Development/x.md", owner=owner)
+                )
+                self.assertEqual(
+                    ran["argv"],
+                    [
+                        "add-commit",
+                        "--home",
+                        str(self.home),
+                        "--session",
+                        "b" * 64,
+                        "--repo",
+                        str(other),
+                        "--commit",
+                        self.HASH,
+                        "--path",
+                        "Projects/Development/x.md",
+                    ],
+                )
+                self.assertEqual(
+                    ran["inode"], (self.state / "admission.lock").stat().st_ino
+                )
+                self.assertIsNone(ran["git_dir"])
+        self.env["FAKE_EXIT"] = "64"
+        self.assertEqual(self.add(other).returncode, 64)
+
+    def test_add_commit_accepts_a_workspace_setup_of_the_default(self):
+        parent = self.profile(self.case / "user", None, scope="user")
+        child = self.profile(
+            parent / "workspaces/w1", self.project, parentHome=str(parent)
+        )
+        self.owner_record(profiles={}, default_profile=str(parent))
+        self.assert_reached_client(self.add(self.repository("other"), home=child))
+
+    def test_add_commit_refuses_excluded_root_subfolder_case_variant_and_foreign_worktree(
+        self,
+    ):
+        private = self.repository("Private")
+        nested = self.repository("Private/inner")
+        outside = self.case / "outside-worktree"
+        self.git(private, "worktree", "add", "-q", "--detach", str(outside))
+        (private / "sub").mkdir()
+        self.owner_record(excluded_projects=[str(private)])
+        cases = [private, private / "sub", nested, outside]
+        variant = self.case / "private"
+        if variant.exists() and os.path.samefile(variant, private):
+            cases.append(variant)
+        for repo in cases:
+            with self.subTest(repo=repo):
+                self.assert_never_ran(self.add(repo), "excluded")
+        self.assert_reached_client(self.add(self.repository("Private-sibling")))
+
+    def test_add_commit_excludes_a_listed_folder_that_no_longer_exists(self):
+        gone = self.case / "gone"
+        other = self.repository("other")
+        self.git(other, "worktree", "add", "-q", "--detach", str(gone / "tree"))
+        self.owner_record(excluded_projects=[str(gone)])
+        self.assert_never_ran(self.add(gone / "tree"), "excluded")
+
+    def test_add_commit_refused_while_draining_disabled_or_legacy(self):
+        other = self.repository("other")
+        for changes in (
+            dict(phase="draining"),
+            dict(owner="disabled"),
+            dict(owner="legacy"),
+        ):
+            with self.subTest(changes=changes):
+                self.owner_record(**changes)
+                self.assert_never_ran(self.add(other), "writer owner is")
+
+    def test_add_commit_refuses_an_unregistered_home(self):
+        other = self.repository("other")
+        stray = self.profile(
+            self.case / "stray", self.project, parentHome=str(self.case / "unknown")
+        )
+        self.assert_never_ran(self.add(other, home=stray), "not registered")
+
+
 if __name__ == "__main__":
     unittest.main()

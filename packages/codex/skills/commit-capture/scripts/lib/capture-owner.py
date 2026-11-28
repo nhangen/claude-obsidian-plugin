@@ -493,7 +493,13 @@ def ordinary_capture_advisory(output, event, tool):
 
 
 def public_hook(profile, descriptor, value, event, deadline):
-    env = dict(os.environ, OBSIDIAN_CAPTURE_LEASE_FD=str(descriptor))
+    env = dict(
+        os.environ,
+        OBSIDIAN_CAPTURE_LEASE_FD=str(descriptor),
+        OBSIDIAN_CAPTURE_ADD_COMMIT=json.dumps(
+            [sys.executable, os.path.abspath(__file__), "add-commit"]
+        ),
+    )
     try:
         result = subprocess.run(
             public_command(profile, "hook", deadline),
@@ -1295,6 +1301,13 @@ def rebind(args):
         return dict(result, status="rebound", backup=str(backup))
 
 
+def excluded_path(excluded):
+    path = Path(excluded)
+    if not path.is_absolute() or str(canonical_path(path)) != excluded:
+        raise OwnershipError("invalid canonical capture exclusion")
+    return path
+
+
 def check_exclusion(current, cwd):
     if not current.get("excluded_projects"):
         return
@@ -1304,13 +1317,97 @@ def check_exclusion(current, cwd):
     if not directory.is_dir():
         raise OwnershipError("hook project identity unavailable")
     for excluded in current.get("excluded_projects", []):
-        path = Path(excluded)
-        if not path.is_absolute() or str(canonical_path(path)) != excluded:
-            raise OwnershipError("invalid canonical capture exclusion")
-        if directory.is_relative_to(path):
+        if directory.is_relative_to(excluded_path(excluded)):
             raise CaptureUnavailable(
                 "Obsidian capture excluded for this workspace; no write or legacy fallback"
             )
+
+
+def repository_environment():
+    """The environment without the variables that point git somewhere else."""
+    redirects = ("GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE")
+    return {k: v for k, v in os.environ.items() if k not in redirects}
+
+
+def check_excluded_repository(current, repo):
+    """Refuse a repository that is, or shares its git directory with, an excluded one."""
+    exclusions = [excluded_path(e) for e in current.get("excluded_projects", [])]
+    if not exclusions:
+        return
+    found = subprocess.run(
+        [
+            "git",
+            "-C",
+            repo,
+            "rev-parse",
+            "--path-format=absolute",
+            "--show-toplevel",
+            "--git-common-dir",
+        ],
+        capture_output=True,
+        text=True,
+        env=repository_environment(),
+        check=False,
+        timeout=5,
+    )
+    lines = found.stdout.splitlines()
+    if found.returncode or len(lines) != 2:
+        raise OwnershipError("repository identity unavailable; nothing captured")
+    # A linked worktree can sit outside the excluded folder; its git directory
+    # cannot.
+    for line in lines:
+        location = canonical_path(line)
+        for excluded in exclusions:
+            if excluded.exists():
+                matched = any(
+                    node.exists() and os.path.samefile(node, excluded)
+                    for node in (location, *location.parents)
+                )
+            else:
+                matched = location.is_relative_to(excluded)
+            if matched:
+                raise CaptureUnavailable(
+                    "Obsidian capture excluded for this repository; nothing captured"
+                )
+
+
+def add_commit(args):
+    for name in ("home", "session", "repo", "commit"):
+        if not getattr(args, name):
+            raise OwnershipError("add-commit requires --" + name)
+    with admission() as descriptor:
+        current = ownership()
+        if current["phase"] != "stable" or current["owner"] != "mcp":
+            raise OwnershipError(
+                "add-commit refused: writer owner is "
+                + current["owner"]
+                + "/"
+                + current["phase"]
+            )
+        registered = set(current["profiles"].values())
+        registered.add(current.get("default_profile"))
+        config = public_profile(args.home)
+        if (
+            args.home not in registered
+            and config.get("parentHome") not in registered - {None}
+        ):
+            raise OwnershipError("capture setup is not registered; nothing captured")
+        check_excluded_repository(current, args.repo)
+        command = [
+            *public_command(args.home, "add-commit"),
+            "--session",
+            args.session,
+            "--repo",
+            args.repo,
+            "--commit",
+            args.commit,
+        ]
+        if args.path:
+            command += ["--path", args.path]
+        env = dict(repository_environment(), OBSIDIAN_CAPTURE_LEASE_FD=str(descriptor))
+        return subprocess.run(
+            command, env=env, pass_fds=(descriptor,), check=False
+        ).returncode
 
 
 def capture_profile(current, cwd, deadline):
@@ -2737,6 +2834,7 @@ def main():
             "record-commit",
             "resolve-legacy",
             "reflog",
+            "add-commit",
         ),
     )
     parser.add_argument("--owner", choices=("legacy", "mcp", "disabled"))
@@ -2758,6 +2856,10 @@ def main():
     parser.add_argument("--bundle")
     parser.add_argument("--release-sha256")
     parser.add_argument("--apply", action="store_true")
+    parser.add_argument("--home")
+    parser.add_argument("--session")
+    parser.add_argument("--repo")
+    parser.add_argument("--path")
     args, command = parser.parse_known_args()
     if command[:1] == ["--"]:
         command = command[1:]
@@ -2769,6 +2871,8 @@ def main():
         result = inspect_legacy()
         print(json.dumps(result, sort_keys=True))
         return 0 if result["ready"] else 1
+    if args.operation == "add-commit":
+        return add_commit(args)
     if args.operation == "record-commit":
         commit_record(args)
         return 0
