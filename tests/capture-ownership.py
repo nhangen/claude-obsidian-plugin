@@ -2798,6 +2798,28 @@ class AddCommitTests(unittest.TestCase):
         self.owner_record(excluded_projects=[str(self.case / "gone")])
         self.assert_reached_client(self.add(self.repository("other")))
 
+    def test_add_commit_names_why_a_repository_cannot_be_checked(self):
+        self.owner_record(excluded_projects=[str(self.case / "gone")])
+        plain = self.case / "plain"
+        plain.mkdir()
+        self.assert_never_ran(self.add(plain), "repository identity unavailable")
+        self.assert_never_ran(self.add(plain), "not a git repository")
+
+    def test_add_commit_names_a_missing_git(self):
+        other = self.repository("other")
+        self.owner_record(excluded_projects=[str(self.case / "gone")])
+        empty = self.case / "no-tools"
+        empty.mkdir()
+        self.env["PATH"] = str(empty)
+        self.assert_never_ran(self.add(other), "git could not be run")
+
+    def test_add_commit_names_an_unreadable_setup(self):
+        bare = self.case / "bare"
+        bare.mkdir(mode=0o700)
+        self.assert_never_ran(
+            self.add(self.repository("other"), home=bare), "capture setup unreadable"
+        )
+
     def test_add_commit_refused_while_draining_disabled_or_legacy(self):
         other = self.repository("other")
         for changes in (

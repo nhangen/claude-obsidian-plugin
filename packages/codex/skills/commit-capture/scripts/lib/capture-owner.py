@@ -1334,37 +1334,52 @@ def check_excluded_repository(current, repo):
     exclusions = [excluded_path(e) for e in current.get("excluded_projects", [])]
     if not exclusions:
         return
-    found = subprocess.run(
-        [
-            "git",
-            "-C",
-            repo,
-            "rev-parse",
-            "--path-format=absolute",
-            "--show-toplevel",
-            "--git-common-dir",
-        ],
-        capture_output=True,
-        text=True,
-        env=repository_environment(),
-        check=False,
-        timeout=5,
-    )
+    try:
+        found = subprocess.run(
+            [
+                "git",
+                "-C",
+                repo,
+                "rev-parse",
+                "--path-format=absolute",
+                "--show-toplevel",
+                "--git-common-dir",
+            ],
+            capture_output=True,
+            text=True,
+            env=repository_environment(),
+            check=False,
+            timeout=5,
+        )
+    except subprocess.TimeoutExpired as error:
+        raise OwnershipError(
+            "git did not answer in time for --repo; nothing captured"
+        ) from error
+    except OSError as error:
+        raise OwnershipError(
+            "git could not be run for --repo; nothing captured"
+        ) from error
     lines = found.stdout.splitlines()
     if found.returncode or len(lines) != 2:
-        raise OwnershipError("repository identity unavailable; nothing captured")
+        detail = found.stderr.strip().splitlines()[:1]
+        raise OwnershipError(
+            ": ".join(["repository identity unavailable; nothing captured", *detail])
+        )
     # A linked worktree can sit outside the excluded folder; its git directory
     # cannot.
     for line in lines:
         location = canonical_path(line)
         for excluded in exclusions:
-            if excluded.exists():
-                matched = any(
+            try:
+                # Nothing git reports can sit inside a folder that is gone.
+                matched = excluded.exists() and any(
                     node.exists() and os.path.samefile(node, excluded)
                     for node in (location, *location.parents)
                 )
-            else:
-                matched = location.is_relative_to(excluded)
+            except OSError as error:
+                raise OwnershipError(
+                    "cannot compare --repo with an excluded folder; nothing captured"
+                ) from error
             if matched:
                 raise CaptureUnavailable(
                     "Obsidian capture excluded for this repository; nothing captured"
@@ -1412,21 +1427,34 @@ def add_commit(args):
         if not registered_setup(current, args.home):
             raise OwnershipError("capture setup is not registered; nothing captured")
         check_excluded_repository(current, args.repo)
-        command = [
-            *public_command(args.home, "add-commit"),
-            "--session",
-            args.session,
-            "--repo",
-            args.repo,
-            "--commit",
-            args.commit,
-        ]
+        try:
+            command = [
+                *public_command(args.home, "add-commit"),
+                "--session",
+                args.session,
+                "--repo",
+                args.repo,
+                "--commit",
+                args.commit,
+            ]
+        except (OSError, subprocess.SubprocessError) as error:
+            raise OwnershipError(
+                "capture client did not answer; nothing captured"
+            ) from error
         if args.path:
             command += ["--path", args.path]
         env = dict(repository_environment(), OBSIDIAN_CAPTURE_LEASE_FD=str(descriptor))
-        return subprocess.run(
-            command, env=env, pass_fds=(descriptor,), check=False
-        ).returncode
+        try:
+            return subprocess.run(
+                command,
+                env=env,
+                pass_fds=(descriptor,),
+                check=False,
+            ).returncode
+        except OSError as error:
+            raise OwnershipError(
+                "capture client could not be run; nothing captured"
+            ) from error
 
 
 def capture_profile(current, cwd, deadline):
