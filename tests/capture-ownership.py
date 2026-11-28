@@ -2820,6 +2820,40 @@ class AddCommitTests(unittest.TestCase):
             self.add(self.repository("other"), home=bare), "capture setup unreadable"
         )
 
+    def test_add_commit_stops_a_client_that_hangs(self):
+        other = self.repository("other")
+        client = self.bundle / "bin/obsidian-mcp-native"
+        client.write_text("import time\ntime.sleep(30)\n")
+        shortened = (
+            "import runpy,sys\n"
+            "module = runpy.run_path(sys.argv.pop(1))\n"
+            "module['add_commit'].__globals__['ADD_COMMIT_TIMEOUT'] = 1\n"
+            "sys.exit(module['main']())\n"
+        )
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                shortened,
+                str(OWNER),
+                "add-commit",
+                "--home",
+                str(self.home),
+                "--session",
+                "b" * 64,
+                "--repo",
+                str(other),
+                "--commit",
+                self.HASH,
+            ],
+            env=self.env,
+            capture_output=True,
+            text=True,
+            timeout=20,
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("did not finish within 1 seconds", result.stderr)
+
     def test_add_commit_refused_while_draining_disabled_or_legacy(self):
         other = self.repository("other")
         for changes in (

@@ -1301,6 +1301,10 @@ def rebind(args):
         return dict(result, status="rebound", backup=str(backup))
 
 
+# Bounds how long a hung client can keep the admission lock.
+ADD_COMMIT_TIMEOUT = 60
+
+
 def excluded_path(excluded):
     path = Path(excluded)
     if not path.is_absolute() or str(canonical_path(path)) != excluded:
@@ -1450,7 +1454,15 @@ def add_commit(args):
                 env=env,
                 pass_fds=(descriptor,),
                 check=False,
+                timeout=ADD_COMMIT_TIMEOUT,
             ).returncode
+        except subprocess.TimeoutExpired as error:
+            raise OwnershipError(
+                "add-commit did not finish within "
+                + str(ADD_COMMIT_TIMEOUT)
+                + " seconds; run it again, which reports already_pending if the"
+                " commit was recorded"
+            ) from error
         except OSError as error:
             raise OwnershipError(
                 "capture client could not be run; nothing captured"
