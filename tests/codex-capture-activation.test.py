@@ -761,6 +761,8 @@ print(json.dumps(results))
         self.assertNotEqual(self.run_emitted(request).returncode, 0)
         before = self.states()[0].read_bytes()
         self.assertIsNone(self.resolve_skip_request(request + " && true"))
+        for invalid_event in ({"agent_id": "child"}, {"turn_id": None}, {"tool_use_id": None}):
+            self.assertIsNone(self.resolve_skip_request(request, **invalid_event))
         self.assertEqual(self.states()[0].read_bytes(), before)
         command = self.resolve_skip_request(request)
         self.assertIsNotNone(command)
@@ -777,11 +779,11 @@ print(json.dumps(results))
             " (or user_requested_no_capture)", 1
         )[0]
 
-    def resolve_skip_request(self, request):
-        output = self.event(
-            "PreToolUse", tool_name="Bash", tool_use_id="skip-receipt",
-            tool_input={"command": request},
+    def resolve_skip_request(self, request, **overrides):
+        event = dict(
+            tool_name="Bash", tool_use_id="skip-receipt", tool_input={"command": request}
         )
+        output = self.event("PreToolUse", **(event | overrides))
         hook = output.get("hookSpecificOutput", {})
         if "updatedInput" in hook:
             self.assertEqual(hook["permissionDecision"], "allow")

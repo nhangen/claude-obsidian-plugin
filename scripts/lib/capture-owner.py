@@ -2250,10 +2250,17 @@ def codex_skip_receipt(token, options):
 
 def codex_resolve_skip(value, match, token, binding, descriptor, deadline):
     receipt, reason = match.groups()
-    session_id = value.get("session_id")
-    if not isinstance(session_id, str) or not 1 <= len(session_id) <= 200:
-        raise OwnershipError("invalid Codex skip session")
-    session = hashlib.sha256(session_id.encode()).hexdigest()
+    if value.get("agent_id"):
+        raise OwnershipError("subagent capture is unsupported")
+    for key in ("session_id", "turn_id", "tool_use_id"):
+        identifier = value.get(key)
+        if (
+            not isinstance(identifier, str)
+            or not 1 <= len(identifier) <= 200
+            or any(ord(char) < 32 for char in identifier)
+        ):
+            raise OwnershipError("invalid Codex skip event identity")
+    session = hashlib.sha256(value["session_id"].encode()).hexdigest()
     parent = Path(binding["profile"])
     record = read(parent / "bindings" / (session + ".json"))
     workspace = record.get("workspace") if isinstance(record, dict) else None
