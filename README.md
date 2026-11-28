@@ -467,6 +467,23 @@ codex plugin marketplace add nhangen/claude-obsidian-plugin
 codex plugin add obsidian@nhangen-codex-plugins
 ```
 
+The two marketplaces share one plugin version. CI generates and tests the package
+projection on PRs. On a successful push to `master`, it automatically syncs the
+shared helper copies and advances the marketplace version when tracked plugin
+sources change, including Claude hooks and package files. The Claude and Codex
+hook definitions remain host-specific.
+
+To pre-generate the same changes locally, stage new source files, then run
+`python3 scripts/sync-plugin-packages.py`. This updates repository files only.
+To pick up the result on a machine, refresh the marketplace and install the
+updated plugin with the Codex CLI, then verify it from a fresh chat.
+
+```bash
+codex plugin marketplace upgrade nhangen-codex-plugins
+codex plugin add obsidian@nhangen-codex-plugins
+```
+
+
 Start a new session and use the packaged `setup` skill for verified runtime and
 connection setup. Bundled stdio servers use canonical `obsidian` and
 `obsidian-write` names and an explicit user-wide nonsecret connection record;

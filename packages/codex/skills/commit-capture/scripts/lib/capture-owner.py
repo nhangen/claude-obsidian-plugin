@@ -2236,7 +2236,53 @@ def codex_executor_home(binding, options, cwd):
         raise OwnershipError("guarded native session does not belong to this workspace")
 
 
-def codex_guard_text(text, token, binding):
+# The literal fails if the capture hook does not rewrite it.
+CODEX_SKIP_REQUEST = re.compile(
+    r"false obsidian-capture-skip ([0-9a-f]{64}) --reason "
+    r"(no_meaningful_work|user_requested_no_capture)"
+)
+
+
+def codex_skip_receipt(token, options):
+    identities = [options[key] for key in ("home", "session", "turn")]
+    return hashlib.sha256(json.dumps([token, *identities]).encode()).hexdigest()
+
+
+def codex_resolve_skip(value, match, token, binding, descriptor, deadline):
+    receipt, reason = match.groups()
+    session_id = value.get("session_id")
+    if not isinstance(session_id, str) or not 1 <= len(session_id) <= 200:
+        raise OwnershipError("invalid Codex skip session")
+    session = hashlib.sha256(session_id.encode()).hexdigest()
+    parent = Path(binding["profile"])
+    record = read(parent / "bindings" / (session + ".json"))
+    workspace = record.get("workspace") if isinstance(record, dict) else None
+    if not isinstance(workspace, str) or not re.fullmatch(r"[0-9a-f]{64}", workspace):
+        raise OwnershipError("guarded native workspace unavailable")
+    home = str(parent / "workspaces" / workspace)
+    codex_executor_home(binding, {"home": home, "session": session}, value["cwd"])
+    state = codex_native(
+        binding, "status", "--home", home, "--session", session,
+        descriptor=descriptor, deadline=deadline,
+    )
+    turn = state.get("turn")
+    if state.get("session") != session or not isinstance(turn, str):
+        raise OwnershipError("Codex skip session unavailable; pending evidence retained")
+    words = ["skip", "--home", home, "--session", session, "--turn", turn,
+             "--reason", reason]
+    _, options = codex_parse_executor(words)
+    if receipt != codex_skip_receipt(token, options):
+        raise OwnershipError("stale Codex skip receipt; pending evidence retained")
+    return dict(hookSpecificOutput=dict(
+        hookEventName="PreToolUse",
+        permissionDecision="allow",
+        updatedInput=dict(
+            value["tool_input"], command=shlex.join([*codex_guard_prefix(token), *words])
+        ),
+    ))
+
+
+def codex_guard_text(text, token, binding, *, compact_skip=False):
     decoder = json.JSONDecoder(object_pairs_hook=unique_fields)
     opaque = []
     cursor = 0
@@ -2291,12 +2337,16 @@ def codex_guard_text(text, token, binding):
                 str(Path(binding["bundle"]) / "bin/obsidian-mcp-native"),
             ]:
                 raise OwnershipError("unrecognized native guidance launcher")
-            parsed, _ = codex_parse_executor(words[2:])
+            parsed, options = codex_parse_executor(words[2:])
             if parsed != operation:
                 raise OwnershipError("native guidance operation mismatch")
-            replacements.append(
-                (start, end, shlex.join([*codex_guard_prefix(token), *words[2:]]))
+            command = (
+                f"false obsidian-capture-skip {codex_skip_receipt(token, options)} "
+                "--reason no_meaningful_work"
+                if compact_skip and operation == "skip"
+                else shlex.join([*codex_guard_prefix(token), *words[2:]])
             )
+            replacements.append((start, end, command))
             position = end + len(end_marker)
     for marker, operation, ending in (
         (
@@ -2374,7 +2424,7 @@ def codex_guard_text(text, token, binding):
     return text
 
 
-def codex_guard_output(output, token, binding):
+def codex_guard_output(output, token, binding, *, compact_skip=False):
     if not isinstance(output, dict):
         return output
     output = dict(output)
@@ -2387,10 +2437,12 @@ def codex_guard_output(output, token, binding):
         "permissionDecisionReason",
     ):
         if isinstance(output.get(key), str):
-            output[key] = codex_guard_text(output[key], token, binding)
+            output[key] = codex_guard_text(
+                output[key], token, binding, compact_skip=compact_skip
+            )
     if isinstance(output.get("hookSpecificOutput"), dict):
         output["hookSpecificOutput"] = codex_guard_output(
-            output["hookSpecificOutput"], token, binding
+            output["hookSpecificOutput"], token, binding, compact_skip=compact_skip
         )
     if isinstance(output.get("wrapped"), str):
         words = shlex.split(output["wrapped"])
@@ -2741,6 +2793,15 @@ def codex_route(args, home, value):
         codex_capabilities(binding, deadline)
         codex_profile(binding, deadline)
         token = codex_authorization(home, record, current, value.get("cwd"))
+        tool_input = value.get("tool_input")
+        if (
+            args.event == "PreToolUse"
+            and value.get("tool_name") == "Bash"
+            and isinstance(tool_input, dict)
+            and isinstance(tool_input.get("command"), str)
+            and (skip := CODEX_SKIP_REQUEST.fullmatch(tool_input["command"]))
+        ):
+            return codex_resolve_skip(value, skip, token, binding, descriptor, deadline)
         value = codex_unwrap_executor(value, home, record, current)
         value["hook_event_name"] = args.event
         output = codex_native(
@@ -2768,7 +2829,7 @@ def codex_route(args, home, value):
             or specific.get("hookEventName") != args.event
         ):
             raise OwnershipError("invalid Codex hook output event")
-        output = codex_guard_output(output, token, binding)
+        output = codex_guard_output(output, token, binding, compact_skip=True)
         specific = output.get("hookSpecificOutput", {})
         if isinstance(specific.get("updatedInput"), dict):
             command = specific["updatedInput"].get("command")

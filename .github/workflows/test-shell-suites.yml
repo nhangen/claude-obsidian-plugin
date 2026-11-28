@@ -21,6 +21,9 @@ jobs:
           persist-credentials: false
           fetch-depth: 0
 
+      - name: Generate package projection before testing
+        run: python3 scripts/sync-plugin-packages.py
+
       - name: Check out the public capture runtime fixture source
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
@@ -48,3 +51,27 @@ jobs:
 
       - name: Run all shell and MCP suites
         run: bash tests/run-all.sh
+
+  sync-packages:
+    name: Publish synchronized marketplace packages
+    if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+    needs: bash-tests
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    concurrency:
+      group: obsidian-marketplace-sync
+    steps:
+      - name: Check out tested revision
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Publish generated package changes
+        run: |
+          python3 scripts/sync-plugin-packages.py
+          python3 scripts/sync-plugin-packages.py --check
+          if git diff --quiet && test -z "$(git ls-files --others --exclude-standard)"; then
+            exit 0
+          fi
+          git add -- .agents/plugins/obsidian-package-state.json .claude-plugin packages/codex packages/mcp-server/helpers
+          git -c user.name='github-actions[bot]' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' commit -m 'Sync marketplace packages'
+          git push origin HEAD:refs/heads/master
